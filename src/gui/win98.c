@@ -57,7 +57,15 @@ static long sys6(long n, long a, long b, long c, long d, long e, long f)
 
 #define PROT_READ  1
 #define PROT_WRITE 2
-#define MAP_SHARED 1
+#define MAP_SHARED    0x01
+#define MAP_PRIVATE   0x02
+#define MAP_ANONYMOUS 0x20
+
+/* 点 (px,py) が矩形の中にあるか */
+static int in_rect(long px, long py, long x, long y, long w, long h)
+{
+    return px >= x && px < x + w && py >= y && py < y + h;
+}
 
 struct timespec { long tv_sec; long tv_nsec; };
 
@@ -82,10 +90,15 @@ static void log_num(unsigned long v)
 }
 
 /* --- フレームバッファ ---------------------------------------------------- */
-static unsigned char *fb;
+/* 描画は全て裏バッファ (back) に対して行い、1 フレーム分描き終えてから
+ * まとめて画面へ転送する。直接描くとカーソルやウィンドウを動かすたびに
+ * ちらつくため。 */
+static unsigned char *fb;       /* mmap した /dev/fb0 */
+static unsigned char *back;     /* 裏バッファ (同じ pitch/bpp) */
 static unsigned long  fb_pitch;
 static unsigned long  fb_bytes_pp;
 static unsigned long  fb_w, fb_h;
+static unsigned long  fb_size;
 
 /* Windows 98 の標準的な配色 */
 #define C_DESKTOP   0x008080u   /* ティール */
@@ -104,8 +117,8 @@ static void put_px(long x, long y, unsigned int c)
 {
     if (x < 0 || y < 0 || (unsigned long)x >= fb_w || (unsigned long)y >= fb_h)
         return;
-    unsigned char *p = fb + (unsigned long)y * fb_pitch
-                          + (unsigned long)x * fb_bytes_pp;
+    unsigned char *p = back + (unsigned long)y * fb_pitch
+                            + (unsigned long)x * fb_bytes_pp;
     p[0] = (unsigned char)(c & 0xFF);         /* B */
     p[1] = (unsigned char)((c >> 8) & 0xFF);  /* G */
     p[2] = (unsigned char)((c >> 16) & 0xFF); /* R */
@@ -113,11 +126,43 @@ static void put_px(long x, long y, unsigned int c)
         p[3] = 0;
 }
 
+/* 32bpp のときは 1 行ぶんを 32bit 単位でまとめて埋める。
+ * 全画面を毎フレーム描き直すので、ここが遅いと目に見えて重くなる。 */
 static void fill(long x, long y, long w, long h, unsigned int c)
 {
-    for (long j = 0; j < h; j++)
-        for (long i = 0; i < w; i++)
-            put_px(x + i, y + j, c);
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (long)fb_w) w = (long)fb_w - x;
+    if (y + h > (long)fb_h) h = (long)fb_h - y;
+    if (w <= 0 || h <= 0) return;
+
+    if (fb_bytes_pp == 4) {
+        for (long j = 0; j < h; j++) {
+            unsigned int *p = (unsigned int *)(back + (unsigned long)(y + j) * fb_pitch)
+                              + x;
+            for (long i = 0; i < w; i++)
+                p[i] = c;
+        }
+    } else {
+        for (long j = 0; j < h; j++)
+            for (long i = 0; i < w; i++)
+                put_px(x + i, y + j, c);
+    }
+}
+
+/* 裏バッファを画面へ転送する */
+static void present(void)
+{
+    unsigned long n = fb_size;
+    if (fb_bytes_pp == 4 && (n & 3) == 0) {
+        unsigned int *d = (unsigned int *)fb;
+        unsigned int *s = (unsigned int *)back;
+        for (unsigned long i = 0; i < n / 4; i++)
+            d[i] = s[i];
+    } else {
+        for (unsigned long i = 0; i < n; i++)
+            fb[i] = back[i];
+    }
 }
 
 static void hline(long x, long y, long w, unsigned int c)
@@ -357,42 +402,70 @@ static const char *cursor_bits[] = {
 #define CUR_W 12
 #define CUR_H 19
 
-static unsigned int cur_save[CUR_H][CUR_W];
 static long cur_x = 200, cur_y = 200;
-static int  cur_drawn = 0;
 
-static unsigned int get_px(long x, long y)
+/* 毎フレーム全部描き直すので、下の絵を退避する必要はない。
+ * 最後にカーソルを描くだけでよい。 */
+static void draw_cursor(void)
 {
-    if (x < 0 || y < 0 || (unsigned long)x >= fb_w || (unsigned long)y >= fb_h)
-        return 0;
-    unsigned char *p = fb + (unsigned long)y * fb_pitch
-                          + (unsigned long)x * fb_bytes_pp;
-    return ((unsigned int)p[2] << 16) | ((unsigned int)p[1] << 8) | p[0];
-}
-
-static void cursor_hide(void)
-{
-    if (!cur_drawn) return;
-    for (int j = 0; j < CUR_H; j++)
-        for (int i = 0; i < CUR_W; i++)
-            put_px(cur_x + i, cur_y + j, cur_save[j][i]);
-    cur_drawn = 0;
-}
-
-static void cursor_show(void)
-{
-    if (cur_drawn) return;
-    for (int j = 0; j < CUR_H; j++)
-        for (int i = 0; i < CUR_W; i++)
-            cur_save[j][i] = get_px(cur_x + i, cur_y + j);
     for (int j = 0; j < CUR_H && cursor_bits[j]; j++) {
         const char *row = cursor_bits[j];
         for (int i = 0; i < CUR_W && row[i]; i++) {
-            if (row[i] == 'X') put_px(cur_x + i, cur_y + j, 0x000000u);
+            if (row[i] == 'X')      put_px(cur_x + i, cur_y + j, 0x000000u);
             else if (row[i] == '.') put_px(cur_x + i, cur_y + j, 0xFFFFFFu);
         }
     }
-    cur_drawn = 1;
+}
+
+/* --- デスクトップの状態 -------------------------------------------------- */
+static long win_x = 140, win_y = 60, win_w = 620, win_h = 400;
+static int  start_open = 0;
+
+#define MENU_W 168
+#define MENU_ITEM_H 22
+
+static const char *menu_items[] = {
+    "Programs", "Documents", "Settings", "Find", "Help", "Run...", "Shut Down",
+    0
+};
+
+static int menu_count(void)
+{
+    int n = 0;
+    while (menu_items[n]) n++;
+    return n;
+}
+
+static long menu_h(void) { return menu_count() * MENU_ITEM_H + 8; }
+static long menu_y(void) { return (long)fb_h - TASKBAR_H - menu_h(); }
+
+static void draw_start_menu(void)
+{
+    long x = 2, y = menu_y(), w = MENU_W, h = menu_h();
+
+    fill(x, y, w, h, C_FACE);
+    bevel(x, y, w, h, 1);
+
+    /* 左端の縦帯 (Win98 の "Windows 98" と書いてあるアレ) */
+    fill(x + 3, y + 3, 20, h - 6, C_TITLE1);
+    const char *side = "myOS";
+    long sy = y + h - 12;
+    for (int i = 0; side[i]; i++) {
+        draw_char(x + 9, sy, side[i], C_TITLETXT, 1);
+        sy -= FONT_H + 2;
+    }
+
+    long iy = y + 4;
+    for (int i = 0; menu_items[i]; i++) {
+        draw_text(x + 32, iy + (MENU_ITEM_H - FONT_H) / 2, menu_items[i],
+                  C_TEXT, 1);
+        /* Shut Down の上に区切り線 */
+        if (menu_items[i + 1] == 0) {
+            hline(x + 26, iy - 3, w - 32, C_SHADOW);
+            hline(x + 26, iy - 2, w - 32, C_LIGHT);
+        }
+        iy += MENU_ITEM_H;
+    }
 }
 
 /* --- デスクトップ全体 ---------------------------------------------------- */
@@ -404,15 +477,13 @@ static void draw_desktop(void)
     draw_icon(8, 92, "Recycle Bin", C_FACE);
     draw_icon(8, 164, "My Docs", C_FACE);
 
-    long wx = ICON_CELL_W + 40;
-    long ww = (long)fb_w - wx - 60;
-    if (ww > 620) ww = 620;
-    long wh = (long)fb_h - TASKBAR_H - 120;
-    if (wh > 400) wh = 400;
-    if (wh < 200) wh = 200;
-    draw_window(wx, 60, ww, wh, "myOS - Welcome");
+    draw_window(win_x, win_y, win_w, win_h, "myOS - Welcome");
 
     draw_taskbar();
+    if (start_open)
+        draw_start_menu();
+
+    draw_cursor();
 }
 
 /* --- 起動 ---------------------------------------------------------------- */
@@ -453,10 +524,12 @@ void _start(void)
     log_str("  size="); log_num(finfo.smem_len);
     log_str("\n");
 
-    long map = sys6(SYS_mmap, 0, (long)finfo.smem_len,
+    fb_size = finfo.smem_len;
+
+    long map = sys6(SYS_mmap, 0, (long)fb_size,
                     PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (map < 0 && map > -4096) {
-        log_str("[win98] ERROR: mmap failed\n");
+        log_str("[win98] ERROR: mmap of /dev/fb0 failed\n");
         for (;;) {
             struct timespec ts = { 3600, 0 };
             sys3(SYS_nanosleep, (long)&ts, 0, 0);
@@ -464,10 +537,31 @@ void _start(void)
     }
     fb = (unsigned char *)map;
 
-    draw_desktop();
+    /* 裏バッファは無名メモリを確保して使う */
+    long bmap = sys6(SYS_mmap, 0, (long)fb_size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (bmap < 0 && bmap > -4096) {
+        log_str("[win98] ERROR: back buffer mmap failed\n");
+        for (;;) {
+            struct timespec ts = { 3600, 0 };
+            sys3(SYS_nanosleep, (long)&ts, 0, 0);
+        }
+    }
+    back = (unsigned char *)bmap;
+
+    /* ウィンドウを画面の大きさに合わせる */
+    win_x = ICON_CELL_W + 40;
+    win_w = (long)fb_w - win_x - 60;
+    if (win_w > 620) win_w = 620;
+    win_h = (long)fb_h - TASKBAR_H - 120;
+    if (win_h > 400) win_h = 400;
+    if (win_h < 200) win_h = 200;
+
     cur_x = (long)fb_w / 2;
     cur_y = (long)fb_h / 2;
-    cursor_show();
+
+    draw_desktop();
+    present();
     log_str("[win98] desktop drawn\n");
 
     /* --- マウス --------------------------------------------------------- */
@@ -483,22 +577,64 @@ void _start(void)
     }
     log_str("[win98] reading /dev/input/mice\n");
 
+    int  prev_btn = 0;
+    int  dragging = 0;
+    long drag_dx = 0, drag_dy = 0;
+
     for (;;) {
         signed char pkt[3];
         long n = sys3(SYS_read, mfd, (long)pkt, 3);
         if (n != 3)
             continue;
 
-        long dx = pkt[1];
-        long dy = pkt[2];
+        int btn = pkt[0] & 1;           /* 左ボタン */
 
-        cursor_hide();
-        cur_x += dx;
-        cur_y -= dy;                    /* 画面は下向きが正なので反転 */
+        cur_x += pkt[1];
+        cur_y -= pkt[2];                /* 画面は下向きが正なので反転 */
         if (cur_x < 0) cur_x = 0;
         if (cur_y < 0) cur_y = 0;
         if ((unsigned long)cur_x > fb_w - 1) cur_x = (long)fb_w - 1;
         if ((unsigned long)cur_y > fb_h - 1) cur_y = (long)fb_h - 1;
-        cursor_show();
+
+        /* --- 押した瞬間の判定 --- */
+        if (btn && !prev_btn) {
+            long tb_y = (long)fb_h - TASKBAR_H;
+
+            if (in_rect(cur_x, cur_y, 3, tb_y + 4, 68, TASKBAR_H - 8)) {
+                /* スタートボタン */
+                start_open = !start_open;
+            } else if (start_open &&
+                       in_rect(cur_x, cur_y, 2, menu_y(), MENU_W, menu_h())) {
+                /* メニュー項目を選んだ (今は閉じるだけ) */
+                start_open = 0;
+            } else if (in_rect(cur_x, cur_y,
+                               win_x + 4, win_y + 4, win_w - 8, 20)) {
+                /* タイトルバーを掴んだ → ドラッグ開始 */
+                dragging = 1;
+                drag_dx = cur_x - win_x;
+                drag_dy = cur_y - win_y;
+                start_open = 0;
+            } else {
+                start_open = 0;
+            }
+        }
+        if (!btn)
+            dragging = 0;
+
+        if (dragging) {
+            win_x = cur_x - drag_dx;
+            win_y = cur_y - drag_dy;
+            /* 画面からはみ出しすぎないように留める */
+            if (win_x < -(win_w - 80)) win_x = -(win_w - 80);
+            if (win_y < 0) win_y = 0;
+            if (win_x > (long)fb_w - 80) win_x = (long)fb_w - 80;
+            if (win_y > (long)fb_h - TASKBAR_H - 24)
+                win_y = (long)fb_h - TASKBAR_H - 24;
+        }
+
+        prev_btn = btn;
+
+        draw_desktop();
+        present();
     }
 }

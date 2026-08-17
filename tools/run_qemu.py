@@ -246,8 +246,9 @@ def main() -> int:
     ap.add_argument("--serial", default="",
                     help="シリアル出力の保存先。Linux の起動ログを取るのに使う")
     ap.add_argument("--mouse", default="",
-                    help='マウスを動かす。"dx:dy" を ; 区切りで複数指定できる。'
-                         '例: "100:0;0:80"  (GUI のカーソル追従の確認用)')
+                    help='マウス操作。; 区切りで並べる。"dx:dy" で相対移動、'
+                         '"click" で左クリック、"wait" で少し待つ。'
+                         '例: "-475:369;click"  (スタートボタンを押す)')
     args = ap.parse_args()
 
     image = Path(args.image)
@@ -309,8 +310,20 @@ def main() -> int:
                 step = step.strip()
                 if not step:
                     continue
-                dx, _, dy = step.partition(":")
-                mon.cmd(f"mouse_move {int(dx)} {int(dy)}")
+                low = step.lower()
+                if low == "click":
+                    mon.cmd("mouse_button 1")
+                    time.sleep(0.15)
+                    mon.cmd("mouse_button 0")
+                elif low == "down":
+                    mon.cmd("mouse_button 1")
+                elif low == "up":
+                    mon.cmd("mouse_button 0")
+                elif low == "wait":
+                    time.sleep(0.5)
+                else:
+                    dx, _, dy = step.partition(":")
+                    mon.cmd(f"mouse_move {int(dx)} {int(dy)}")
                 time.sleep(0.15)
             time.sleep(args.post_wait)
 

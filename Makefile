@@ -38,7 +38,8 @@ BZIMAGE ?= $(KDIR)/linux-$(KVER)/arch/x86/boot/bzImage
 CMDLINE ?= console=tty0 console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 rdinit=/init
 
 .PHONY: all v2 run run-keys dump disasm clean font \
-        initramfs fake run-fake kernel linux run-linux run-gui
+        initramfs fake run-fake kernel linux run-linux \
+        run-gui run-gui-start run-gui-drag
 
 all:
 	$(PYTHON) tools/build_image.py
@@ -94,6 +95,20 @@ run-gui: linux
 		--qemu qemu-system-x86_64 --wait 40 \
 		--mouse="-200:0;0:150;-60:60" --post-wait 2 \
 		--serial $(BUILD)/serial.log --png $(BUILD)/screen_gui.png
+
+# スタートボタンを押してメニューを開く
+run-gui-start: linux
+	$(PYTHON) tools/run_qemu.py --image $(HDD) --media hdd --mem 512 \
+		--qemu qemu-system-x86_64 --wait 40 \
+		--mouse="-475:369;wait;click;wait" --post-wait 2 \
+		--png $(BUILD)/screen_start.png
+
+# タイトルバーを掴んでウィンドウを動かす
+run-gui-drag: linux
+	$(PYTHON) tools/run_qemu.py --image $(HDD) --media hdd --mem 512 \
+		--qemu qemu-system-x86_64 --wait 40 \
+		--mouse="-112:-312;wait;down;wait;80:120;70:100;wait;up;wait" \
+		--post-wait 2 --png $(BUILD)/screen_drag.png
 
 # 8x8 フォントを Linux カーネルソースから生成し直す
 # (生成物はコミットしてあるので普段は不要)
