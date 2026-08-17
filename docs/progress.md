@@ -50,20 +50,64 @@ Entering protected mode...
 CR0 = 0x00000011   PE(bit0) = 1  -> プロテクトモード
 ```
 
-## フェーズ2-B: Linux Boot Protocol — 未着手
+## フェーズ2-B: Linux Boot Protocol — 完了
 
-`bzImage` のビルドがまだなので着手できていない。
-準備として `tools/bzimage_info.py`（setup ヘッダの解析ツール）を用意した。
-実装の手順は `docs/phase2b-linux-boot-protocol.md` にまとめてある。
+**自作ブートローダーから Linux カーネルが起動し、ユーザーランドまで到達した。**
 
-- [ ] Linux カーネルのビルド（`.ko` を全て `=y` にしたモノリシック構成）
-- [ ] bzImage ヘッダ解析（`setup_sects`, `HdrS` マジック）
-- [ ] カーネル本体を `0x100000` へ読み込む
-      （1MB 境界超え: ビッグリアルモード or BIOS 拡張読み込み）
-- [ ] `boot_params`（ゼロページ）の構築
-- [ ] `type_of_loader` / `loadflags` などの必須フィールド設定
-- [ ] 32bit エントリポイントへジャンプ
-- [ ] 簡易 initramfs（cpio）の用意とアドレス設定
+- [x] Linux カーネルのビルド（`tools/build_kernel.sh`、6.12.9 / defconfig）
+- [x] bzImage ヘッダ解析（`setup_sects`, `HdrS` マジック、プロトコル版）
+- [x] カーネル本体を `0x100000` へ読み込む（アンリアルモード + LBA 拡張読み込み）
+- [x] `boot_params`（ゼロページ）の構築
+- [x] `type_of_loader` / `loadflags` / `screen_info` などの設定
+- [x] E820 メモリマップをゼロページへ（24 バイト → 20 バイトに詰め直し）
+- [x] 32bit エントリポイントへジャンプ
+- [x] 簡易 initramfs（cpio）の用意とアドレス設定
+
+実装は `src/boot/stage2_linux.asm`。詳細は
+`docs/phase2b-linux-boot-protocol.md` を参照。
+
+```
+$ make run-linux
+myOS Stage2  -  Phase2-B: Linux Boot Protocol loader
+
+Disk        : INT 13h extensions (LBA) available / geometry 63 sect/track, 16
+Memory map  : INT 15h E820h / 6 entries / usable 511 MB
+A20 gate    : OK
+Unreal mode : OK
+Payload tbl : OK
+bzImage hdr : 'HdrS' found / boot protocol 2.15 / setup_sects 39
+Kernel      : loading to 0x100000 ...(略)...OK
+initramfs   : loading to 0x4000000 .OK
+boot_params : building zero page at 0x90000 OK
+Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...
+```
+
+その後カーネルのログが流れ、最後に initramfs の `/init` が動く。
+
+```
+[    0.000000] Linux version 6.12.9 ...
+[    0.000000] Command line: console=ttyS0,115200 console=tty0 ... rdinit=/init
+[    2.221666] Unpacking initramfs...
+[    3.808349] Run /init as init process
+
+  myOS: userland reached.
+
+  Booted by a hand-written bootloader:
+    stage1 (MBR, 512 bytes)
+      -> stage2_linux (Linux 32-bit boot protocol)
+        -> Linux kernel
+          -> this /init (PID 1, no libc)
+```
+
+### 残っている宿題
+
+- [ ] カーネルを本来の方針どおり「`.ko` を全て `=y`」のモノリシック構成にする
+      （`MONOLITHIC=1 sh tools/build_kernel.sh` で試せるようにはしてある。
+      現状の検証は defconfig で行った）
+- [ ] initramfs を busybox など実用的な中身にする
+      （今は動作確認用の `/init` が 1 本あるだけ）
+- [ ] CHS 経路（EDD 非対応の古い BIOS）での 13MB 読み込みは 1 セクタずつに
+      なるため実機だと相当遅い。トラック単位のまとめ読みを入れたい
 
 ## フェーズ3 以降
 

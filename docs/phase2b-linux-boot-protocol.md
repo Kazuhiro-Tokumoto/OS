@@ -1,4 +1,17 @@
-# フェーズ2-B: Linux Boot Protocol 対応の手順
+# フェーズ2-B: Linux Boot Protocol 対応
+
+**実装済み。** `src/boot/stage2_linux.asm` で、自作ブートローダーから
+Linux カーネルを起動しユーザーランドまで到達することを確認した。
+
+```bash
+make kernel      # Linux カーネルをビルド (数十分)
+make run-linux   # 起動してシリアルログを取る
+```
+
+以下はその実装手順と、実際にハマった点の記録。
+
+---
+
 
 参照: Linux カーネルソース `Documentation/arch/x86/boot.rst`
 （古いカーネルでは `Documentation/x86/boot.txt`）
@@ -171,13 +184,82 @@ find . | cpio -o -H newc > ../initramfs.cpio
 そのアドレスとサイズをゼロページの `ramdisk_image` / `ramdisk_size` に書く。
 置き場所は `initrd_addr_max`（`0x22C`）以下でなければならない。
 
+## 検証のしかた: 偽カーネルを使う
+
+本物の `bzImage` を用意しなくてもローダーだけを検証できるように、
+`src/test/fake_kernel.asm` という「偽カーネル」を用意してある。
+
+`tools/make_fake_kernel.py` が、この 32bit 生バイナリの前に
+bzImage 互換の setup ヘッダを付けて 1 ファイルにするので、
+ローダーから見ると本物の bzImage と区別がつかない。
+
+偽カーネルは 32bit エントリに入った時点で、渡されたものが規約どおりかを
+自分で検査して画面に出す。
+
+```bash
+make run-fake     # カーネル不要。数秒で終わる
+```
+
+```
+=== FAKE KERNEL ENTERED at 0x100000 (32-bit boot protocol) ===
+  EBX/EBP/EDI are zero      : OK
+  ESI (boot_params)         : 0x00090000  magic 'HdrS' : OK
+  type_of_loader            : 0xFF  loadflags : 0x01  code32_start : 0x00100000
+  e820_entries              : 6 entries
+    e820[]  base 0x00000000  len 0x0009FC00  type 1
+    e820[]  base 0x0009FC00  len 0x00000400  type 2
+  ramdisk_image             : 0x04000000  ramdisk_size : 0x0000037E
+  cmd_line_ptr -> myos fake kernel test
+  === boot_params verified. Loader works. ===
+```
+
+これがあると「ローダーが悪いのか、カーネル側の都合なのか」を
+即座に切り分けられる。本物で詰まったら、まずこちらを回すこと。
+
+## 実際にハマった点
+
+### 1. `%include` をエントリポイントより前に置いてはいけない
+
+共通ルーチンを `inc/*.inc` に切り出したとき、`ORG 0x7E00` の直後に
+`%include` を並べてしまった。フラットバイナリなので、
+**先頭バイトが `stage2_start` ではなく `video.inc` の `cls` の途中**になり、
+Stage1 からジャンプした瞬間に暴走した。
+
+症状は「画面が真っ黒になるだけで何も出ない」。
+`int 0x10` のモード設定すら通っていないのに画面が消えて見えるので紛らわしい。
+
+対策は、`ORG` の直後に `jmp stage2_start` を 1 個置くこと。
+
+### 2. 64bit カーネルを `qemu-system-i386` で動かそうとした
+
+ローダーは完走してジャンプしたのに、カーネルが完全に無反応
+（シリアルにも VGA にも何も出ない）という状態になった。
+
+原因は `qemu-system-i386` の既定 CPU が long mode 非対応だったこと。
+64bit カーネルは 32bit エントリに入った直後に long mode へ移るので、
+そこで力尽きていた。`qemu-system-x86_64` に変えたら一発で起動した。
+
+**ローダーのバグと紛らわしいので、まず偽カーネル（上記）で切り分けること。**
+
+### 3. `/dev/console` はどのコンソールを指すか
+
+`console=ttyS0,115200 console=tty0` と並べると、
+`/dev/console` は**最後に指定したもの**（この場合 `tty0` = VGA 画面）を指す。
+init の出力がシリアルログに出てこないときは、画面のほうを見ること。
+
+カーネル自身のログ（`printk`）は `console=` を並べた分だけ全部に出る。
+
+### 4. BIOS 呼び出しでアンリアルモードが壊れることがある
+
+`INT 13h` の中で BIOS が FS を書き換えると、
+ディスクリプタキャッシュに載せた 4GB リミットが失われる。
+`disk_load_high` では、チャンクを読むたびに `enter_unreal` を呼び直している。
+
 ## デバッグの目安
 
-ゴールは「自作ブートローダーから Linux カーネルの起動ログ、
-あるいはカーネルパニックメッセージが画面に出る」状態。
-
-- 画面が真っ暗のまま何も出ない → ジャンプ先かゼロページが壊れている疑い
+- 画面が真っ暗のまま何も出ない → ジャンプ先かゼロページが壊れている疑い。
+  あるいは上記の 1 番・2 番
 - カーネルパニックが出る → **ジャンプまでは成功している**。
   ここまで来れば大きな山は越えている。あとは root fs や
   コマンドラインの問題であることが多い
-- QEMU なら `-append` を使った正規の起動と挙動を比較すると切り分けやすい
+- QEMU なら `-kernel` を使った正規の起動と挙動を比較すると切り分けやすい

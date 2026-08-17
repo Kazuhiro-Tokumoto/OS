@@ -173,10 +173,13 @@ def main() -> int:
     print("       - INT 15h E820h のメモリマップをゼロページ 0x2D0 以降へ、")
     print("         エントリ数を 0x1E8 (e820_entries) へ")
     print("       - initramfs を使うなら ramdisk_image(0x218)/ramdisk_size(0x21C)")
-    print(f"  3. EAX=0, ESI=ゼロページの物理アドレス にして "
-          f"0x{code32_start:08X} へ far jump")
-    print("     (32bit Boot Protocol: プロテクトモード / ページング無効 /")
-    print("      割り込み禁止 / GDT はフラットな 4GB コード・データ)")
+    print(f"  3. レジスタを整えて 0x{code32_start:08X} へジャンプ")
+    print("       - ESI = ゼロページの物理アドレス")
+    print("       - EBP / EDI / EBX = 0")
+    print("       - CS = __BOOT_CS (セレクタ 0x10), DS/ES/SS = __BOOT_DS (0x18)")
+    print("       - プロテクトモード / ページング無効 / 割り込み禁止")
+    print("     ※ セレクタ番号が 0x10 / 0x18 で固定されている点に注意。")
+    print("        教科書的な 0x08 / 0x10 の配置ではカーネルに渡せない。")
 
     if args.hexdump:
         print()

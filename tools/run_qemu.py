@@ -240,6 +240,11 @@ def main() -> int:
     ap.add_argument("--png", default=str(BUILD / "screen.png"),
                     help="スクリーンショットの出力先 PNG")
     ap.add_argument("--qemu", default="qemu-system-i386")
+    ap.add_argument("--media", choices=["floppy", "hdd"], default="floppy",
+                    help="イメージをフロッピーとして繋ぐか、ハードディスクとして繋ぐか")
+    ap.add_argument("--mem", default="128", help="QEMU に渡すメモリ量 (MB)")
+    ap.add_argument("--serial", default="",
+                    help="シリアル出力の保存先。Linux の起動ログを取るのに使う")
     args = ap.parse_args()
 
     image = Path(args.image)
@@ -258,15 +263,27 @@ def main() -> int:
     # QEMU の作業ディレクトリを tmpdir にして、相対ファイル名で渡す。
     image = image.resolve()
 
+    if args.media == "floppy":
+        drive = f"file={image},format=raw,if=floppy,index=0"
+        boot = "order=a"
+    else:
+        drive = f"file={image},format=raw,if=ide,index=0,media=disk"
+        boot = "order=c"
+
     cmd = [
         args.qemu,
-        "-drive", f"file={image},format=raw,if=floppy,index=0",
-        "-boot", "order=a",
-        "-m", "128",
+        "-drive", drive,
+        "-boot", boot,
+        "-m", str(args.mem),
         "-display", "none",
         "-no-reboot",
         "-monitor", f"unix:{sock_path},server,nowait",
     ]
+    serial_path = None
+    if args.serial:
+        serial_path = Path(args.serial).resolve()
+        serial_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd += ["-serial", f"file:{serial_path}"]
     print("[QEMU] " + " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             cwd=str(tmpdir))
@@ -337,6 +354,13 @@ def main() -> int:
         if ppm_to_png(ppm_path, png):
             print("=" * 78)
             print(f" スクリーンショット: {png}")
+
+    if serial_path is not None and serial_path.exists():
+        text = serial_path.read_text("utf-8", "replace")
+        print("=" * 78)
+        print(f" シリアル出力 ({serial_path}, {len(text)} bytes)")
+        print("=" * 78)
+        print(text)
 
     return 0
 

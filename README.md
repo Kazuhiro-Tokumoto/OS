@@ -23,12 +23,24 @@ Windows 98 もどきの見た目・操作感を目指した自作 OS。
 ```
 src/boot/     ブートローダーのソース (nasm)
   stage1.asm            Stage1 / MBR (512 バイト)
-  stage2.asm            Stage2 本体 (フェーズ1 + フェーズ2-A)
+  stage2.asm            フェーズ1 + フェーズ2-A のデモ
+  stage2_linux.asm      フェーズ2-B: Linux Boot Protocol ローダー
   stage2_v2_color.asm   引き継ぎ資料 2-3節 の色付き HELLO, WORLD! (47 バイト)
-tools/        ビルド・検証スクリプト (Python)
-  build_image.py        disk.img のビルドと検証
+  inc/                  共通ルーチン
+    video.inc           テキスト画面出力 (VRAM 直書き + カーソル制御)
+    a20.inc             A20 ゲート (3方式フォールバック + 実地検証)
+    memmap.inc          メモリマップ取得 (E820h → E801h → 88h)
+    gdt.inc             GDT (Linux の __BOOT_CS/__BOOT_DS 配置)
+    disk.inc            ディスク読み込み (LBA/CHS) とアンリアルモード
+src/init/     initramfs 用の最小 init (libc 非依存)
+src/test/     fake_kernel.asm … ローダー検証用の偽 bzImage
+tools/        ビルド・検証スクリプト
+  build_image.py        ディスクイメージのビルドと検証
   run_qemu.py           QEMU で起動し、VRAM を吸い出して自動検証
-  bzimage_info.py       bzImage の setup ヘッダ解析 (フェーズ2-B 準備)
+  bzimage_info.py       bzImage の setup ヘッダ解析
+  build_kernel.sh       Linux カーネルのビルド
+  make_initramfs.sh     initramfs (cpio) の作成
+  make_fake_kernel.py   偽 bzImage の作成
 docs/         設計メモ・進捗
 build/        生成物 (git 管理外)
 ```
@@ -37,8 +49,12 @@ build/        生成物 (git 管理外)
 
 ```bash
 # 必要なもの
-apt-get install -y nasm qemu-system-x86   # python3 は標準
+apt-get install -y nasm qemu-system-x86 gcc cpio   # python3 は標準
+```
 
+### ブートローダー単体 (フロッピー)
+
+```bash
 make            # build/disk.img を作る
 make run        # QEMU で起動して画面を自動検証
 make run-keys   # キー入力を送ってから検証
@@ -46,8 +62,17 @@ make v2         # 引き継ぎ資料の Stage2 v2 (色付き HELLO, WORLD!) で�
 make disasm     # 逆アセンブルして機械語を確認
 ```
 
-VirtualBox で確認する場合は `build/disk.img` をフロッピーとして割り当て、
-起動順序でフロッピーを最上位にする。詳しくは `docs/testing.md`。
+### Linux を起動する (ハードディスク)
+
+```bash
+make run-fake   # カーネル不要。偽カーネルでローダーだけを数秒で検証
+make kernel     # Linux カーネルをビルド (数十分)
+make run-linux  # 本物の Linux を起動してシリアルログを取る
+```
+
+VirtualBox で確認する場合は `build/disk.img` をフロッピーとして、
+`build/disk_hdd.img` をハードディスクとして割り当てる。
+詳しくは `docs/testing.md`。
 
 ## 検証方法について
 
@@ -78,7 +103,20 @@ Memory map                : INT 15h E820h / usable 127 MB
 | 0 | ブートローダー (Stage1 + Stage2 二段構成) | 完了 |
 | 1 | 画面クリア / カーソル制御 / 色 / キーボード入力 | 完了 |
 | 2-A | A20 ゲート / GDT / プロテクトモード移行 | 完了 |
-| 2-B | Linux Boot Protocol 対応 | 未着手（`bzImage` のビルドが前提） |
+| 2-B | Linux Boot Protocol 対応 | **完了**（ユーザーランド到達を確認） |
 | 3〜 | 以降は Linux カーネルに任せる範囲が多い。GUI 層 (5, 6) が自作の主戦場 | 未着手 |
+
+フェーズ2-B のゴール「自作ブートローダーから Linux カーネルの起動ログが出る」は
+達成済み。実際には initramfs の `/init` が動くところまで到達している。
+
+```
+  myOS: userland reached.
+
+  Booted by a hand-written bootloader:
+    stage1 (MBR, 512 bytes)
+      -> stage2_linux (Linux 32-bit boot protocol)
+        -> Linux kernel
+          -> this /init (PID 1, no libc)
+```
 
 詳しくは `docs/progress.md` を参照。
