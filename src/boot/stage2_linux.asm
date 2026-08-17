@@ -34,6 +34,7 @@ ORG 0x7E00
 %include "inc/memmap.inc"
 %include "inc/gdt.inc"
 %include "inc/disk.inc"
+%include "inc/vbe.inc"
 
 ; --- メモリ配置 ------------------------------------------------------------
 BOOTPARAMS_SEG  equ 0x9000              ; boot_params (ゼロページ) = 0x00090000
@@ -66,6 +67,26 @@ BP_ORIG_VIDEO_COLS  equ 0x007
 BP_ORIG_VIDEO_LINES equ 0x00E
 BP_ORIG_VIDEO_ISVGA equ 0x00F
 BP_ORIG_VIDEO_POINTS equ 0x010
+; VESA リニアフレームバッファの情報 (screen_info の続き)
+BP_LFB_WIDTH        equ 0x012
+BP_LFB_HEIGHT       equ 0x014
+BP_LFB_DEPTH        equ 0x016
+BP_LFB_BASE         equ 0x018
+BP_LFB_SIZE         equ 0x01C           ; 64KB ブロック単位
+BP_LFB_LINELENGTH   equ 0x024
+BP_RED_SIZE         equ 0x026
+BP_RED_POS          equ 0x027
+BP_GREEN_SIZE       equ 0x028
+BP_GREEN_POS        equ 0x029
+BP_BLUE_SIZE        equ 0x02A
+BP_BLUE_POS         equ 0x02B
+BP_RSVD_SIZE        equ 0x02C
+BP_RSVD_POS         equ 0x02D
+BP_PAGES            equ 0x032
+BP_VESA_ATTRIBUTES  equ 0x034
+
+VIDEO_TYPE_VGAC     equ 0x22            ; VGA テキスト
+VIDEO_TYPE_VLFB     equ 0x23            ; VESA リニアフレームバッファ
 BP_E820_ENTRIES     equ 0x1E8           ; u8: エントリ数
 BP_SETUP_SECTS      equ 0x1F1
 BP_HDR_JUMP         equ 0x200           ; EB xx : xx がヘッダ長のヒント
@@ -343,13 +364,13 @@ stage2_start:
         mov     si, msg_ok
         call    puts_attr
         call    newline
-        jmp     .build_bp
+        jmp     .find_vbe
 .no_initrd:
         mov     ah, ATTR_WARN
         mov     si, msg_no_initrd
         call    puts_attr
         call    newline
-        jmp     .build_bp
+        jmp     .find_vbe
 
 .kernel_failed:
         mov     ah, ATTR_ERR
@@ -363,7 +384,43 @@ stage2_start:
         jmp     fatal
 
         ; ------------------------------------------------------------
-        ; 8. boot_params (ゼロページ) の構築
+        ; 8. グラフィックモードを探す (まだ切り替えない)
+        ;    フェーズ5 の入口。GUI を描くには LFB のあるモードが要る。
+        ; ------------------------------------------------------------
+.find_vbe:
+        mov     byte [cur_attr], ATTR_NORMAL
+        mov     si, msg_vbe
+        call    puts
+        call    vbe_find
+        jc      .no_vbe
+        mov     ah, ATTR_OK
+        mov     si, msg_vbe_found
+        call    puts_attr
+        mov     byte [cur_attr], ATTR_NORMAL
+        mov     ax, [vbe_w]
+        call    putdec16
+        mov     al, 'x'
+        call    putc
+        mov     ax, [vbe_h]
+        call    putdec16
+        mov     al, 'x'
+        call    putc
+        mov     ax, [vbe_bpp]
+        call    putdec16
+        mov     si, msg_vbe_lfb
+        call    puts
+        mov     eax, [vbe_lfb]
+        call    puthex32
+        call    newline
+        jmp     .build_bp
+.no_vbe:
+        mov     ah, ATTR_WARN
+        mov     si, msg_vbe_none
+        call    puts_attr
+        call    newline
+
+        ; ------------------------------------------------------------
+        ; 9. boot_params (ゼロページ) の構築
         ; ------------------------------------------------------------
 .build_bp:
         mov     byte [cur_attr], ATTR_NORMAL
@@ -376,11 +433,16 @@ stage2_start:
         call    newline
 
         ; ------------------------------------------------------------
-        ; 9. カーネルへジャンプ
+        ; 10. カーネルへジャンプ
         ; ------------------------------------------------------------
         mov     byte [cur_attr], ATTR_WARN
         mov     si, msg_jump
         call    puts
+
+        ; 最後にグラフィックモードへ切り替える。
+        ; これ以降テキスト出力 (0xB8000) は使えないので、
+        ; 表示したいことは全てこの前に済ませておくこと。
+        call    vbe_set
 
         call    jump_to_kernel          ; ここから戻ってこない
 
@@ -491,17 +553,59 @@ build_boot_params:
 .no_initrd:
 
         ; --- screen_info ---
-        ; これを埋めておかないとカーネルが VGA コンソールを立ち上げられず
-        ; 画面に何も出ない。arch/x86/boot/video-vga.c が VGA テキストのとき
-        ; orig_video_isVGA = 1 を入れているのに合わせる。
+        ; これを埋めておかないとカーネルがコンソールを立ち上げられず
+        ; 画面に何も出ない。
         mov     byte [es:BP_ORIG_X], 0
         mov     byte [es:BP_ORIG_Y], 0
         mov     word [es:BP_ORIG_VIDEO_PAGE], 0
         mov     byte [es:BP_ORIG_VIDEO_MODE], 0x03      ; 80x25 16色テキスト
         mov     byte [es:BP_ORIG_VIDEO_COLS], 80
         mov     byte [es:BP_ORIG_VIDEO_LINES], 25
-        mov     byte [es:BP_ORIG_VIDEO_ISVGA], 1
         mov     word [es:BP_ORIG_VIDEO_POINTS], 16      ; フォント高さ
+
+        cmp     byte [vbe_ok], 0
+        jne     .vlfb
+        ; VBE が使えないときはテキストモードのまま。
+        ; arch/x86/boot/video-vga.c が VGA テキストで 1 を入れているのに合わせる。
+        mov     byte [es:BP_ORIG_VIDEO_ISVGA], 1
+        jmp     .video_done
+
+.vlfb:
+        ; VESA リニアフレームバッファ。
+        ; orig_video_isVGA = VIDEO_TYPE_VLFB が「LFB を使っている」合図で、
+        ; これを見て vesafb ドライバが /dev/fb0 を作ってくれる。
+        mov     byte [es:BP_ORIG_VIDEO_ISVGA], VIDEO_TYPE_VLFB
+        mov     ax, [vbe_w]
+        mov     [es:BP_LFB_WIDTH], ax
+        mov     ax, [vbe_h]
+        mov     [es:BP_LFB_HEIGHT], ax
+        mov     ax, [vbe_bpp]
+        mov     [es:BP_LFB_DEPTH], ax
+        mov     eax, [vbe_lfb]
+        mov     [es:BP_LFB_BASE], eax
+        movzx   eax, word [vbe_total_mem]       ; 64KB ブロック単位のまま渡す
+        mov     [es:BP_LFB_SIZE], eax
+        mov     ax, [vbe_pitch]
+        mov     [es:BP_LFB_LINELENGTH], ax
+        mov     al, [vbe_red_size]
+        mov     [es:BP_RED_SIZE], al
+        mov     al, [vbe_red_pos]
+        mov     [es:BP_RED_POS], al
+        mov     al, [vbe_green_size]
+        mov     [es:BP_GREEN_SIZE], al
+        mov     al, [vbe_green_pos]
+        mov     [es:BP_GREEN_POS], al
+        mov     al, [vbe_blue_size]
+        mov     [es:BP_BLUE_SIZE], al
+        mov     al, [vbe_blue_pos]
+        mov     [es:BP_BLUE_POS], al
+        mov     al, [vbe_rsvd_size]
+        mov     [es:BP_RSVD_SIZE], al
+        mov     al, [vbe_rsvd_pos]
+        mov     [es:BP_RSVD_POS], al
+        mov     word [es:BP_PAGES], 1
+        mov     word [es:BP_VESA_ATTRIBUTES], 0
+.video_done:
 
         ; --- コマンドラインをコピー ---
         mov     si, PTBL_OFF + PT_CMDLINE
@@ -609,6 +713,10 @@ msg_setupsects: db ' / setup_sects ', 0
 msg_kernel:     db 'Kernel      : loading to 0x100000 ', 0
 msg_initrd:     db 'initramfs   : loading to 0x4000000 ', 0
 msg_no_initrd:  db 'initramfs   : none', 0
+msg_vbe:        db 'VESA (VBE)  : ', 0
+msg_vbe_found:  db 'mode found ', 0
+msg_vbe_lfb:    db '  LFB @ 0x', 0
+msg_vbe_none:   db 'not available - staying in text mode', 0
 msg_bootparams: db 'boot_params : building zero page at 0x90000 ', 0
 msg_jump:       db 'Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...', 0
 msg_ok:         db 'OK', 0

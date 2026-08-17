@@ -54,6 +54,29 @@ make defconfig
 ./scripts/config --enable BLK_DEV_INITRD
 ./scripts/config --enable RD_GZIP
 ./scripts/config --enable BINFMT_ELF
+
+# --- フェーズ5 (GUI) 用: フレームバッファと入力 ---------------------------
+# 自作ブートローダーが VBE でリニアフレームバッファを設定し、
+# screen_info.orig_video_isVGA = VIDEO_TYPE_VLFB (0x23) を立てて渡す。
+# それを受けて vesafb が /dev/fb0 を作る。GUI はそこへ直接描く。
+./scripts/config --enable FB
+./scripts/config --enable FB_DEVICE          # /dev/fb0 を作るのに必要
+./scripts/config --enable FB_VESA
+./scripts/config --enable FB_VGA16
+# SYSFB_SIMPLEFB は screen_info を見て "simple-framebuffer" プラットフォーム
+# デバイスを登録するだけ。それに結び付くドライバ (FB_SIMPLE) を入れておかないと
+# デバイスは出来るのに誰もバインドせず、/dev/fb0 が生えない。
+# 症状は「Console: colour dummy device 80x25」と出て画面が死ぬこと。
+./scripts/config --enable SYSFB_SIMPLEFB
+./scripts/config --enable FB_SIMPLE
+./scripts/config --enable FRAMEBUFFER_CONSOLE
+./scripts/config --enable FRAMEBUFFER_CONSOLE_DETECT_PRIMARY
+# マウスとキーボードを読むため
+./scripts/config --enable INPUT_MOUSEDEV     # /dev/input/mice (PS/2 形式)
+./scripts/config --enable INPUT_EVDEV        # /dev/input/eventN
+./scripts/config --enable SERIO_I8042
+./scripts/config --enable MOUSE_PS2
+./scripts/config --enable KEYBOARD_ATKBD
 # ブートローダー側でまだ扱えないものを外しておく
 ./scripts/config --disable RANDOMIZE_BASE       # KASLR。切り分けを簡単にする
 

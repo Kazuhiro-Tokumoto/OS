@@ -32,10 +32,13 @@ KDIR    ?= $(HOME)/kernelbuild
 KVER    ?= 6.12.9
 BZIMAGE ?= $(KDIR)/linux-$(KVER)/arch/x86/boot/bzImage
 
-CMDLINE ?= console=ttyS0,115200 console=tty0 earlyprintk=serial,ttyS0,115200 rdinit=/init
+# console= は後に書いたほうが /dev/console になる。
+# GUI が画面を占有するので、init の出力はシリアル側に出したい。
+# よって ttyS0 を最後に置く。
+CMDLINE ?= console=tty0 console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 rdinit=/init
 
-.PHONY: all v2 run run-keys dump disasm clean \
-        initramfs fake run-fake kernel linux run-linux
+.PHONY: all v2 run run-keys dump disasm clean font \
+        initramfs fake run-fake kernel linux run-linux run-gui
 
 all:
 	$(PYTHON) tools/build_image.py
@@ -81,8 +84,21 @@ linux: initramfs
 # qemu-system-i386 の既定 CPU は long mode 非対応で、カーネルが無反応になる。
 run-linux: linux
 	$(PYTHON) tools/run_qemu.py --image $(HDD) --media hdd --mem 512 \
-		--qemu qemu-system-x86_64 --wait 35 \
+		--qemu qemu-system-x86_64 --wait 40 \
 		--serial $(BUILD)/serial.log --png $(BUILD)/screen_linux.png
+
+# GUI を起動し、マウスを動かしてカーソルの追従も確かめる。
+# 負の値を渡すのでシェルの都合上 --mouse=... と = で繋いでいる。
+run-gui: linux
+	$(PYTHON) tools/run_qemu.py --image $(HDD) --media hdd --mem 512 \
+		--qemu qemu-system-x86_64 --wait 40 \
+		--mouse="-200:0;0:150;-60:60" --post-wait 2 \
+		--serial $(BUILD)/serial.log --png $(BUILD)/screen_gui.png
+
+# 8x8 フォントを Linux カーネルソースから生成し直す
+# (生成物はコミットしてあるので普段は不要)
+font:
+	$(PYTHON) tools/make_font.py $(KDIR)/linux-$(KVER)/lib/fonts/font_8x8.c
 
 # --- その他 -----------------------------------------------------------------
 

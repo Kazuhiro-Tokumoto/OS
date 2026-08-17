@@ -245,6 +245,9 @@ def main() -> int:
     ap.add_argument("--mem", default="128", help="QEMU に渡すメモリ量 (MB)")
     ap.add_argument("--serial", default="",
                     help="シリアル出力の保存先。Linux の起動ログを取るのに使う")
+    ap.add_argument("--mouse", default="",
+                    help='マウスを動かす。"dx:dy" を ; 区切りで複数指定できる。'
+                         '例: "100:0;0:80"  (GUI のカーソル追従の確認用)')
     args = ap.parse_args()
 
     image = Path(args.image)
@@ -299,6 +302,16 @@ def main() -> int:
             for k in keys:
                 mon.cmd(f"sendkey {k}")
                 time.sleep(0.06)
+            time.sleep(args.post_wait)
+
+        if args.mouse:
+            for step in args.mouse.split(";"):
+                step = step.strip()
+                if not step:
+                    continue
+                dx, _, dy = step.partition(":")
+                mon.cmd(f"mouse_move {int(dx)} {int(dy)}")
+                time.sleep(0.15)
             time.sleep(args.post_wait)
 
         # --- テキスト VRAM をそのまま吸い出す (相対ファイル名で渡すこと) ---
