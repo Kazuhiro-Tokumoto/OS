@@ -230,7 +230,7 @@ def parse_keys(spec: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="disk.img を QEMU で起動し画面を検証する")
-    ap.add_argument("--image", default=str(BUILD / "disk.img"))
+    ap.add_argument("--image", default=str(BUILD / "myos.img"))
     ap.add_argument("--wait", type=float, default=2.0,
                     help="キー送信前の待ち時間(秒)")
     ap.add_argument("--keys", default="",

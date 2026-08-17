@@ -9,7 +9,7 @@
 ;   2. メモリマップ取得 (E820h → E801h → 88h)
 ;   3. A20 有効化 (3方式フォールバック + 実地検証)
 ;   4. アンリアルモードに入る (1MB 超へ書けるようにする)
-;   5. ペイロードテーブル (LBA 18) を読み、bzImage / initramfs の位置を知る
+;   5. ペイロードテーブル (LBA 20) を読み、bzImage / initramfs の位置を知る
 ;   6. bzImage の setup ヘッダを解析 ('HdrS' / setup_sects / version)
 ;   7. カーネル本体を 0x100000 へ、initramfs を 0x04000000 へ読み込む
 ;   8. boot_params (ゼロページ) を 0x90000 に構築
@@ -28,6 +28,12 @@ ORG 0x7E00
 ; %include したルーチン群が先に展開されるので、必ずここで本体へ飛ばすこと。
 ; (これを忘れると 0x7E00 が video.inc の cls の途中になり、いきなり暴走する)
         jmp     stage2_start
+stage2_magic:
+        db      'MYS2'          ; Stage1 が「Stage2 はもう載っているか」を
+                                ; 見分けるための目印。オフセット 3 に固定。
+                                ; CD (El Torito) から起動したときは BIOS が
+                                ; stage1+stage2 をまとめて 0x7C00 に読み込んで
+                                ; くれるので、Stage1 の読み込みが不要になる。
 
 %include "inc/video.inc"
 %include "inc/a20.inc"
@@ -45,18 +51,26 @@ KERNEL_DST      equ 0x00100000          ; カーネル本体 (1MB)
 INITRD_DST      equ 0x04000000          ; initramfs (64MB)
 SCRATCH_SEG     equ 0x1000              ; bzImage 先頭を置く作業領域 = 0x10000
 PTBL_OFF        equ 0x0900              ; ペイロードテーブルの置き場 (0x0900)
-PTBL_LBA        equ 18                  ; ペイロードテーブルのあるセクタ
+PTBL_LBA        equ 20                  ; ペイロードテーブルのあるセクタ。
+                                        ; 20 * 512 = 10240 = 5 * 2048 なので
+                                        ; CD の 2048 バイトセクタ境界にも乗る
 PM_STACK        equ 0x0008FFF0
 
 ; --- ペイロードテーブルのレイアウト (tools/build_image.py が書き込む) ------
-PT_MAGIC        equ 0x00                ; 8 bytes "MYOSPLD1"
-PT_KLBA         equ 0x08                ; カーネルの開始 LBA
-PT_KSECT        equ 0x0C                ; カーネルのセクタ数
-PT_KSIZE        equ 0x10                ; カーネルのバイト数
-PT_ILBA         equ 0x14                ; initramfs の開始 LBA
-PT_ISECT        equ 0x18                ; initramfs のセクタ数
-PT_ISIZE        equ 0x1C                ; initramfs のバイト数
-PT_CMDLINE      equ 0x20                ; コマンドライン (0終端)
+; 全ての LBA は 4 の倍数 (= 2048 バイト境界) に置かれている。
+; CD から起動する場合、INT 13h は 2048 バイト単位でしか読めないため。
+; bzImage は setup 部と本体に分けて別々に配置してある。
+; こうしないと本体の開始位置が setup_sects 次第で境界に乗らなくなる。
+PT_MAGIC        equ 0x00                ; 8 bytes "MYOSPLD2"
+PT_SETUP_LBA    equ 0x08                ; bzImage の setup 部 (ヘッダを含む)
+PT_SETUP_SECT   equ 0x0C
+PT_BODY_LBA     equ 0x10                ; プロテクトモード用カーネル本体
+PT_BODY_SECT    equ 0x14
+PT_BODY_SIZE    equ 0x18
+PT_ILBA         equ 0x1C                ; initramfs
+PT_ISECT        equ 0x20
+PT_ISIZE        equ 0x24
+PT_CMDLINE      equ 0x28                ; コマンドライン (0終端)
 
 ; --- boot_params (ゼロページ) の主なオフセット -----------------------------
 BP_ORIG_X           equ 0x000
@@ -226,7 +240,7 @@ stage2_start:
         call    disk_read
         jc      .ptbl_failed
 
-        ; マジック "MYOSPLD1" の確認
+        ; マジック "MYOSPLD2" の確認
         mov     si, PTBL_OFF + PT_MAGIC
         mov     di, magic_str
         mov     cx, 8
@@ -255,7 +269,7 @@ stage2_start:
         mov     ax, SCRATCH_SEG
         mov     es, ax
         xor     bx, bx
-        mov     eax, [PTBL_OFF + PT_KLBA]
+        mov     eax, [PTBL_OFF + PT_SETUP_LBA]
         mov     cx, 4                   ; setup ヘッダは 0x268 まで伸びるので 4 セクタ読む
         call    disk_read
         jc      .hdr_failed
@@ -324,17 +338,12 @@ stage2_start:
         mov     si, msg_kernel
         call    puts
 
-        movzx   eax, word [setup_sects]
-        inc     eax                     ; ブートセクタ 1 個ぶんを足す
-        mov     [skip_sects], eax
-
-        mov     ebx, [PTBL_OFF + PT_KSECT]
-        sub     ebx, eax                ; 本体のセクタ数
-        jbe     .kernel_failed
-        mov     [body_sects], ebx
-
-        add     eax, [PTBL_OFF + PT_KLBA]       ; 本体の開始 LBA
-        mov     ecx, ebx
+        ; 本体はイメージ上で setup 部と分けて置いてあるので、
+        ; setup_sects から位置を計算する必要はない。
+        mov     ecx, [PTBL_OFF + PT_BODY_SECT]
+        test    ecx, ecx
+        jz      .kernel_failed
+        mov     eax, [PTBL_OFF + PT_BODY_LBA]
         mov     edi, KERNEL_DST
         call    disk_load_high
         jc      .kernel_failed
@@ -722,12 +731,10 @@ msg_jump:       db 'Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...'
 msg_ok:         db 'OK', 0
 msg_fail:       db 'FAILED', 0
 msg_halted:     db 'Halted.', 0
-magic_str:      db 'MYOSPLD1'
+magic_str:      db 'MYOSPLD2'
 
 ; --- 変数 ------------------------------------------------------------------
 boot_drive:     db 0
 kver:           dw 0
 setup_sects:    dw 0
 hdr_len:        dw 0
-skip_sects:     dd 0
-body_sects:     dd 0

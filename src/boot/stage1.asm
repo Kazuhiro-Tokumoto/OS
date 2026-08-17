@@ -45,6 +45,13 @@ start:
         ; これを保存して以後ずっと使う (決め打ちしない)。
         mov     [boot_drive], dl
 
+        ; Stage2 が既に 0x7E00 に載っているなら読み込みは要らない。
+        ; CD (El Torito のノーエミュレーション起動) では BIOS が
+        ; stage1 と stage2 をまとめて 0x7C00 に読み込んでくれるため。
+        ; Stage2 はオフセット 3 に 'MYS2' の目印を置いてある。
+        cmp     dword [STAGE2_OFF + 3], 'MYS2'
+        je      .read_ok
+
         mov     cx, RETRY_COUNT
 
 .read_retry:
