@@ -56,9 +56,10 @@ fi
 # debootstrap の後から足すもの。
 # Java と OpenGL (ソフトウェアレンダリング) はここで入れる。
 # Minecraft のような LWJGL を使うアプリは libGL と X11 の拡張を要求する。
-# Java は JDK を入れる。JRE だけだと .java をコンパイルできず、
-# 「Java が入っているのに Java が書けない」という妙な状態になる。
-EXTRA="openjdk-17-jdk \
+# Java は JRE。JDK は javac のぶん 110MB 増えるので、
+# インストールディスクを CD-R (700MB) に収めるために外している。
+# .jar と .class は動く。.java のコンパイルは出来ない。
+EXTRA="openjdk-17-jre \
        libgl1-mesa-dri libglx-mesa0 libgl1 mesa-utils \
        libxrandr2 libxxf86vm1 libxcursor1 libxi6 libxinerama1 \
        xterm imagemagick \
@@ -69,8 +70,9 @@ EXTRA="openjdk-17-jdk \
 # 配布物 (.deb / AppImage / tar.gz) を落としてきて入れる、という
 # 普通の使い方ができるようにする。GUI アプリが要求する共有ライブラリと、
 # メニューに出すための .desktop まわりを先に入れておく。
-APPS="geany \
-      gtk2-engines-pixbuf libgtk-3-0 libgtk2.0-0 libcanberra-gtk3-module \
+# コードエディタ (geany) は入れない。容量のため。
+# メモ帳で開けるので、書けなくなるわけではない。
+APPS="gtk2-engines-pixbuf libgtk-3-0 libgtk2.0-0 libcanberra-gtk3-module \
       libnss3 libnspr4 libasound2 libxss1 libgbm1 libdrm2 libcups2 \
       libatk1.0-0 libatk-bridge2.0-0 libpango-1.0-0 libpangocairo-1.0-0 \
       libcairo2 libgdk-pixbuf-2.0-0 libxcomposite1 libxdamage1 libxfixes3 \
@@ -96,6 +98,22 @@ SECURITY="ufw iptables nftables \
 FIRMWARE="firmware-linux-free firmware-misc-nonfree firmware-realtek \
           firmware-iwlwifi firmware-atheros firmware-brcm80211 \
           firmware-amd-graphics firmware-intel-sound"
+
+echo "=== 要らなくなったものを外す ==="
+# ビルドは既存のルートに上書きしていくので、
+# 「入れないようにした」だけでは前回入れたものが残る。明示的に外す。
+#
+# 追加パッケージを入れる *前* にやること。
+# JDK を消すと、その依存として自動で入っていた JRE も
+# 「もう誰も要らない」と判断されて autoremove に持っていかれる。
+# 先に消してから JRE を入れ直せば、その順序の問題が起きない。
+# (順序を逆にすると java だけ残ってライブラリが消え、
+#  "libjli.so が無い" という分かりにくい壊れ方をする)
+chroot "$WORK" sh -c "apt-get purge -y \
+    openjdk-17-jdk openjdk-17-jdk-headless \
+    geany geany-common >/dev/null 2>&1; \
+    apt-get autoremove --purge -y >/dev/null 2>&1; \
+    apt-get clean" || true
 
 echo "=== 追加パッケージ ==="
 cp /etc/resolv.conf "$WORK/etc/resolv.conf"
@@ -868,14 +886,15 @@ png,jpg,jpeg,gif,bmp,ppm,pgm,tif,tiff,webp,ico,xpm|Image|file|myos-image %1|
 # 「開く」はメモ帳で中身を見る、「実行」で走らせる。Windows と同じ考え方。
 py|Python Script|app|myos-notepad %1|myos-term python3 %1
 sh|Shell Script|app|myos-notepad %1|myos-term sh %1
-c|C Source|file|myos-notepad %1|myos-term myos-cc %1
+c|C Source|file|myos-notepad %1|
 h|C Header|file|myos-notepad %1|
 asm,s|Assembler Source|file|myos-notepad %1|
 json,xml,css,js|Source File|file|myos-notepad %1|
 
 # --- Java -------------------------------------------------------------------
-# JDK が入っているので .java もそのままコンパイルして走る。
-java|Java Source|java|myos-notepad %1|myos-term myos-javac %1
+# JRE だけ入れてある (容量のため)。.jar と .class は動くが、
+# .java のコンパイルは出来ないので「実行」の動詞は付けない。
+java|Java Source|java|myos-notepad %1|
 jar|Java Archive|java|myos-java -jar %1|myos-term myos-java -jar %1
 class|Java Class|java|myos-java %1|
 
@@ -914,19 +933,6 @@ printf 'Press Enter to close this window.'
 read dummy
 EOF
 
-# C のソースをその場でコンパイルして走らせる。
-cat > "$WORK/usr/local/bin/myos-cc" <<'EOF'
-#!/bin/sh
-# myos-cc <ソース.c> [引数...]
-src="$1"
-[ -n "$src" ] || { echo "usage: myos-cc <file.c> [args...]"; exit 2; }
-shift
-out="/tmp/$(basename "$src" .c).out"
-echo "cc -O2 -o $out $src"
-cc -O2 -o "$out" "$src" || exit $?
-echo "----- running -----"
-exec "$out" "$@"
-EOF
 
 # Java の起動。ヒープの上限をメモリ量から決める。
 cat > "$WORK/usr/local/bin/myos-java" <<'EOF'
@@ -948,25 +954,6 @@ if [ -z "$heap" ] || [ "$heap" = "auto" ]; then
 fi
 
 exec java -Xmx${heap}m -Dsun.java2d.opengl=false "$@"
-EOF
-
-# Java のソースをその場でコンパイルして走らせる。
-cat > "$WORK/usr/local/bin/myos-javac" <<'EOF'
-#!/bin/sh
-# myos-javac <ソース.java> [引数...]
-src="$1"
-[ -n "$src" ] || { echo "usage: myos-javac <file.java> [args...]"; exit 2; }
-shift
-cls="$(basename "$src" .java)"
-out="/tmp/myos-java-$$"
-mkdir -p "$out"
-echo "javac -d $out $src"
-javac -d "$out" "$src" || exit $?
-echo "----- running -----"
-myos-java -cp "$out" "$cls" "$@"
-rc=$?
-rm -rf "$out"
-exit $rc
 EOF
 
 # AppImage をダブルクリックで動かす。
@@ -998,8 +985,7 @@ esac
 EOF
 
 chmod 755 "$WORK/usr/local/bin/myos-term" "$WORK/usr/local/bin/myos-term-run" \
-          "$WORK/usr/local/bin/myos-cc" "$WORK/usr/local/bin/myos-java" \
-          "$WORK/usr/local/bin/myos-javac" \
+          "$WORK/usr/local/bin/myos-java" \
           "$WORK/usr/local/bin/myos-run-appimage" \
           "$WORK/usr/local/bin/myos-lsarchive"
 
@@ -1089,7 +1075,6 @@ Java Demo|java|/usr/local/bin/myos-java -jar /usr/local/share/myos/hello.jar
 OpenGL Test|app|/usr/bin/glxgears
 MS-DOS Prompt|app|/usr/local/bin/myos-prompt
 Notepad|file|/usr/local/bin/myos-notepad
-Code Editor|file|/usr/bin/geany
 Settings|app|/usr/local/bin/myos-settings
 Removable|folder|/usr/local/bin/myos-files /media
 EOF
@@ -1102,7 +1087,6 @@ Settings|app|/usr/local/bin/myos-settings
 Removable|folder|/usr/local/bin/myos-files /media
 Web|globe|/usr/bin/firefox-esr
 Notepad|file|/usr/local/bin/myos-notepad
-Code Editor|file|/usr/bin/geany
 Virus Scan|app|/usr/local/bin/myos-term /usr/local/bin/myos-scan
 MS-DOS Prompt|app|/usr/local/bin/myos-prompt
 Shut Down|app|sudo /sbin/poweroff
@@ -1116,6 +1100,53 @@ if [ -f "$ROOTDIR/build/hello.jar" ]; then
     cp "$ROOTDIR/build/hello.jar" "$WORK/usr/local/share/myos/hello.jar"
 else
     echo "  build/hello.jar が無いのでスキップ (make java-demo で作る)"
+fi
+
+echo "=== 余分なものを落とす ==="
+# インストールディスクを CD-R (700MB) に収めるための掃除。
+# 消すのは「無くても動作が変わらないもの」に限る。
+# ファームウェアやフォントには手を付けない
+# (実機で画面や無線が出なくなる / 日本語が豆腐になる)。
+#
+# SLIM=0 を渡すと掃除しない。
+if [ "${SLIM:-1}" = "1" ]; then
+    # --- 1. パッケージを外す ---------------------------------------------
+    # apt の一覧を消す *前* にやること。消したあとだと
+    # 「そんなパッケージは知らない」と言われて purge 自体が中止される。
+    #
+    # 1 つずつ外す。まとめて渡すと、入っていないものが 1 つあるだけで
+    # apt が全体を中止してしまい、何も消えずに終わる。
+    for pkg in gcc g++ cpp build-essential libc6-dev linux-libc-dev \
+               gcc-12 cpp-12 g++-12 libstdc++-12-dev libgcc-12-dev \
+               geany geany-common \
+               openjdk-17-jdk openjdk-17-jdk-headless; do
+        chroot "$WORK" sh -c "apt-get purge -y $pkg >/dev/null 2>&1" || true
+    done
+    chroot "$WORK" sh -c "apt-get autoremove --purge -y >/dev/null 2>&1; \
+                          apt-get clean" || true
+    rm -rf "$WORK/usr/include"/* 2>/dev/null || true
+
+    # --- 2. ファイルを消す -------------------------------------------------
+    # 文書。読み物であって動作には要らない。
+    rm -rf "$WORK/usr/share/doc"/* "$WORK/usr/share/man"/* \
+           "$WORK/usr/share/info"/* 2>/dev/null || true
+
+    # apt のパッケージ一覧。apt-get update でいつでも作り直せる。
+    rm -rf "$WORK/var/lib/apt/lists"/* 2>/dev/null || true
+    rm -rf "$WORK/var/cache/apt/archives"/*.deb 2>/dev/null || true
+
+    # 翻訳。日本語と英語だけ残す。
+    if [ -d "$WORK/usr/share/locale" ]; then
+        find "$WORK/usr/share/locale" -mindepth 1 -maxdepth 1 -type d \
+             ! -name 'ja*' ! -name 'en*' ! -name 'C*' \
+             -exec rm -rf {} + 2>/dev/null || true
+    fi
+
+    # ビルドのときだけ使う中間物
+    rm -rf "$WORK/usr/local/src"/* 2>/dev/null || true
+    rm -f  "$WORK/var/log"/*.log "$WORK/var/log"/*.gz 2>/dev/null || true
+
+    echo "  掃除後: $(du -sh "$WORK" | cut -f1)"
 fi
 
 echo "=== 完成 ==="
