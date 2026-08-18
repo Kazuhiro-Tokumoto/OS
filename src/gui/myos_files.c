@@ -14,13 +14,10 @@
  *   右クリック                コンテキストメニュー
  *   ホイール / 上下キー       スクロール
  *
- * 開き方は拡張子で振り分ける:
- *   ディレクトリ          そこへ移動
- *   画像                  myos-image
- *   テキスト系            myos-notepad
- *   .jar                  java -jar
- *   実行可能              そのまま実行
- *   それ以外              Firefox に渡す
+ * 「何で開くか」はこのファイルには書かない。
+ * /etc/myos/filetypes.conf と ~/.myos/filetypes.conf の表を見て
+ * myos-open が決める (Windows のシェル関連付けと同じ考え方)。
+ * ディレクトリだけは同じ窓で移動したいので、ここで処理する。
  *
  * ビルド:
  *   gcc -O2 -o myos-files myos_files.c -lX11
@@ -42,6 +39,7 @@
 #include <sys/wait.h>
 
 #include "x98.h"
+#include "filetypes.h"
 
 #define WIN_W       700
 #define WIN_H       480
@@ -49,7 +47,8 @@
 #define ROW_H       20
 #define PAD         6
 #define MAX_ENTRIES 4096
-#define DESKTOP_CONF "/etc/myos/desktop.conf"
+#define TYPE_COL_W  150   /* 「種類」の列幅 */
+#define SIZE_COL_W   70   /* 「サイズ」の列幅 */
 
 /* ツールバーのボタン配置 */
 #define TB_UP_X     4
@@ -64,12 +63,16 @@
 #define TB_DEL_W    64
 #define TB_PATH_X   (TB_DEL_X + TB_DEL_W + 6)
 
-/* コンテキストメニュー */
-static const char *ctx_items[] = {
-    "Open", "Copy", "Cut", "Paste", "Rename", "Delete", "Add to Desktop"
+/* コンテキストメニュー。並びは Windows のそれに寄せてある。 */
+enum {
+    CTX_OPEN = 0, CTX_RUN, CTX_RUNAS, CTX_COPY, CTX_CUT, CTX_PASTE,
+    CTX_RENAME, CTX_DELETE, CTX_DESKTOP, CTX_N
 };
-#define CTX_N ((int)(sizeof(ctx_items) / sizeof(ctx_items[0])))
-#define CTX_W 160
+static const char *ctx_items[CTX_N] = {
+    "Open", "Run", "Run as administrator...",
+    "Copy", "Cut", "Paste", "Rename", "Delete", "Add to Desktop"
+};
+#define CTX_W 190
 #define CTX_IH 20
 #define CTX_H (CTX_N * CTX_IH + 6)
 
@@ -92,6 +95,9 @@ static int    n_entries = 0;
 static int    top = 0;
 static int    sel = -1;
 static int    win_w = WIN_W, win_h = WIN_H;
+
+static FileType ftypes[FT_MAX];
+static int      n_ftypes = 0;
 
 static int    confirm_delete = 0;
 static int    ctx_open = 0, ctx_x = 0, ctx_y = 0;
@@ -129,30 +135,8 @@ static void small_exec(int px, int py)
 }
 
 /* --- 便利関数 ------------------------------------------------------------ */
-static int ends_with(const char *s, const char *suf)
-{
-    size_t ls = strlen(s), lf = strlen(suf);
-    return ls >= lf && !strcasecmp(s + ls - lf, suf);
-}
-
-static int is_image(const char *n)
-{
-    static const char *ext[] = { ".png", ".jpg", ".jpeg", ".gif", ".bmp",
-                                 ".ppm", ".pgm", ".tif", ".tiff", ".webp",
-                                 ".ico", ".xpm", NULL };
-    for (int i = 0; ext[i]; i++) if (ends_with(n, ext[i])) return 1;
-    return 0;
-}
-
-static int is_text(const char *n)
-{
-    static const char *ext[] = { ".txt", ".log", ".conf", ".cfg", ".ini",
-                                 ".md", ".c", ".h", ".sh", ".py", ".asm",
-                                 ".inc", ".java", ".json", ".xml", ".css",
-                                 NULL };
-    for (int i = 0; ext[i]; i++) if (ends_with(n, ext[i])) return 1;
-    return 0;
-}
+/* 拡張子で何をするかは filetypes.h の表に任せたので、
+ * ここに種類の判定を持たない。 */
 
 static void full_path(char *out, size_t n, const char *name)
 {
@@ -250,7 +234,11 @@ static void go_up(void)
 }
 
 /* --- 操作 ---------------------------------------------------------------- */
-static void open_entry(int i)
+/* 開く。ディレクトリだけは同じ窓で移動したいので自分で処理し、
+ * それ以外は myos-open に丸投げする。
+ * verb: 0 = 既定の「開く」 / 1 = 2 つ目の動詞「実行」
+ *       2 = 管理者として実行 */
+static void open_entry_verb(int i, int verb)
 {
     if (i < 0 || i >= n_entries) return;
     Entry *e = &entries[i];
@@ -258,12 +246,34 @@ static void open_entry(int i)
     char full[PATH_MAX];
     full_path(full, sizeof(full), e->name);
 
-    if (e->is_dir)            { go_to(full); return; }
-    if (is_image(e->name))    { spawn_argv("myos-image", full, NULL); return; }
-    if (is_text(e->name))     { spawn_argv("myos-notepad", full, NULL); return; }
-    if (ends_with(e->name, ".jar")) { spawn_argv("java", "-jar", full); return; }
-    if (e->is_exec)           { spawn_argv(full, NULL, NULL); return; }
-    spawn_argv("firefox-esr", full, NULL);
+    if (e->is_dir && verb == 0) { go_to(full); return; }
+
+    if (verb == 2)      spawn_argv("myos-runas", "myos-open", full);
+    else if (verb == 1) spawn_argv("myos-open", "-run", full);
+    else                spawn_argv("myos-open", full, NULL);
+}
+
+static void open_entry(int i) { open_entry_verb(i, 0); }
+
+/* 「実行」の動詞を持っているか。無ければメニューで薄くする。 */
+static int has_run_verb(int i)
+{
+    if (i < 0 || i >= n_entries) return 0;
+    Entry *e = &entries[i];
+    if (e->is_dir) return 0;
+    const FileType *t = ft_find(ftypes, n_ftypes, e->name);
+    if (t && t->run[0]) return 1;
+    return e->is_exec;
+}
+
+/* 一覧に出す種類の名前。表に無ければ Windows と同じ言い方にしておく。 */
+static const char *type_name(const Entry *e)
+{
+    if (e->is_dir) return "File Folder";
+    const FileType *t = ft_find(ftypes, n_ftypes, e->name);
+    if (t) return t->desc;
+    if (e->is_exec) return "Application";
+    return "File";
 }
 
 static void make_new_folder(void)
@@ -359,28 +369,40 @@ static void add_to_desktop(int i)
     char full[PATH_MAX];
     full_path(full, sizeof(full), e->name);
 
-    const char *icon = "app";
-    char cmd[PATH_MAX + 64];
+    /* アイコンは関連付けの表から取る。表に無ければ実体で決める。 */
+    const char *icon;
     if (e->is_dir) {
         icon = "folder";
-        snprintf(cmd, sizeof(cmd), "/usr/local/bin/myos-files '%s'", full);
-    } else if (is_image(e->name)) {
-        icon = "file";
-        snprintf(cmd, sizeof(cmd), "myos-image '%s'", full);
-    } else if (is_text(e->name)) {
-        icon = "file";
-        snprintf(cmd, sizeof(cmd), "myos-notepad '%s'", full);
-    } else if (ends_with(e->name, ".jar")) {
-        icon = "java";
-        snprintf(cmd, sizeof(cmd), "java -jar '%s'", full);
-    } else if (e->is_exec) {
-        snprintf(cmd, sizeof(cmd), "'%s'", full);
     } else {
-        icon = "file";
-        snprintf(cmd, sizeof(cmd), "firefox-esr '%s'", full);
+        const FileType *t = ft_find(ftypes, n_ftypes, e->name);
+        icon = t && t->icon[0] ? t->icon : (e->is_exec ? "app" : "file");
     }
 
-    FILE *f = fopen(DESKTOP_CONF, "a");
+    /* コマンドは myos-open に統一する。あとで関連付けを変えたときに、
+     * デスクトップのリンクも一緒に付いてくる。 */
+    char cmd[PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "myos-open '%s'", full);
+
+    /* 追記先はユーザーの設定。/etc/myos は root のものなので触らない。 */
+    char path[512];
+    myos_user_conf(path, sizeof(path), "desktop.conf");
+
+    /* まだユーザーの分が無ければ、システム既定を写してから足す。
+     * そうしないと既定のアイコンが全部消えたように見える。 */
+    if (access(path, F_OK) != 0) {
+        FILE *src = fopen(MYOS_ETC "/desktop.conf", "r");
+        FILE *dst = fopen(path, "w");
+        if (src && dst) {
+            char buf[1024];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), src)) > 0)
+                fwrite(buf, 1, n, dst);
+        }
+        if (src) fclose(src);
+        if (dst) fclose(dst);
+    }
+
+    FILE *f = fopen(path, "a");
     if (!f) return;
     fprintf(f, "%s|%s|%s\n", e->name, icon, cmd);
     fclose(f);
@@ -470,8 +492,15 @@ static void draw_list(void)
             x98_edit_draw(&x98, win, lx + 26, ry, lw - 120, ROW_H,
                           &rename_edit, 1);
         } else {
-            x98_text(&x98, win, lx + 28, ry + (ROW_H - x98_text_h(&x98)) / 2,
-                     e->name, fg);
+            int ty = ry + (ROW_H - x98_text_h(&x98)) / 2;
+            x98_text(&x98, win, lx + 28, ty, e->name, fg);
+
+            /* 種類の列。Windows のエクスプローラの「種類」と同じ。
+             * 窓が狭いときは名前と重なるので出さない。 */
+            int type_x = lx + lw - 10 - SIZE_COL_W - TYPE_COL_W;
+            if (type_x > lx + 28 + x98_text_w(&x98, e->name) + 12)
+                x98_text(&x98, win, type_x, ty, type_name(e), fg);
+
             if (!e->is_dir) {
                 char sz[32];
                 if (e->size >= 1024 * 1024)
@@ -481,8 +510,7 @@ static void draw_list(void)
                 else
                     snprintf(sz, sizeof(sz), "%ld B", e->size);
                 int tw = x98_text_w(&x98, sz);
-                x98_text(&x98, win, lx + lw - 10 - tw,
-                         ry + (ROW_H - x98_text_h(&x98)) / 2, sz, fg);
+                x98_text(&x98, win, lx + lw - 10 - tw, ty, sz, fg);
             }
         }
     }
@@ -495,7 +523,15 @@ static void draw_ctx(void)
     x98_bevel(&x98, win, ctx_x, ctx_y, CTX_W, CTX_H, 1);
     for (int i = 0; i < CTX_N; i++) {
         int iy = ctx_y + 3 + i * CTX_IH;
-        int dim = (i == 3 && !clip_path[0]);      /* Paste は控えが無ければ薄く */
+        /* 今できないものは Windows と同じで薄く出す */
+        int dim = 0;
+        if (i == CTX_PASTE)      dim = !clip_path[0];
+        else if (i == CTX_RUN)   dim = !has_run_verb(sel);
+        else if (i == CTX_OPEN || i == CTX_RUNAS ||
+                 i == CTX_COPY || i == CTX_CUT ||
+                 i == CTX_RENAME || i == CTX_DELETE ||
+                 i == CTX_DESKTOP)
+            dim = (sel < 0);
         x98_text(&x98, win, ctx_x + 10, iy + (CTX_IH - x98_text_h(&x98)) / 2,
                  ctx_items[i], dim ? x98.shadow : x98.text);
     }
@@ -528,13 +564,15 @@ static void ensure_visible(void)
 static void ctx_action(int i)
 {
     switch (i) {
-    case 0: open_entry(sel); break;
-    case 1: do_copy(0); break;
-    case 2: do_copy(1); break;
-    case 3: do_paste(); break;
-    case 4: start_rename(); break;
-    case 5: if (sel >= 0) confirm_delete = 1; break;
-    case 6: add_to_desktop(sel); break;
+    case CTX_OPEN:    open_entry_verb(sel, 0); break;
+    case CTX_RUN:     if (has_run_verb(sel)) open_entry_verb(sel, 1); break;
+    case CTX_RUNAS:   if (sel >= 0) open_entry_verb(sel, 2); break;
+    case CTX_COPY:    do_copy(0); break;
+    case CTX_CUT:     do_copy(1); break;
+    case CTX_PASTE:   do_paste(); break;
+    case CTX_RENAME:  start_rename(); break;
+    case CTX_DELETE:  if (sel >= 0) confirm_delete = 1; break;
+    case CTX_DESKTOP: add_to_desktop(sel); break;
     default: break;
     }
 }
@@ -551,6 +589,7 @@ int main(int argc, char **argv)
     }
     screen = DefaultScreen(dpy);
     x98_init(&x98, dpy, screen);
+    n_ftypes = ft_load(ftypes, FT_MAX);
 
     win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 0, 0,
                               WIN_W, WIN_H, 0, 0, x98.face);

@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "myosconf.h"
+
 /* --- Win98 の配色 -------------------------------------------------------- */
 #define RGB_DESKTOP   0x008080      /* ティール */
 #define RGB_FACE      0xC0C0C0      /* ボタン面 */
@@ -31,10 +33,15 @@
 #define RGB_SELECT    0x000080      /* 選択中の背景 */
 #define RGB_FOLDER    0xFFD060      /* フォルダの黄色 */
 
-/* テーマ。/etc/myos/theme.conf で上書きできる。
- * 設定アプリ (myos-settings) がこのファイルを書き、
- * ウィンドウマネージャに SIGUSR1 を送って読み直させる。 */
-#define X98_THEME_CONF "/etc/myos/theme.conf"
+/* テーマ。設定ファイルで上書きできる。
+ *
+ *   /etc/myos/theme.conf   システム既定 (root のもの)
+ *   ~/.myos/theme.conf     ユーザーの上書き。こちらが優先
+ *
+ * 設定アプリ (myos-settings) はユーザー側に書き、
+ * ウィンドウマネージャに SIGUSR1 を送って読み直させる。
+ * 配色を変えるのに管理者権限が要らないのはこのため。 */
+#define X98_THEME_CONF "theme.conf"
 
 typedef struct {
     /* 24bit RGB のまま持っておく。ピクセル値は x98_apply() で作る。
@@ -122,7 +129,12 @@ static inline void x98_theme_defaults(X98Theme *t)
  * 知らないキーは黙って飛ばす (前方互換のため)。 */
 static inline void x98_load_theme(X98Theme *t, const char *path)
 {
-    FILE *f = fopen(path ? path : X98_THEME_CONF, "r");
+    char resolved[512];
+    if (!path) {
+        myos_conf(resolved, sizeof(resolved), X98_THEME_CONF);
+        path = resolved;
+    }
+    FILE *f = fopen(path, "r");
     if (!f) return;
 
     char line[256];
@@ -189,7 +201,7 @@ static inline void x98_init(X98 *x, Display *dpy, int screen)
     }
 
     x98_theme_defaults(&x->theme);
-    x98_load_theme(&x->theme, X98_THEME_CONF);
+    x98_load_theme(&x->theme, NULL);
     x98_apply(x);
 
     x98_open_font(x);
@@ -324,8 +336,10 @@ static inline void x98_titlebar(X98 *x, Drawable d, int px, int py, int w, int h
  * ファイル名の変更や検索欄に使う。X には入力ウィジェットが無いので
  * 自前で持つ。日本語入力は扱わない (IME を抱えるのは別の話)。
  * ------------------------------------------------------------------------ */
+#define X98_EDIT_MAX 512
+
 typedef struct {
-    char buf[512];
+    char buf[X98_EDIT_MAX];
     int  len;
     int  cur;       /* カーソル位置 (バイト) */
 } X98Edit;

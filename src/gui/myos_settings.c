@@ -19,28 +19,31 @@
 #include <signal.h>
 
 #include "x98.h"
+#include "filetypes.h"
+#include <X11/keysym.h>
 
 #define WIN_W 620
-#define WIN_H 500
+#define WIN_H 526
 
 #define PREV_X   12
-#define PREV_Y   12
+#define TAB_H    26
+#define PREV_Y   (12 + TAB_H)
 #define PREV_W   (WIN_W - 24)
 #define PREV_H   150
 
 #define LIST_X   12
-#define LIST_Y   196
+#define LIST_Y   (196 + TAB_H)
 #define LIST_W   270
 #define LIST_H   116
 #define ROW_H    18
 
 #define PAL_X    300
-#define PAL_Y    196
+#define PAL_Y    (196 + TAB_H)
 #define PAL_CELL 26
 #define PAL_COLS 8
 #define PAL_ROWS 2
 
-#define SPD_Y    334
+#define SPD_Y    (334 + TAB_H)
 #define BTN_Y    (WIN_H - 40)
 #define BTN_W    80
 #define BTN_H    26
@@ -107,12 +110,14 @@ static void apply_scheme(int i)
 
 static void save_theme(void)
 {
-    /* 設定ディレクトリが無ければ作る */
-    if (system("mkdir -p /etc/myos") != 0) { /* 失敗しても書き込みで分かる */ }
+    /* 書き先はユーザーの ~/.myos。/etc/myos は root のものなので触らない。
+     * 配色を変えるだけで管理者権限を聞かれるのは筋が悪い。 */
+    char path[512];
+    myos_user_conf(path, sizeof(path), X98_THEME_CONF);
 
-    FILE *f = fopen(X98_THEME_CONF, "w");
+    FILE *f = fopen(path, "w");
     if (!f) {
-        fprintf(stderr, "[myos-settings] cannot write %s\n", X98_THEME_CONF);
+        fprintf(stderr, "[myos-settings] cannot write %s\n", path);
         return;
     }
     fprintf(f, "# myOS のテーマ。myos-settings が書き出す。\n");
@@ -133,6 +138,106 @@ static void save_theme(void)
         execl("/bin/sh", "sh", "-c", "pkill -USR1 -x myos-wm", (char *)NULL);
         _exit(127);
     }
+}
+
+/* --- タブ ---------------------------------------------------------------- */
+enum { TAB_LOOK = 0, TAB_TYPES, TAB_SYSTEM, N_TABS };
+static const char *tab_name[N_TABS] = {
+    "Appearance", "File Types", "System"
+};
+static int tab = TAB_LOOK;
+
+/* --- ファイルの種類 ------------------------------------------------------ */
+#define FT_LIST_X 12
+#define FT_LIST_Y (TAB_H + 26)   /* タブの帯と「〜の一覧」の見出しのぶん空ける */
+#define FT_LIST_W 380
+#define FT_LIST_H 240
+#define FT_ROW_H  18
+
+static FileType ftypes[FT_MAX];
+static int      n_ftypes = 0;
+static int      ft_sel = 0, ft_top = 0;
+static X98Edit  ed_open, ed_run;
+static int      ft_field = 0;       /* 0 = 開く / 1 = 実行 */
+static int      ft_dirty = 0;
+
+static void ft_pick(int i)
+{
+    if (i < 0 || i >= n_ftypes) return;
+    ft_sel = i;
+    x98_edit_set(&ed_open, ftypes[i].open);
+    x98_edit_set(&ed_run,  ftypes[i].run);
+}
+
+/* 編集中の内容を表へ戻す */
+static void ft_commit(void)
+{
+    if (ft_sel < 0 || ft_sel >= n_ftypes) return;
+    snprintf(ftypes[ft_sel].open, FT_CMD, "%s", ed_open.buf);
+    snprintf(ftypes[ft_sel].run,  FT_CMD, "%s", ed_run.buf);
+}
+
+static void save_filetypes(void)
+{
+    ft_commit();
+
+    char path[512];
+    myos_user_conf(path, sizeof(path), "filetypes.conf");
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "[myos-settings] cannot write %s\n", path);
+        return;
+    }
+    fprintf(f, "# myOS: ファイルの関連付け (myos-settings が書き出す)\n");
+    fprintf(f, "# 拡張子|説明|アイコン|開く|実行\n");
+    fprintf(f, "# %%1 がファイルのパスに置き換わる。\n");
+    for (int i = 0; i < n_ftypes; i++)
+        fprintf(f, "%s|%s|%s|%s|%s\n", ftypes[i].exts, ftypes[i].desc,
+                ftypes[i].icon, ftypes[i].open, ftypes[i].run);
+    fclose(f);
+    ft_dirty = 0;
+}
+
+/* --- システム ------------------------------------------------------------ */
+static const struct { const char *label; const char *val; } heaps[] = {
+    { "Automatic (1/4 of RAM)", "auto" },
+    { "256 MB",  "256" },
+    { "512 MB",  "512" },
+    { "1024 MB", "1024" },
+};
+#define N_HEAPS ((int)(sizeof(heaps) / sizeof(heaps[0])))
+static int heap_sel = 0;
+
+static void load_java(void)
+{
+    char path[512];
+    myos_conf(path, sizeof(path), "java.conf");
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char *s = myos_trim(line);
+        if (strncmp(s, "heap_mb", 7)) continue;
+        char *eq = strchr(s, '=');
+        if (!eq) continue;
+        char *v = myos_trim(eq + 1);
+        for (int i = 0; i < N_HEAPS; i++)
+            if (!strcmp(v, heaps[i].val)) { heap_sel = i; break; }
+        break;
+    }
+    fclose(f);
+}
+
+static void save_java(void)
+{
+    char path[512];
+    myos_user_conf(path, sizeof(path), "java.conf");
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "# myOS: Java の走らせ方 (myos-settings が書き出す)\n");
+    fprintf(f, "heap_mb = %s\n", heaps[heap_sel].val);
+    fclose(f);
 }
 
 /* --- 描画 ---------------------------------------------------------------- */
@@ -213,6 +318,15 @@ static void draw_speed(void)
     }
 }
 
+/* OK / Apply で 3 つのタブぶんまとめて書く。
+ * どのタブを見ていたかで保存されるものが変わる、というのは分かりにくい。 */
+static void save_all(void)
+{
+    save_theme();
+    save_filetypes();
+    save_java();
+}
+
 static void draw_buttons(void)
 {
     int bx = WIN_W - (BTN_W + 8) * 3 - 4;
@@ -222,14 +336,147 @@ static void draw_buttons(void)
                "Cancel", 0);
 }
 
+static void draw_tabs(void)
+{
+    int x = 8;
+    for (int i = 0; i < N_TABS; i++) {
+        int w = x98_text_w(&x98, tab_name[i]) + 24;
+        int y = (i == tab) ? 6 : 9;
+        int h = (i == tab) ? TAB_H - 2 : TAB_H - 5;
+        x98_fill(&x98, win, x, y, w, h, x98.face);
+        /* 選んでいるものだけ下線を消して、中身と地続きに見せる */
+        x98_hline(&x98, win, x, y, w, x98.light);
+        x98_vline(&x98, win, x, y, h, x98.light);
+        x98_vline(&x98, win, x + w - 1, y, h, x98.shadow);
+        x98_text(&x98, win, x + 12, y + (h - x98_text_h(&x98)) / 2,
+                 tab_name[i], x98.text);
+        x += w + 2;
+    }
+    x98_hline(&x98, win, 8, TAB_H + 4, WIN_W - 16, x98.light);
+}
+
+static void edit_row(int x, int y, int w, const char *lab, X98Edit *e, int focus)
+{
+    x98_text(&x98, win, x, y + 4, lab, x98.text);
+    x98_edit_draw(&x98, win, x + 90, y, w, 20, e, focus);
+}
+
+static void draw_types(void)
+{
+    x98_text(&x98, win, FT_LIST_X, FT_LIST_Y - 16,
+             "Registered file types:", x98.text);
+
+    x98_bevel(&x98, win, FT_LIST_X, FT_LIST_Y, FT_LIST_W, FT_LIST_H, 0);
+    x98_fill(&x98, win, FT_LIST_X + 2, FT_LIST_Y + 2,
+             FT_LIST_W - 4, FT_LIST_H - 4, x98.white);
+
+    int vis = (FT_LIST_H - 4) / FT_ROW_H;
+    for (int r = 0; r < vis; r++) {
+        int i = ft_top + r;
+        if (i >= n_ftypes) break;
+        int ry = FT_LIST_Y + 2 + r * FT_ROW_H;
+        unsigned long fg = x98.text;
+        if (i == ft_sel) {
+            x98_fill(&x98, win, FT_LIST_X + 2, ry, FT_LIST_W - 4, FT_ROW_H,
+                     x98.select_bg);
+            fg = x98.white;
+        }
+        x98_text(&x98, win, FT_LIST_X + 8,
+                 ry + (FT_ROW_H - x98_text_h(&x98)) / 2, ftypes[i].desc, fg);
+    }
+
+    /* 選んでいる種類の中身 */
+    int dy = FT_LIST_Y + FT_LIST_H + 16;
+    if (ft_sel >= 0 && ft_sel < n_ftypes) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Extensions:  %s", ftypes[ft_sel].exts);
+        x98_text(&x98, win, FT_LIST_X, dy, buf, x98.text);
+    }
+    edit_row(FT_LIST_X, dy + 22, WIN_W - FT_LIST_X - 100, "Opens with:",
+             &ed_open, ft_field == 0);
+    edit_row(FT_LIST_X, dy + 50, WIN_W - FT_LIST_X - 100, "Runs with:",
+             &ed_run, ft_field == 1);
+
+    x98_text(&x98, win, FT_LIST_X, dy + 80,
+             "%1 is replaced with the file. Tab switches boxes.", x98.shadow);
+    x98_text(&x98, win, FT_LIST_X, dy + 96,
+             "\"Runs with\" is the second verb in the right-click menu.",
+             x98.shadow);
+}
+
+static void draw_system(void)
+{
+    char buf[256];
+    int y = TAB_H + 20;
+
+    x98_text(&x98, win, 16, y, "Account", x98.text);
+    /* 環境変数は su の通り方で入っていないことがあるので、
+     * 最後は uid から引く。 */
+    const char *user = getenv("USER");
+    if (!user || !user[0]) user = getenv("LOGNAME");
+    if (!user || !user[0]) {
+        struct passwd *pw = getpwuid(getuid());
+        user = (pw && pw->pw_name) ? pw->pw_name : "(unknown)";
+    }
+    snprintf(buf, sizeof(buf), "    Logged on as:  %s", user);
+    x98_text(&x98, win, 16, y + 22, buf, x98.text);
+    snprintf(buf, sizeof(buf), "    Running as:    %s",
+             geteuid() == 0 ? "root (administrator)" : "standard user");
+    x98_text(&x98, win, 16, y + 40, buf, x98.text);
+    x98_text(&x98, win, 16, y + 58,
+             "    Anything system-wide asks for your password.", x98.shadow);
+
+    y += 96;
+    x98_text(&x98, win, 16, y, "Java heap size", x98.text);
+    x98_text(&x98, win, 16, y + 20,
+             "    How much memory Java programs may use.", x98.shadow);
+    for (int i = 0; i < N_HEAPS; i++) {
+        int ry = y + 42 + i * 22;
+        x98_bevel(&x98, win, 32, ry, 13, 13, 0);
+        x98_fill(&x98, win, 34, ry + 2, 9, 9, x98.white);
+        if (i == heap_sel) x98_fill(&x98, win, 36, ry + 4, 5, 5, x98.text);
+        x98_text(&x98, win, 54, ry + (13 - x98_text_h(&x98)) / 2 - 1,
+                 heaps[i].label, x98.text);
+    }
+
+    y += 42 + N_HEAPS * 22 + 20;
+    x98_text(&x98, win, 16, y, "System settings", x98.text);
+    x98_text(&x98, win, 16, y + 20,
+             "    These settings are yours alone (~/.myos).", x98.shadow);
+    x98_text(&x98, win, 16, y + 36,
+             "    To change the defaults for everyone, edit /etc/myos", x98.shadow);
+    x98_text(&x98, win, 16, y + 52,
+             "    as an administrator.", x98.shadow);
+}
+
 static void redraw(void)
 {
     x98_fill(&x98, win, 0, 0, WIN_W, WIN_H, x98.face);
-    draw_preview();
-    draw_list();
-    draw_palette();
-    draw_speed();
+    draw_tabs();
+    switch (tab) {
+    case TAB_LOOK:
+        draw_preview();
+        draw_list();
+        draw_palette();
+        draw_speed();
+        break;
+    case TAB_TYPES:  draw_types();  break;
+    case TAB_SYSTEM: draw_system(); break;
+    }
     draw_buttons();
+}
+
+/* タブの帯のどれを押したか。外なら -1。 */
+static int tab_hit(int mx, int my)
+{
+    if (my < 4 || my > TAB_H + 4) return -1;
+    int x = 8;
+    for (int i = 0; i < N_TABS; i++) {
+        int w = x98_text_w(&x98, tab_name[i]) + 24;
+        if (mx >= x && mx < x + w) return i;
+        x += w + 2;
+    }
+    return -1;
 }
 
 /* --- 本体 ---------------------------------------------------------------- */
@@ -252,10 +499,14 @@ int main(void)
 
     win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 0, 0,
                               WIN_W, WIN_H, 0, 0, x98.face);
-    XSelectInput(dpy, win, ExposureMask | ButtonPressMask);
+    XSelectInput(dpy, win, ExposureMask | ButtonPressMask | KeyPressMask);
     a_wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(dpy, win, &a_wm_delete, 1);
-    XStoreName(dpy, win, "Display Properties");
+    XStoreName(dpy, win, "Settings");
+
+    n_ftypes = ft_load(ftypes, FT_MAX);
+    ft_pick(0);
+    load_java();
 
     /* 大きさを変えられると配置が崩れるので固定にする */
     XSizeHints hints;
@@ -285,6 +536,58 @@ int main(void)
 
         case ButtonPress: {
             int mx = ev.xbutton.x, my = ev.xbutton.y;
+
+            /* タブの切り替えが最優先 */
+            int t = tab_hit(mx, my);
+            if (t >= 0) {
+                if (tab == TAB_TYPES) ft_commit();
+                tab = t;
+                redraw();
+                break;
+            }
+
+            if (tab == TAB_TYPES) {
+                /* 種類の一覧 */
+                if (mx >= FT_LIST_X && mx < FT_LIST_X + FT_LIST_W &&
+                    my >= FT_LIST_Y + 2 && my < FT_LIST_Y + FT_LIST_H - 2) {
+                    ft_commit();
+                    int i = ft_top + (my - FT_LIST_Y - 2) / FT_ROW_H;
+                    if (i >= 0 && i < n_ftypes) ft_pick(i);
+                    redraw();
+                    break;
+                }
+                /* ホイールで送る */
+                if (ev.xbutton.button == 4 || ev.xbutton.button == 5) {
+                    int vis = (FT_LIST_H - 4) / FT_ROW_H;
+                    ft_top += (ev.xbutton.button == 4) ? -3 : 3;
+                    if (ft_top > n_ftypes - vis) ft_top = n_ftypes - vis;
+                    if (ft_top < 0) ft_top = 0;
+                    redraw();
+                    break;
+                }
+                /* 入力欄の行 */
+                int dy = FT_LIST_Y + FT_LIST_H + 16;
+                if (my >= dy + 22 && my < dy + 42)      ft_field = 0;
+                else if (my >= dy + 50 && my < dy + 70) ft_field = 1;
+                redraw();
+                break;
+            }
+
+            if (tab == TAB_SYSTEM) {
+                int y = TAB_H + 20 + 96 + 42;
+                for (int i = 0; i < N_HEAPS; i++) {
+                    int ry = y + i * 22;
+                    if (my >= ry && my < ry + 16 && mx >= 32 && mx < 300) {
+                        heap_sel = i;
+                        redraw();
+                        break;
+                    }
+                }
+                if (my < BTN_Y) break;
+            }
+
+            /* 以下は外観タブのときだけ */
+            if (tab != TAB_LOOK && my < BTN_Y) break;
 
             /* 配色の一覧 */
             if (mx >= LIST_X && mx < LIST_X + LIST_W &&
@@ -329,12 +632,12 @@ int main(void)
             if (my >= BTN_Y && my < BTN_Y + BTN_H) {
                 int bx = WIN_W - (BTN_W + 8) * 3 - 4;
                 if (mx >= bx && mx < bx + BTN_W) {              /* OK */
-                    save_theme();
+                    save_all();
                     XCloseDisplay(dpy);
                     return 0;
                 }
                 if (mx >= bx + BTN_W + 8 && mx < bx + 2 * BTN_W + 8) {
-                    save_theme();                               /* Apply */
+                    save_all();                                 /* Apply */
                     break;
                 }
                 if (mx >= bx + (BTN_W + 8) * 2) {               /* Cancel */
@@ -342,6 +645,38 @@ int main(void)
                     return 0;
                 }
             }
+            break;
+        }
+
+        case KeyPress: {
+            if (tab != TAB_TYPES) break;
+            char buf[32];
+            KeySym ks;
+            int n = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &ks, NULL);
+            X98Edit *e = ft_field ? &ed_run : &ed_open;
+
+            if (ks == XK_Tab)              ft_field ^= 1;
+            else if (ks == XK_BackSpace)   { x98_edit_backspace(e); ft_dirty = 1; }
+            else if (ks == XK_Delete)      { x98_edit_delete(e); ft_dirty = 1; }
+            else if (ks == XK_Return || ks == XK_KP_Enter) {
+                ft_commit();
+                ft_dirty = 1;
+            } else if (ks == XK_Up) {
+                ft_commit();
+                if (ft_sel > 0) ft_pick(ft_sel - 1);
+            } else if (ks == XK_Down) {
+                ft_commit();
+                if (ft_sel < n_ftypes - 1) ft_pick(ft_sel + 1);
+            } else if (n > 0 && (unsigned char)buf[0] >= 0x20) {
+                buf[n] = 0;
+                x98_edit_insert(e, buf, n);
+                ft_dirty = 1;
+            }
+            /* 選んだ行が見えるように送る */
+            int vis = (FT_LIST_H - 4) / FT_ROW_H;
+            if (ft_sel < ft_top) ft_top = ft_sel;
+            if (ft_sel >= ft_top + vis) ft_top = ft_sel - vis + 1;
+            redraw();
             break;
         }
 
