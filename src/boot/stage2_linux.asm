@@ -48,7 +48,11 @@ BOOTPARAMS_LIN  equ 0x00090000
 CMDLINE_OFF     equ 0x2000              ; ゼロページと同じセグメント内に置く
 CMDLINE_LIN     equ 0x00092000
 KERNEL_DST      equ 0x00100000          ; カーネル本体 (1MB)
-INITRD_DST      equ 0x04000000          ; initramfs (64MB)
+INITRD_DST      equ 0x08000000          ; initramfs (128MB)
+                                        ; モノリシック構成のカーネルは
+                                        ; 展開前でも数十 MB になるので、
+                                        ; 1MB から伸びる本体とぶつからない
+                                        ; よう十分に離してある
 SCRATCH_SEG     equ 0x1000              ; bzImage 先頭を置く作業領域 = 0x10000
 PTBL_OFF        equ 0x0900              ; ペイロードテーブルの置き場 (0x0900)
 PTBL_LBA        equ 20                  ; ペイロードテーブルのあるセクタ。
@@ -720,7 +724,7 @@ msg_no_hdrs:    db "no 'HdrS' magic - not a bzImage", 0
 msg_proto:      db '/ boot protocol ', 0
 msg_setupsects: db ' / setup_sects ', 0
 msg_kernel:     db 'Kernel      : loading to 0x100000 ', 0
-msg_initrd:     db 'initramfs   : loading to 0x4000000 ', 0
+msg_initrd:     db 'initramfs   : loading to 0x8000000 ', 0
 msg_no_initrd:  db 'initramfs   : none', 0
 msg_vbe:        db 'VESA (VBE)  : ', 0
 msg_vbe_found:  db 'mode found ', 0

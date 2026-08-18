@@ -61,12 +61,34 @@ EXTRA="openjdk-17-jre \
        libxrandr2 libxxf86vm1 libxcursor1 libxi6 libxinerama1 \
        xterm"
 
+# ドライバのファームウェア。
+# カーネルにドライバを組み込んでも、ファームウェアの blob は別途要る
+# (Wi-Fi、最近の GPU、一部の有線 LAN など)。
+# Debian では non-free-firmware コンポーネントに入っている。
+FIRMWARE="firmware-linux-free firmware-misc-nonfree firmware-realtek \
+          firmware-iwlwifi firmware-atheros firmware-brcm80211 \
+          firmware-amd-graphics firmware-intel-sound"
+
 echo "=== 追加パッケージ ==="
 cp /etc/resolv.conf "$WORK/etc/resolv.conf"
 mount --bind /proc "$WORK/proc" 2>/dev/null || true
+# non-free-firmware を有効にする (Debian 12 から独立した component)
+cat > "$WORK/etc/apt/sources.list" <<EOF
+deb $MIRROR $SUITE main contrib non-free-firmware
+deb $MIRROR $SUITE-updates main contrib non-free-firmware
+EOF
 chroot "$WORK" sh -c "apt-get update -qq && \
     apt-get install -y --no-install-recommends $EXTRA >/dev/null && \
     apt-get clean"
+
+echo "=== ファームウェア ==="
+# 入らないものがあっても致命的ではないので、1 つずつ試して続行する。
+for fw in $FIRMWARE; do
+    chroot "$WORK" sh -c \
+        "apt-get install -y --no-install-recommends $fw >/dev/null 2>&1" \
+        && echo "  $fw" || echo "  $fw (見つからずスキップ)"
+done
+chroot "$WORK" apt-get clean
 umount "$WORK/proc" 2>/dev/null || true
 
 echo "=== 基本設定 ==="
@@ -277,7 +299,7 @@ Java Demo|java|java -jar /usr/local/share/myos/hello.jar
 OpenGL Test|app|/usr/bin/glxgears
 MS-DOS Prompt|app|/usr/bin/xterm -bg black -fg lightgray -fa Monospace -fs 11
 Settings|app|/usr/local/bin/myos-settings
-Removable Media|folder|/usr/local/bin/myos-files /media
+Removable|folder|/usr/local/bin/myos-files /media
 EOF
 
 cat > "$WORK/etc/myos/startmenu.conf" <<'EOF'
@@ -285,7 +307,7 @@ cat > "$WORK/etc/myos/startmenu.conf" <<'EOF'
 Programs|app|/usr/local/bin/myos-files /usr/bin
 Documents|folder|/usr/local/bin/myos-files /root
 Settings|app|/usr/local/bin/myos-settings
-Removable Media|folder|/usr/local/bin/myos-files /media
+Removable|folder|/usr/local/bin/myos-files /media
 Web|globe|/usr/bin/firefox-esr
 MS-DOS Prompt|app|/usr/bin/xterm -bg black -fg lightgray
 Shut Down|app|/sbin/poweroff

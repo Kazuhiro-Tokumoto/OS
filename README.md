@@ -3,8 +3,9 @@
 Windows 98 もどきの見た目・操作感を目指した自作 OS。
 
 自作するのは **ブートローダー** と **GUI 層** の 2 つに絞り、
-カーネルは Linux カーネルをそのまま採用する（`.ko` は全て `=y` にした
-モノリシックな `bzImage` 1 個で完結させる）。
+カーネルは Linux カーネルをそのまま採用する。
+`.ko` は全て `=y` にしたモノリシックな `bzImage` 1 個で完結させてあり、
+初回起動時にドライバを入れる手間は無い（`=m` は 0 個）。
 自作ブートローダーから Linux Boot Protocol の 32bit Entry で直接起動することを目指す。
 ユーザーランドも動的リンカーや実行ファイル形式は自作せず、
 標準 ELF と既存の glibc / musl を流用する。
@@ -45,6 +46,9 @@ tools/        ビルド・検証スクリプト
   make_initramfs.sh     initramfs (cpio) の作成
   make_fake_kernel.py   偽 bzImage の作成
 docs/         設計メモ・進捗
+  kernel.md             カーネルの構成 (モノリシック、ファームウェア)
+  image-layout.md       ディスクイメージの構成
+  desktop.md            デスクトップ環境 (WM / ファイラ / 設定 / USB)
 build/        生成物 (git 管理外)
 ```
 

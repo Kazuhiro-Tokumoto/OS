@@ -101,9 +101,8 @@ Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...
 
 ### 残っている宿題
 
-- [ ] カーネルを本来の方針どおり「`.ko` を全て `=y`」のモノリシック構成にする
-      （`MONOLITHIC=1 sh tools/build_kernel.sh` で試せるようにはしてある。
-      現状の検証は defconfig で行った）
+- [x] カーネルを本来の方針どおり「`.ko` を全て `=y`」のモノリシック構成にした
+      （`=m` は 0 個、`=y` が 1818 個。bzImage は zstd 圧縮で 20MB）
 - [ ] initramfs を busybox など実用的な中身にする
       （今は動作確認用の `/init` が 1 本あるだけ）
 - [ ] CHS 経路（EDD 非対応の古い BIOS）での 13MB 読み込みは 1 セクタずつに
@@ -158,6 +157,10 @@ Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...
 - [x] USB キーボード / マウス / メモリ（ドライバは全部カーネル組み込み済み）
 - [x] リムーバブルメディアの自動マウント（`/media/<デバイス名>`）
 - [x] exFAT / NTFS（今どきの USB メモリ向けに追加）
+- [x] モノリシックカーネル（初回のドライバ導入を不要にする）
+      NVMe / AHCI / SD / i915 / amdgpu / nouveau / 主要な有線・無線 LAN /
+      HD Audio などを組み込み済み。詳細は `docs/kernel.md`
+- [x] ドライバのファームウェア（Debian の non-free-firmware から）
 - [ ] Minecraft は同梱できない（proprietary + 要アカウント）。
       土台は揃っているが、GPU 無しでは実用速度にならない
 

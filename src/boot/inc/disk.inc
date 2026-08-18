@@ -365,6 +365,12 @@ disk_load_high:
         shl     eax, 9                  ; * 512
         add     [hi_dst], eax
 
+        ; 進捗の点。チャンクごとに打つとモノリシックなカーネル
+        ; (数十 MB) では画面が点で埋まるので、1MB ごとに 1 個にする。
+        inc     byte [hi_dots]
+        cmp     byte [hi_dots], 32      ; 32 * 32KB = 1MB
+        jb      .chunk_loop
+        mov     byte [hi_dots], 0
         mov     al, '.'
         call    putc
         jmp     .chunk_loop
@@ -414,3 +420,4 @@ hi_lba:         dd 0
 hi_left:        dd 0
 hi_this:        dd 0
 hi_dst:         dd 0
+hi_dots:        db 0

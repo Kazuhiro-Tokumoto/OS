@@ -55,7 +55,9 @@
 #define MENU_W       168
 #define MENU_ITEM_H  22
 
-#define ICON_CELL_W  108
+/* rootfs には helvetica が無く 9x15bold にフォールバックする。
+ * 1 文字 9px なので、13 文字くらいは入る幅にしておく。 */
+#define ICON_CELL_W  124
 #define ICON_CELL_H  84
 #define ICON_TOP     16
 #define ICON_LEFT    12
