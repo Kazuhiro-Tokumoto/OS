@@ -247,6 +247,12 @@ def parse_keys(spec: str):
         for ch in token:
             if ch == " ":
                 keys.append("spc")
+            elif ch.isupper():
+                # sendkey にはキーの名前しか無いので、大文字は
+                # shift との組み合わせにする。
+                # (これを忘れると "id -nG" が "id -ng" になって、
+                #  別の意味のコマンドが実行される)
+                keys.append("shift-" + ch.lower())
             elif ch.isalnum():
                 keys.append(ch.lower())
             elif ch in punct:
