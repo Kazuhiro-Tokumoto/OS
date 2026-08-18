@@ -96,6 +96,14 @@ jobs:
           sudo rm -rf "$KDIR"
           ls -l build/bzImage
 
+      # デスクトップに置く Java のデモ。
+      # build_rootfs.sh はこれが無ければ黙って飛ばすので、先に作っておく。
+      - name: Java のデモアプリ
+        run: |
+          sudo apt-get install -y --no-install-recommends default-jdk-headless
+          make java-demo
+          ls -l build/hello.jar
+
       - name: ルートファイルシステムをビルド
         run: sudo -E sh tools/build_rootfs.sh "$ROOTFS"
 
@@ -119,9 +127,16 @@ jobs:
             --initrd  build/install-initramfs.cpio.gz \
             --payload build/myos.squashfs \
             --out     "build/${{ steps.ver.outputs.iso }}"
-          sudo chown "$USER" "build/${{ steps.ver.outputs.iso }}"
+          # build/ の中は sudo で作ったので root 所有になっている。
+          # このあと一般ユーザーで書き込む (sha256 の保存、成果物の収集) ので、
+          # ディレクトリごと渡しておく。
+          # 1 ファイルだけ chown していたら、隣に .sha256 を作る段で
+          # Permission denied になった。
+          sudo chown -R "$USER" build
           cd build && sha256sum "${{ steps.ver.outputs.iso }}" \
-            | tee "${{ steps.ver.outputs.iso }}.sha256"
+            > "${{ steps.ver.outputs.iso }}.sha256"
+          cat "build/${{ steps.ver.outputs.iso }}.sha256" 2>/dev/null || \
+            cat "${{ steps.ver.outputs.iso }}.sha256"
 
       # リリースが作れなかったときの逃げ道。ここからでも落とせる。
       - name: 成果物として残す
