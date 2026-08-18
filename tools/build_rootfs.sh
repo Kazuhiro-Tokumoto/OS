@@ -137,6 +137,13 @@ echo "=== myOS の起動スクリプト ==="
 cat > "$WORK/myos-init" <<'EOF'
 #!/bin/sh
 # myOS の PID 1。systemd の代わり。
+
+# PID 1 には PATH が無い。そのままだと execvp が /bin:/usr/bin しか見ず、
+# /usr/sbin にある useradd や /sbin の poweroff が「無い」ことになる。
+# (セットアップがユーザーを作れずに黙って失敗する、という形で刺さる)
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 mount -t proc     proc     /proc
 mount -t sysfs    sys      /sys
 mount -t devtmpfs dev      /dev  2>/dev/null

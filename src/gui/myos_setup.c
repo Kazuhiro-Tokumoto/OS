@@ -82,13 +82,26 @@ static int px(void) { return (scr_w - PANEL_W) / 2; }
 static int py(void) { return (scr_h - PANEL_H) / 2; }
 
 /* --- 外部コマンド -------------------------------------------------------- */
-/* シェルを通さずに実行して終わるまで待つ。戻り値は終了ステータス。 */
+/* シェルを通さずに実行して終わるまで待つ。戻り値は終了ステータス。
+ *
+ * useradd や passwd は /usr/sbin に居る。PID 1 から来た環境だと
+ * PATH にそこが入っていないことがあるので、見つからなければ
+ * sbin を直接あたる。 */
 static int run(char *const argv[])
 {
+    static const char *sbin[] = { "/usr/sbin/", "/sbin/", NULL };
+
     pid_t p = fork();
     if (p < 0) return -1;
     if (p == 0) {
         execvp(argv[0], argv);
+        if (errno == ENOENT && argv[0][0] != '/') {
+            char path[256];
+            for (int i = 0; sbin[i]; i++) {
+                snprintf(path, sizeof(path), "%s%s", sbin[i], argv[0]);
+                execv(path, argv);
+            }
+        }
         _exit(127);
     }
     int st = 0;
@@ -110,6 +123,7 @@ static int set_password(const char *user, const char *pass)
         dup2(fd[0], 0);
         close(fd[0]);
         execlp("chpasswd", "chpasswd", (char *)NULL);
+        execl("/usr/sbin/chpasswd", "chpasswd", (char *)NULL);
         _exit(127);
     }
     close(fd[0]);
@@ -146,12 +160,19 @@ static int apply_all(void)
     char *ua[] = { "useradd", "-m", "-s", "/bin/bash",
                    "-G", "sudo,audio,video,plugdev,cdrom,dialout",
                    ed_user.buf, NULL };
-    if (run(ua) != 0) {
-        snprintf(err, sizeof(err), "Could not create the user account.");
+    int rc = run(ua);
+    if (rc != 0) {
+        /* 何で失敗したかが分からないと直しようが無いので、
+         * useradd の終了コードをそのまま出す。
+         * 127 = そもそも見つからない / 9 = 名前が使われている など。 */
+        snprintf(err, sizeof(err),
+                 "Could not create the user account (useradd exit %d).", rc);
         return 0;
     }
-    if (set_password(ed_user.buf, ed_pw1.buf) != 0) {
-        snprintf(err, sizeof(err), "Could not set the password.");
+    rc = set_password(ed_user.buf, ed_pw1.buf);
+    if (rc != 0) {
+        snprintf(err, sizeof(err),
+                 "Could not set the password (chpasswd exit %d).", rc);
         return 0;
     }
 
