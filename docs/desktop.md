@@ -40,13 +40,156 @@ Java Demo|java|java -jar /usr/local/share/myos/hello.jar
 ## ファイルマネージャ (`src/gui/myos_files.c`)
 
 - フォルダが先、次にファイル、それぞれ名前順
-- ダブルクリックで開く
-  - ディレクトリ → そこへ移動
-  - `.jar` → `java -jar` で実行
-  - 実行可能 → そのまま実行
-  - それ以外 → Firefox に渡す
+- ダブルクリックで開く（振り分けは「ファイル操作」の節の表を参照）
 - 上へ / ホーム / 更新
 - ホイールでスクロール、上下キーと Enter でも操作できる
+- コピー / 移動 / リネーム / 削除と右クリックメニュー（後述）
+
+## ウィンドウの作法 (Z オーダーとキーボード)
+
+「基本的に Windows 11 の操作ができてほしい」という要望に合わせて、
+見た目は Win98 のまま、操作だけ今どきの Windows に寄せてある。
+
+### Z オーダー
+
+以前は「クリックしたら `XRaiseWindow` する」だけで、
+誰が前面にいるかをウィンドウマネージャ自身が把握していなかった。
+今は前面から順に並んだ配列を持っている。
+
+```c
+Client *zlist[MAX_CLIENTS];   /* [0] が最前面 */
+int     n_z;
+Client *focused;
+```
+
+`raise_client()` は zlist の先頭に move-to-front して
+フォーカスを移し、**それまでフォーカスされていた窓の枠も描き直す**。
+アクティブなタイトルバーは紺→水色のグラデーション、
+非アクティブは灰色 (`0x808080` → `0xB5B5B5`) になる。
+Win98 と同じく、どれが手前かがタイトルバーの色で分かる。
+
+タスクバーのボタンも zlist の順ではなく生成順に並べてあるので、
+窓を前後させてもボタンが踊らない。
+
+### キーボード
+
+| キー | 動作 |
+| --- | --- |
+| `Alt+Tab` | 次のウィンドウへ (zlist を巡回して最前面に出す) |
+| `Alt+F4` | アクティブなウィンドウを閉じる (`WM_DELETE_WINDOW`) |
+| `Windows` キー | スタートメニューの開閉 |
+
+`XGrabKey` は修飾キーの組み合わせごとに登録しないと効かないので、
+`NumLock` (`Mod2Mask`) と `CapsLock` (`LockMask`) の 4 通りで登録している。
+ここを忘れると「NumLock が点いていると Alt+Tab が効かない」になる。
+
+### マウス
+
+| 操作 | 動作 |
+| --- | --- |
+| タイトルバーをドラッグ | 移動 |
+| タイトルバーをダブルクリック | 最大化 / 元に戻す |
+| 右端 / 下端 / 右下のつまみをドラッグ | リサイズ |
+| 枠のどこかをクリック | 最前面 + フォーカス |
+
+## メモ帳 (`src/gui/myos_notepad.c`)
+
+Win98 の Notepad 相当。等幅フォント `9x15` で描く複数行エディタ。
+
+- File メニュー: New / Save / Exit
+- `Ctrl+S` 保存 / `Ctrl+N` 新規 / `Ctrl+Q` 終了
+- 矢印 / `Home` / `End` / `PageUp` / `PageDown` / `Tab`
+- 引数にファイル名を渡すとそれを開く（ファイルマネージャから使う）
+
+行は `char *lines[MAX_LINES]` で持っていて、必要な分だけ確保する。
+
+## 画像ビューア (`src/gui/myos_image.c`)
+
+PNG / JPEG / GIF / BMP を表示する。デコーダは自作せず
+**ImageMagick の `convert` に PPM へ変換させて、それを読む**。
+
+```c
+execlp("convert", "convert", path, "-depth", "8", "ppm:-", (char *)NULL);
+```
+
+- `+` / `-` 拡大縮小、`0` 等倍、`F` 画面に合わせる
+- ホイールでも拡大縮小、矢印でスクロール
+- 下のステータスバーにファイル名 / 元の大きさ / 倍率
+
+### ハマった点: 16bit の PPM
+
+最初は緑と紫の縞模様が出た。ImageMagick が入力によっては
+**1 チャンネル 16bit の PPM (`P6 320 240 65535`)** を吐くためで、
+8bit 前提で読むと 1 ピクセルずつずれていく。
+`-depth 8` を付けたうえで、`maxval > 255` の PPM は受け取らないようにした。
+
+## ファイル操作 (コピー / 移動 / リネーム)
+
+ファイルマネージャに Win98 相当のファイル操作を入れた。
+
+| 操作 | キー | 備考 |
+| --- | --- | --- |
+| コピー | `Ctrl+C` | パスを覚えるだけ (`clip_path`) |
+| 切り取り | `Ctrl+X` | 貼り付け時に `mv` になる |
+| 貼り付け | `Ctrl+V` | `cp -a` または `mv -f` |
+| リネーム | `F2` | ツールバー上でその場編集 |
+| 削除 | `Delete` | ツールバーに確認が出る |
+| 更新 | `F5` | |
+
+右クリックでコンテキストメニュー
+(Open / Copy / Cut / Paste / Rename / Delete / Add to Desktop)。
+
+文字入力が要るのはリネームだけなので、`x98.h` に小さな
+テキスト入力ウィジェットを足した。メモ帳のような本格的な
+エディタとは別物で、1 行分のバッファとカーソル位置しか持たない。
+
+```c
+typedef struct { char buf[512]; int len; int cur; } X98Edit;
+```
+
+外部コマンドの呼び出しは全て `execlp` で、**シェルを経由しない**。
+`system("cp -a " ...)` にすると空白や引用符の入ったファイル名で壊れる。
+
+### 開くときの振り分け
+
+| 種類 | 動作 |
+| --- | --- |
+| ディレクトリ | そこへ移動 |
+| 画像 (png/jpg/gif/bmp) | `myos-image` |
+| テキスト (txt/log/conf/sh...) | `myos-notepad` |
+| `.jar` | `java -jar` |
+| 実行可能 | そのまま実行 |
+| それ以外 | `firefox-esr` |
+
+## MS-DOS プロンプト
+
+`xterm` を Win98 風の配色と等幅フォントで出しているだけだが、
+`/etc/myos/dosrc` を `--rcfile` で読ませて DOS のコマンド名を通している。
+
+```sh
+alias dir='ls -la'    alias cls='clear'   alias copy='cp -i'
+alias move='mv -i'    alias del='rm -i'   alias ren='mv'
+alias md='mkdir'      alias rd='rmdir'    alias type='cat'
+alias ver='uname -a'  alias mem='free -h' alias edit='myos-notepad'
+```
+
+プロンプトは `C:\path\to\here>` の形にしている。
+中身は普通の Linux のパスで、表示のときに `/` を `\` に置換しているだけ。
+
+```sh
+dos_pwd() { printf 'C:'; printf '%s' "$PWD" | tr '/' '\\'; }
+PS1='$(dos_pwd)> '
+```
+
+### ハマった点: 文字化け
+
+起動時のバナーに日本語を入れたら化けた。
+`xterm` に指定している `9x15` はビットマップフォントで、
+**日本語のグリフを持っていない**。
+バナーは ASCII だけで書くようにした。
+
+（`fixed` 系の 2 バイトフォントを併用すれば日本語も出せるが、
+Win98 の DOS 窓らしさを優先して英語のままにしてある）
 
 ## 設定アプリ (`src/gui/myos_settings.c`)
 

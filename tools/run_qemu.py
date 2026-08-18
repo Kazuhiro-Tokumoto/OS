@@ -358,6 +358,15 @@ def main() -> int:
                     mon.cmd("mouse_button 0")
                 elif low == "wait":
                     time.sleep(0.5)
+                elif low.startswith("key:"):
+                    # マウス操作の途中でキーを送りたいことがある
+                    # (窓を 2 つ開いてから Alt+Tab、など)。
+                    # 例: key:alt-tab / key:ctrl-s / key:h,i,ret
+                    for k in step[4:].split(","):
+                        k = k.strip()
+                        if k:
+                            mon.cmd(f"sendkey {k}")
+                            time.sleep(0.12)
                 else:
                     dx, _, dy = step.partition(":")
                     # PS/2 マウスの 1 パケットで送れる移動量は ±255 まで。

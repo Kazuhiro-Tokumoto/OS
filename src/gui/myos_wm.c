@@ -33,6 +33,7 @@
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
 #include <X11/cursorfont.h>
+#include <X11/keysym.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -252,6 +253,29 @@ typedef struct {
 
 static Client clients[MAX_CLIENTS];
 
+/* 重なり順。zlist[0] がいちばん手前。
+ * X 自体も重なり順を持っているが、Alt+Tab で「次の窓」を選ぶには
+ * 使った順を自分で覚えておく必要がある。 */
+static Client *zlist[MAX_CLIENTS];
+static int     n_z = 0;
+static Client *focused = NULL;
+
+static void z_remove(Client *c)
+{
+    int j = 0;
+    for (int i = 0; i < n_z; i++)
+        if (zlist[i] != c) zlist[j++] = zlist[i];
+    n_z = j;
+}
+
+static void z_front(Client *c)
+{
+    z_remove(c);
+    for (int i = n_z; i > 0; i--) zlist[i] = zlist[i - 1];
+    zlist[0] = c;
+    n_z++;
+}
+
 static Client *find_by_client(Window w)
 {
     for (int i = 0; i < MAX_CLIENTS; i++)
@@ -286,8 +310,8 @@ static void draw_frame(Client *c)
 {
     x98_fill(&x98, c->frame, 0, 0, c->w, c->h, x98.face);
     x98_bevel(&x98, c->frame, 0, 0, c->w, c->h, 1);
-    x98_titlebar(&x98, c->frame, BORDER, BORDER,
-                 c->w - 2 * BORDER, TITLE_H, c->title);
+    x98_titlebar_ex(&x98, c->frame, BORDER, BORDER,
+                    c->w - 2 * BORDER, TITLE_H, c->title, c == focused);
 
     static const char *labels[3] = { "_", "[]", "X" };
     for (int i = 0; i < 3; i++) {
@@ -461,10 +485,36 @@ static void set_menu(int open)
 
 static void raise_client(Client *c)
 {
+    Client *old = focused;
+
+    z_front(c);
     XRaiseWindow(dpy, c->frame);
     XRaiseWindow(dpy, taskbar);
     if (menu_open) XRaiseWindow(dpy, startmenu);
     XSetInputFocus(dpy, c->client, RevertToPointerRoot, CurrentTime);
+
+    focused = c;
+    if (old && old != c && old->used) draw_frame(old);
+    draw_frame(c);
+    draw_taskbar();
+}
+
+/* Alt+Tab: 使った順で 1 つ後ろの窓を手前に出す */
+static void cycle_windows(void)
+{
+    if (n_z < 2) return;
+    for (int i = 1; i < n_z; i++) {
+        if (zlist[i]->used && !zlist[i]->minimized) {
+            raise_client(zlist[i]);
+            return;
+        }
+    }
+    /* 全部最小化されていたら次のものを復帰させる */
+    if (zlist[1]->used) {
+        zlist[1]->minimized = 0;
+        XMapWindow(dpy, zlist[1]->frame);
+        raise_client(zlist[1]);
+    }
 }
 
 static void frame_client(Window w, int adopt)
@@ -525,7 +575,17 @@ static void unframe(Client *c)
     XReparentWindow(dpy, c->client, root, c->x, c->y);
     XRemoveFromSaveSet(dpy, c->client);
     XDestroyWindow(dpy, c->frame);
+    z_remove(c);
     c->used = 0;
+    if (focused == c) {
+        focused = NULL;
+        /* 次に手前だった窓へフォーカスを移す */
+        for (int i = 0; i < n_z; i++)
+            if (zlist[i]->used && !zlist[i]->minimized) {
+                raise_client(zlist[i]);
+                break;
+            }
+    }
     draw_taskbar();
 }
 
@@ -630,6 +690,31 @@ static void on_sigusr1(int sig)
     reload_icons = 1;
 }
 
+/* Windows でおなじみの操作を拾えるようにする。
+ *   Alt+Tab  … 窓の切り替え
+ *   Alt+F4   … 手前の窓を閉じる
+ *   Win キー … スタートメニュー
+ * NumLock / CapsLock が入っていても効くよう、修飾の組み合わせ全部で掴む。 */
+static void grab_keys(void)
+{
+    KeyCode tab  = XKeysymToKeycode(dpy, XK_Tab);
+    KeyCode f4   = XKeysymToKeycode(dpy, XK_F4);
+    KeyCode sup1 = XKeysymToKeycode(dpy, XK_Super_L);
+    KeyCode sup2 = XKeysymToKeycode(dpy, XK_Super_R);
+    unsigned mods[] = { 0, LockMask, Mod2Mask, LockMask | Mod2Mask };
+
+    for (int i = 0; i < 4; i++) {
+        if (tab)  XGrabKey(dpy, tab, Mod1Mask | mods[i], root, True,
+                           GrabModeAsync, GrabModeAsync);
+        if (f4)   XGrabKey(dpy, f4, Mod1Mask | mods[i], root, True,
+                           GrabModeAsync, GrabModeAsync);
+        if (sup1) XGrabKey(dpy, sup1, mods[i], root, True,
+                           GrabModeAsync, GrabModeAsync);
+        if (sup2) XGrabKey(dpy, sup2, mods[i], root, True,
+                           GrabModeAsync, GrabModeAsync);
+    }
+}
+
 static long now_ms(void)
 {
     struct timeval tv;
@@ -704,6 +789,7 @@ int main(void)
     XSelectInput(dpy, startmenu, ExposureMask | ButtonPressMask);
 
     load_icons();
+    grab_keys();
 
     /* 既にいるウィンドウを引き取る (WM が後から起動した場合) */
     Window r2, parent, *kids = NULL;
@@ -723,6 +809,8 @@ int main(void)
     Client *drag_c = NULL;
     int resizing = 0, rz_x0 = 0, rz_y0 = 0, rz_w0 = 0, rz_h0 = 0;
     Client *resize_c = NULL;
+    long last_title_ms = 0;
+    Client *last_title_c = NULL;
     long last_click_ms = 0;
     int  last_click_icon = -1;
     char last_clock[16] = "";
@@ -832,6 +920,18 @@ int main(void)
             break;
         }
 
+        case KeyPress: {
+            KeySym ks = XLookupKeysym(&ev.xkey, 0);
+            if ((ks == XK_Tab) && (ev.xkey.state & Mod1Mask)) {
+                cycle_windows();
+            } else if ((ks == XK_F4) && (ev.xkey.state & Mod1Mask)) {
+                if (focused && focused->used) close_client(focused);
+            } else if (ks == XK_Super_L || ks == XK_Super_R) {
+                set_menu(!menu_open);
+            }
+            break;
+        }
+
         case ButtonPress: {
             Window w = ev.xbutton.window;
 
@@ -898,6 +998,18 @@ int main(void)
             if (hit == 0) { minimize(c); break; }
             if (hit == 1) { toggle_max(c); break; }
             if (hit == 2) { close_client(c); break; }
+
+            if (my >= BORDER && my < BORDER + TITLE_H) {
+                /* タイトルバーのダブルクリックで最大化 / 元に戻す */
+                long t = now_ms();
+                if (c == last_title_c && t - last_title_ms < x98.theme.dblclick_ms) {
+                    last_title_c = NULL;
+                    toggle_max(c);
+                    break;
+                }
+                last_title_c = c;
+                last_title_ms = t;
+            }
 
             if (my >= BORDER && my < BORDER + TITLE_H && !c->maximized) {
                 dragging = 1;

@@ -59,7 +59,7 @@ fi
 EXTRA="openjdk-17-jre \
        libgl1-mesa-dri libglx-mesa0 libgl1 mesa-utils \
        libxrandr2 libxxf86vm1 libxcursor1 libxi6 libxinerama1 \
-       xterm"
+       xterm imagemagick"
 
 # ドライバのファームウェア。
 # カーネルにドライバを組み込んでも、ファームウェアの blob は別途要る
@@ -273,7 +273,8 @@ fi
 
 mkdir -p "$WORK/usr/local/src"
 cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
-   "$ROOTDIR/src/gui/myos_settings.c" \
+   "$ROOTDIR/src/gui/myos_settings.c" "$ROOTDIR/src/gui/myos_notepad.c" \
+   "$ROOTDIR/src/gui/myos_image.c" \
    "$ROOTDIR/src/gui/x98.h" "$WORK/usr/local/src/"
 chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-wm \
     /usr/local/src/myos_wm.c -lX11
@@ -281,8 +282,72 @@ chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-files \
     /usr/local/src/myos_files.c -lX11
 chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-settings \
     /usr/local/src/myos_settings.c -lX11
-chmod 755 "$WORK/usr/local/bin/myos-wm" "$WORK/usr/local/bin/myos-files" \
-    "$WORK/usr/local/bin/myos-settings"
+chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-notepad \
+    /usr/local/src/myos_notepad.c -lX11
+chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-image \
+    /usr/local/src/myos_image.c -lX11
+chmod 755 "$WORK"/usr/local/bin/myos-*
+
+echo "=== MS-DOS プロンプト ==="
+# 見た目は Win98 の MS-DOS プロンプト、中身は普通の Linux のシェル。
+# DOS のコマンド名でも通るよう別名を用意しておく。
+mkdir -p "$WORK/etc/myos"
+cat > "$WORK/etc/myos/dosrc" <<'EOF'
+# myOS: MS-DOS プロンプト風の設定 (bash から読まれる)
+
+# パスを DOS 風に見せる。中身は普通の Linux のパス。
+# パス区切りを DOS 風に見せる。bash のパラメータ展開でも書けるが、
+# ヒアドキュメントを何段も通すとエスケープが壊れやすいので tr に任せる。
+dos_pwd() {
+    printf 'C:'
+    printf '%s' "$PWD" | tr '/' '\\'
+}
+PS1='$(dos_pwd)> '
+
+# DOS のコマンド名で叩けるようにする。実体は Linux のコマンド。
+alias dir='ls -la'
+alias cls='clear'
+alias copy='cp -i'
+alias move='mv -i'
+alias del='rm -i'
+alias ren='mv'
+alias md='mkdir'
+alias rd='rmdir'
+alias type='cat'
+alias ver='uname -a'
+alias mem='free -h'
+alias edit='myos-notepad'
+alias exit='exit'
+
+# バナーは 9x15 のビットマップフォントで出るので ASCII だけで書く。
+# (日本語を入れると xterm 側にグリフが無く文字化けする)
+cat <<'BANNER'
+
+Microsoft(R) Windows 98
+   (C)Copyright Microsoft Corp 1981-1999.
+
+  ...is what it looks like.  Inside, this is Linux.
+  DOS-style commands work too: dir / cls / copy / move / del / type / ver
+
+BANNER
+EOF
+
+cat > "$WORK/usr/local/bin/myos-prompt" <<'EOF'
+#!/bin/sh
+# MS-DOS プロンプト。xterm を Win98 風の配色と等幅フォントで出す。
+# -e に渡すシェルは絶対パスにする。xterm は PATH から探そうとして
+# 見つからないと "No absolute path found for shell" で死ぬ。
+SHELL=/bin/bash
+export SHELL
+exec xterm \
+    -title "MS-DOS Prompt" \
+    -fg lightgray -bg black -cr white \
+    -fn 9x15 \
+    -geometry 80x25 \
+    -e /bin/bash --rcfile /etc/myos/dosrc -i
+EOF
+chmod 755 "$WORK/usr/local/bin/myos-prompt"
+
 ls -l "$WORK/usr/local/bin/"
 
 echo "=== デスクトップのリンク ==="
@@ -297,7 +362,8 @@ My Documents|folder|/usr/local/bin/myos-files /root
 Firefox|globe|/usr/bin/firefox-esr
 Java Demo|java|java -jar /usr/local/share/myos/hello.jar
 OpenGL Test|app|/usr/bin/glxgears
-MS-DOS Prompt|app|/usr/bin/xterm -bg black -fg lightgray -fa Monospace -fs 11
+MS-DOS Prompt|app|/usr/local/bin/myos-prompt
+Notepad|file|/usr/local/bin/myos-notepad
 Settings|app|/usr/local/bin/myos-settings
 Removable|folder|/usr/local/bin/myos-files /media
 EOF
@@ -309,7 +375,8 @@ Documents|folder|/usr/local/bin/myos-files /root
 Settings|app|/usr/local/bin/myos-settings
 Removable|folder|/usr/local/bin/myos-files /media
 Web|globe|/usr/bin/firefox-esr
-MS-DOS Prompt|app|/usr/bin/xterm -bg black -fg lightgray
+Notepad|file|/usr/local/bin/myos-notepad
+MS-DOS Prompt|app|/usr/local/bin/myos-prompt
 Shut Down|app|/sbin/poweroff
 EOF
 

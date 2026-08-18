@@ -33,7 +33,14 @@ src/boot/     ブートローダーのソース (nasm)
     memmap.inc          メモリマップ取得 (E820h → E801h → 88h)
     gdt.inc             GDT (Linux の __BOOT_CS/__BOOT_DS 配置)
     disk.inc            ディスク読み込み (LBA/CHS) とアンリアルモード
-src/gui/      フレームバッファに直接描く Win98 もどきの GUI
+src/gui/      Win98 もどきの GUI
+  x98.h                 描画部品 (立体枠 / タイトルバー / アイコン / 入力欄)
+  myos_wm.c             ウィンドウマネージャ + デスクトップ + タスクバー
+  myos_files.c          ファイルマネージャ
+  myos_notepad.c        メモ帳
+  myos_image.c          画像ビューア
+  myos_settings.c       設定 (画面のプロパティ)
+  win98.c               /dev/fb0 に直接描く版 (X なしのデモ)
 src/init/     initramfs 用の最小 init (libc 非依存)
 src/test/     fake_kernel.asm … ローダー検証用の偽 bzImage
 tools/        ビルド・検証スクリプト
@@ -48,7 +55,8 @@ tools/        ビルド・検証スクリプト
 docs/         設計メモ・進捗
   kernel.md             カーネルの構成 (モノリシック、ファームウェア)
   image-layout.md       ディスクイメージの構成
-  desktop.md            デスクトップ環境 (WM / ファイラ / 設定 / USB)
+  desktop.md            デスクトップ環境 (WM / アプリ / USB)
+  install-size.md       容量の見積もり
 build/        生成物 (git 管理外)
 ```
 
@@ -140,15 +148,31 @@ Windows 98 もどきのデスクトップ（デスクトップアイコン / ウ
 X11 もツールキットも使わず `/dev/fb0` へ直接書いている。
 
 デスクトップにはアイコンが並び、ダブルクリックでアプリが起動する。
-ファイルマネージャ、設定アプリ、Firefox、Java 17、OpenGL が載っている。
+自作の GUI アプリとして**ファイルマネージャ / メモ帳 / 画像ビューア /
+設定 / MS-DOS プロンプト**が載っていて、
+そこに Firefox・Java 17・OpenGL が加わる。
 時計は BIOS (RTC) 由来のシステム時刻。
 USB のキーボード / マウス / メモリが使え、USB メモリは
 `/media/<デバイス名>` に自動マウントされる。
+
+**見た目は Windows 98、操作は今の Windows に寄せてある。**
+`Alt+Tab` でウィンドウを巡回、`Alt+F4` で閉じる、Windows キーで
+スタートメニュー、タイトルバーのダブルクリックで最大化。
+ファイルマネージャでは `Ctrl+C` / `Ctrl+X` / `Ctrl+V` でコピーと移動、
+`F2` でリネーム、`Delete` で削除、右クリックでコンテキストメニュー。
+コマンドプロンプトは中身こそ Linux のシェルだが、
+`dir` / `cls` / `copy` / `del` / `type` といった DOS の名前で叩けて、
+プロンプトも `C:\path\to\here>` の形で出る。
 
 **このOSは 64bit (x86_64) です。**
 16bit リアルモードで始まるのはブートローダーだけで、
 Linux Boot Protocol の 32bit エントリでカーネルに渡したあと、
 long mode への移行はカーネルが行う。
 
+ディスクイメージは **4.03 GiB**（カーネル 19.4 MiB + ext4 ルート 4 GiB）、
+ルートの実使用は **1.6 GiB**。圧縮すると 497 MiB なので、
+インストール用の ISO は **530 MiB 前後**で CD-R 1 枚に収まる見込み。
+詳しくは `docs/install-size.md`。
+
 詳しくは `docs/progress.md` / `docs/gui.md` / `docs/desktop.md` /
-`docs/image-layout.md` を参照。
+`docs/image-layout.md` / `docs/install-size.md` を参照。

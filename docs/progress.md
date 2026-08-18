@@ -140,11 +140,27 @@ Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...
 - [x] ウィンドウのリサイズ（右端 / 下端 / 右下のつまみ）
 - [x] 設定アプリ（配色プリセット / デスクトップ色 / ダブルクリック速度）
 - [x] ファイル操作（新規フォルダ / 削除、確認付き）
-- [ ] リネーム（文字入力の仕組みが要る）
-- [ ] コピー / 移動
-- [ ] Z オーダーの明示的な管理（今はクリックで最前面に出すだけ）
+- [x] リネーム（`x98.h` に 1 行のテキスト入力ウィジェットを足した）
+- [x] コピー / 切り取り / 貼り付け（`Ctrl+C` / `Ctrl+X` / `Ctrl+V`）
+- [x] 右クリックのコンテキストメニュー
+- [x] Z オーダーの明示的な管理（前面順の配列 + アクティブ / 非アクティブの描き分け）
+- [x] Windows 風のキー操作（`Alt+Tab` / `Alt+F4` / Windows キー）
+- [x] タイトルバーのダブルクリックで最大化 / 復元
 
 詳細は `docs/gui.md` と `docs/desktop.md`。
+
+## アプリケーション
+
+自作の GUI アプリ。どれも `src/gui/x98.h` の描画部品を共有している。
+
+| アプリ | ソース | 内容 |
+| --- | --- | --- |
+| ウィンドウマネージャ | `myos_wm.c` | デスクトップ / タスクバー / スタートメニュー |
+| ファイルマネージャ | `myos_files.c` | コピー / 移動 / リネーム / 削除 / 右クリックメニュー |
+| メモ帳 | `myos_notepad.c` | 複数行エディタ。File メニューと `Ctrl+S` など |
+| 画像ビューア | `myos_image.c` | PNG / JPEG / GIF / BMP。拡大縮小とスクロール |
+| 設定 | `myos_settings.c` | 配色 / デスクトップ色 / ダブルクリック速度 |
+| MS-DOS プロンプト | `dosrc` + `myos-prompt` | xterm + DOS 風の別名とプロンプト |
 
 ## ユーザーランド
 
@@ -153,7 +169,8 @@ Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...
 - [x] Firefox ESR
 - [x] Java 17 (JRE) + Swing のデモアプリ
 - [x] OpenGL（Mesa のソフトウェアラスタライザ、`glxgears` で確認）
-- [x] xterm（MS-DOS Prompt として）
+- [x] xterm（MS-DOS Prompt として。`dir` / `cls` / `copy` などの別名付き）
+- [x] ImageMagick（画像ビューアのデコーダとして使う）
 - [x] USB キーボード / マウス / メモリ（ドライバは全部カーネル組み込み済み）
 - [x] リムーバブルメディアの自動マウント（`/media/<デバイス名>`）
 - [x] exFAT / NTFS（今どきの USB メモリ向けに追加）

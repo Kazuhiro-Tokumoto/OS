@@ -276,6 +276,32 @@ static inline void x98_button(X98 *x, Drawable d, int px, int py, int w, int h,
     x98_text(x, d, tx, ty, label, x->text);
 }
 
+/* タイトルバーの横グラデーション。
+ * active=0 のときは Win98 と同じく灰色系にして、
+ * どの窓が前面にいるかひと目で分かるようにする。 */
+static inline void x98_titlebar_ex(X98 *x, Drawable d, int px, int py,
+                                   int w, int h, const char *title, int active)
+{
+    int r1, g1, b1, r2, g2, b2;
+    if (active) {
+        r1 = (x->theme.title1 >> 16) & 0xFF; r2 = (x->theme.title2 >> 16) & 0xFF;
+        g1 = (x->theme.title1 >> 8) & 0xFF;  g2 = (x->theme.title2 >> 8) & 0xFF;
+        b1 = x->theme.title1 & 0xFF;         b2 = x->theme.title2 & 0xFF;
+    } else {
+        r1 = 0x80; g1 = 0x80; b1 = 0x80;
+        r2 = 0xB5; g2 = 0xB5; b2 = 0xB5;
+    }
+    for (int i = 0; i < w; i++) {
+        int r = (r1 * (w - i) + r2 * i) / w;
+        int g = (g1 * (w - i) + g2 * i) / w;
+        int b = (b1 * (w - i) + b2 * i) / w;
+        x98_vline(x, d, px + i, py, h, x98_rgb(x, r, g, b));
+    }
+    if (title)
+        x98_text(x, d, px + 4, py + (h - x98_text_h(x)) / 2, title,
+                 active ? x->titletxt : x98_rgb24(x, 0xD0D0D0));
+}
+
 /* タイトルバーの横グラデーション (濃紺 -> 明るい青) */
 static inline void x98_titlebar(X98 *x, Drawable d, int px, int py, int w, int h,
                          const char *title)
@@ -292,6 +318,77 @@ static inline void x98_titlebar(X98 *x, Drawable d, int px, int py, int w, int h
     if (title)
         x98_text(x, d, px + 4, py + (h - x98_text_h(x)) / 2, title,
                  x->titletxt);
+}
+
+/* --- 1 行の文字入力欄 ----------------------------------------------------
+ * ファイル名の変更や検索欄に使う。X には入力ウィジェットが無いので
+ * 自前で持つ。日本語入力は扱わない (IME を抱えるのは別の話)。
+ * ------------------------------------------------------------------------ */
+typedef struct {
+    char buf[512];
+    int  len;
+    int  cur;       /* カーソル位置 (バイト) */
+} X98Edit;
+
+static inline void x98_edit_set(X98Edit *e, const char *s)
+{
+    e->len = 0;
+    if (s) {
+        while (s[e->len] && e->len < (int)sizeof(e->buf) - 1) {
+            e->buf[e->len] = s[e->len];
+            e->len++;
+        }
+    }
+    e->buf[e->len] = 0;
+    e->cur = e->len;
+}
+
+/* 文字を挿す / 消す。戻り値は内容が変わったか。 */
+static inline int x98_edit_insert(X98Edit *e, const char *s, int n)
+{
+    if (n <= 0) return 0;
+    if (e->len + n >= (int)sizeof(e->buf) - 1) return 0;
+    memmove(e->buf + e->cur + n, e->buf + e->cur, e->len - e->cur);
+    memcpy(e->buf + e->cur, s, n);
+    e->len += n;
+    e->cur += n;
+    e->buf[e->len] = 0;
+    return 1;
+}
+
+static inline int x98_edit_backspace(X98Edit *e)
+{
+    if (e->cur <= 0) return 0;
+    memmove(e->buf + e->cur - 1, e->buf + e->cur, e->len - e->cur);
+    e->len--;
+    e->cur--;
+    e->buf[e->len] = 0;
+    return 1;
+}
+
+static inline int x98_edit_delete(X98Edit *e)
+{
+    if (e->cur >= e->len) return 0;
+    memmove(e->buf + e->cur, e->buf + e->cur + 1, e->len - e->cur - 1);
+    e->len--;
+    e->buf[e->len] = 0;
+    return 1;
+}
+
+static inline void x98_edit_draw(X98 *x, Drawable d, int px, int py,
+                                 int w, int h, X98Edit *e, int focused)
+{
+    x98_fill(x, d, px, py, w, h, x->white);
+    x98_bevel(x, d, px, py, w, h, 0);
+    int ty = py + (h - x98_text_h(x)) / 2;
+    x98_text(x, d, px + 4, ty, e->buf, x->text);
+    if (focused) {
+        char tmp[512];
+        memcpy(tmp, e->buf, e->cur);
+        tmp[e->cur] = 0;
+        int cx = px + 4 + x98_text_w(x, tmp);
+        x98_vline(x, d, cx, ty, x98_text_h(x), x->text);
+    }
 }
 
 /* --- Win98 風のアイコン (小さな図形の組み合わせで描く) -------------------- */
