@@ -197,7 +197,13 @@ jobs:
         run: |
           # 本文は毎回組み立て直す。実際に焼いたものの sha256 を末尾に足す。
           # 文書に固定で書いておくと、ビルドし直したときに古い値が残る。
-          cp docs/release-1.0.md /tmp/notes.md
+          # 本文の中の版番号を、いま焼いている版に合わせる。
+          # 文書は 1.0 のときのまま置いてあるので、そのまま使うと
+          # v1.1 のリリースに「myOS 1.0」と書かれることになる。
+          V='${{ steps.ver.outputs.version }}'
+          sed -e "s/^# myOS 1\.0/# myOS $V/" \
+              -e "s/myos-install-1\.0\.iso/myos-install-$V.iso/g" \
+              docs/release-1.0.md > /tmp/notes.md
           {
             echo
             echo "---"
