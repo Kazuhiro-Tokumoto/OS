@@ -338,6 +338,59 @@ static void draw_frame(Client *c)
     }
 }
 
+/* タイトルを、表示できる文字だけに詰め直す。
+ *
+ * 表示に使っているのは 9x15 のビットマップフォントで、ASCII しか
+ * 字形を持っていない。UTF-8 のまま 1 バイトずつ描くと
+ *   "Server Not Found — Mozilla Firefox"
+ * の em ダッシュ (E2 80 94) が "â" + 豆腐 2 個に化ける。実際そうなった。
+ *
+ * 記号はよく出るものだけ ASCII に置き換え、残りは '?' にする。
+ * 日本語などは字形が無いので、化けた絵より '?' のほうがまだ読める。 */
+static void ascii_fold(char *dst, size_t dsz, const char *src)
+{
+    size_t o = 0;
+    const unsigned char *p = (const unsigned char *)src;
+
+    while (*p && o + 1 < dsz) {
+        if (*p < 0x80) {                        /* そのまま使える */
+            dst[o++] = (char)*p++;
+            continue;
+        }
+
+        /* UTF-8 を 1 文字ぶん読んでコードポイントにする */
+        unsigned int cp = 0;
+        int len = 0;
+        if ((*p & 0xE0) == 0xC0) { cp = *p & 0x1F; len = 2; }
+        else if ((*p & 0xF0) == 0xE0) { cp = *p & 0x0F; len = 3; }
+        else if ((*p & 0xF8) == 0xF0) { cp = *p & 0x07; len = 4; }
+        else { p++; dst[o++] = '?'; continue; }  /* 壊れている */
+
+        int ok = 1;
+        for (int i = 1; i < len; i++) {
+            if ((p[i] & 0xC0) != 0x80) { ok = 0; break; }
+            cp = (cp << 6) | (p[i] & 0x3F);
+        }
+        if (!ok) { p++; dst[o++] = '?'; continue; }
+        p += len;
+
+        const char *rep;
+        switch (cp) {
+        case 0x2010: case 0x2011: case 0x2012:
+        case 0x2013: case 0x2014: case 0x2015: rep = "-";  break;  /* 各種ダッシュ */
+        case 0x2018: case 0x2019: rep = "'";  break;               /* 曲がった引用符 */
+        case 0x201C: case 0x201D: rep = "\""; break;
+        case 0x2026: rep = "..."; break;                           /* 三点リーダ */
+        case 0x00A0: rep = " ";   break;                           /* 非改行空白 */
+        case 0x00B7: case 0x2022: rep = "*"; break;                /* 中黒 / 箇条書き */
+        case 0x00D7: rep = "x";   break;
+        default:     rep = "?";   break;
+        }
+        while (*rep && o + 1 < dsz) dst[o++] = *rep++;
+    }
+    dst[o] = 0;
+}
+
 static void fetch_title(Client *c)
 {
     c->title[0] = 0;
@@ -361,6 +414,10 @@ static void fetch_title(Client *c)
         }
     }
     if (!c->title[0]) snprintf(c->title, sizeof(c->title), "(untitled)");
+
+    char folded[sizeof(c->title)];
+    ascii_fold(folded, sizeof(folded), c->title);
+    snprintf(c->title, sizeof(c->title), "%s", folded);
 }
 
 /* --- タスクバー / スタートメニュー --------------------------------------- */
@@ -412,6 +469,25 @@ static void clock_string(char *out, size_t n)
     strftime(out, n, "%H:%M", &tmv);
 }
 
+/* maxw ピクセルに収まるまで削って、切ったら "..." を付ける。 */
+static void fit_label(char *dst, size_t dsz, const char *src, int maxw)
+{
+    snprintf(dst, dsz, "%s", src);
+    if (x98_text_w(&x98, dst) <= maxw) return;
+
+    size_t n = strlen(dst);
+    while (n > 0) {
+        char probe[80];
+        dst[--n] = 0;
+        snprintf(probe, sizeof(probe), "%s...", dst);
+        if (x98_text_w(&x98, probe) <= maxw) {
+            snprintf(dst, dsz, "%s", probe);
+            return;
+        }
+    }
+    dst[0] = 0;
+}
+
 static void draw_taskbar(void)
 {
     x98_fill(&x98, taskbar, 0, 0, scr_w, TASKBAR_H, x98.face);
@@ -440,10 +516,23 @@ static void draw_taskbar(void)
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!clients[i].used) continue;
         if (px + TASKBTN_W > scr_w - 80) break;
-        char label[40];
-        snprintf(label, sizeof(label), "%.34s", clients[i].title);
-        x98_button(&x98, taskbar, px, 3, TASKBTN_W, TASKBAR_H - 6, label,
-                   !clients[i].minimized);
+
+        /* ラベルは幅 (ピクセル) で詰める。文字数で切ると、
+         * 34 文字が 300px になってボタン (160px) から溢れ、
+         * x98_button の中央揃えのせいで開始位置が負になり、
+         * 左隣のスタートボタンに文字が重なる。実際そうなった。
+         * 98 と同じく左寄せにして、切ったところに "..." を付ける。 */
+        char label[64];
+        fit_label(label, sizeof(label), clients[i].title, TASKBTN_W - 14);
+
+        int pressed = !clients[i].minimized;
+        int off = pressed ? 1 : 0;
+        x98_fill(&x98, taskbar, px, 3, TASKBTN_W, TASKBAR_H - 6, x98.face);
+        x98_bevel(&x98, taskbar, px, 3, TASKBTN_W, TASKBAR_H - 6, !pressed);
+        x98_text(&x98, taskbar, px + 7 + off,
+                 3 + off + (TASKBAR_H - 6 - x98_text_h(&x98)) / 2,
+                 label, x98.text);
+
         px += TASKBTN_W + 4;
     }
 

@@ -92,6 +92,13 @@ APPS="gtk2-engines-pixbuf libgtk-3-0 libgtk2.0-0 libcanberra-gtk3-module \
 #  「確認画面まで進んで急に中止される」という形で刺さる)
 INSTALLER="fdisk parted squashfs-tools dosfstools e2fsprogs"
 
+# ネットワーク。
+# systemd も NetworkManager も使っていないので、
+# リンクを上げる道具 (ip) と DHCP クライアントは自前で持つ必要がある。
+# これが無いと「デスクトップは出るのに Firefox が何も開けない」という、
+# 原因の分かりにくい状態になる。実際そうなった。
+NET="iproute2 isc-dhcp-client"
+
 SECURITY="ufw iptables nftables \
           clamav clamav-freshclam clamav-daemon \
           cron inotify-tools \
@@ -167,6 +174,9 @@ apt_install "セキュリティ" "--no-install-recommends" $SECURITY
 
 echo "=== インストーラが使う道具 ==="
 apt_install "インストーラ" "--no-install-recommends" $INSTALLER
+
+echo "=== ネットワーク ==="
+apt_install "ネットワーク" "--no-install-recommends" $NET
 
 # 証明書。これが無いと HTTPS が全部こけるので、
 # ClamAV の定義取得より先に必ず通しておく。
@@ -254,6 +264,26 @@ if [ -x /lib/systemd/systemd-udevd ]; then
     udevadm trigger --action=add >/dev/null 2>&1
     udevadm settle --timeout=10 >/dev/null 2>&1
 fi
+
+# --- ネットワーク -------------------------------------------------------
+# systemd も NetworkManager も使っていないので、ここで自分で上げる。
+#
+# 待たないのが肝。DHCP の応答が無い環境 (LAN に繋いでいない等) で
+# 起動が何十秒も止まると、故障と区別がつかない。
+# 裏で走らせておいて、繋がったら使えるようになる形にする。
+ip link set lo up 2>/dev/null
+
+for dev in /sys/class/net/*; do
+    [ -e "$dev" ] || continue
+    n=$(basename "$dev")
+    [ "$n" = "lo" ] && continue
+    # 無線は鍵の入力が要るので、ここでは触らない。有線だけ自動で上げる。
+    [ -d "$dev/wireless" ] && continue
+    ip link set "$n" up 2>/dev/null
+    if [ -x /sbin/dhclient ] || [ -x /usr/sbin/dhclient ]; then
+        dhclient -nw "$n" >/dev/null 2>&1
+    fi
+done
 
 # ファイアウォール。ネットワークが上がる前に入れておく。
 # 効いているかどうかは起動ログに出す。黙って失敗していると
