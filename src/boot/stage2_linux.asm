@@ -183,8 +183,48 @@ stage2_start:
         call    newline
 
         ; ------------------------------------------------------------
+        ; 1.5 CPU が 64bit かどうか
+        ; ------------------------------------------------------------
+        ; カーネルは x86_64。ロングモードが無い CPU では動かない。
+        ;
+        ; ここで見ずに進むと、カーネルの展開部が自前で判定して
+        ;   no_longmode: hlt / jmp $  (無言の永久停止)
+        ; に落ちる。画面は真っ黒、キー入力も効かず、理由がどこにも
+        ; 出ない。実際これで何時間も溶かした。
+        ;
+        ; 仮想環境で「ゲストの種類」を 32bit にしていると、
+        ; ホストが 64bit でも CPUID からロングモードのビットが
+        ; 消されるので、実機より先に VM で踏むことが多い。
+        mov     byte [cur_attr], ATTR_NORMAL
+        mov     si, msg_cpu
+        call    puts
+        call    check_longmode
+        jc      .no_lm
+        mov     ah, ATTR_OK
+        mov     si, msg_cpu_ok
+        call    puts_attr
+        call    newline
+        jmp     .do_mem
+.no_lm:
+        mov     ah, ATTR_ERR
+        mov     si, msg_cpu_no
+        call    puts_attr
+        call    newline
+        call    newline
+        mov     byte [cur_attr], ATTR_WARN
+        mov     si, msg_cpu_hint1
+        call    puts
+        call    newline
+        mov     si, msg_cpu_hint2
+        call    puts
+        call    newline
+        jmp     fatal
+
+.do_mem:
+        ; ------------------------------------------------------------
         ; 2. メモリマップ
         ; ------------------------------------------------------------
+        mov     byte [cur_attr], ATTR_NORMAL
         mov     si, msg_mem
         call    puts
         call    detect_memory
@@ -692,6 +732,42 @@ build_boot_params:
         ret
 
 ; ---------------------------------------------------------------------------
+; check_longmode - CPU がロングモード (x86_64) を持つか調べる
+;   出力: CF=0 あり / CF=1 無し
+;
+; 手順は 2 段。まず拡張 CPUID が使えるかを確かめてから中身を見る。
+; いきなり 0x80000001 を叩くと、拡張に対応していない古い CPU では
+; 別の葉の値が返ってきて誤判定する。
+; ---------------------------------------------------------------------------
+check_longmode:
+        push    eax
+        push    ebx
+        push    ecx
+        push    edx
+
+        ; 拡張 CPUID の最大葉番号を聞く
+        mov     eax, 0x80000000
+        cpuid
+        cmp     eax, 0x80000001
+        jb      .none                   ; 0x80000001 が無い = 32bit 専用
+
+        mov     eax, 0x80000001
+        cpuid
+        test    edx, 1 << 29            ; EDX bit29 = LM (ロングモード)
+        jz      .none
+
+        clc
+        jmp     .out
+.none:
+        stc
+.out:
+        pop     edx
+        pop     ecx
+        pop     ebx
+        pop     eax
+        ret
+
+; ---------------------------------------------------------------------------
 ; jump_to_kernel - プロテクトモードに入り、32bit エントリポイントへ渡す
 ; ---------------------------------------------------------------------------
 jump_to_kernel:
@@ -738,6 +814,11 @@ msg_edd_yes:    db 'INT 13h extensions (LBA) available ', 0
 msg_edd_no:     db 'no extensions, using CHS ', 0
 msg_geo:        db '/ geometry ', 0
 msg_sect_head:  db ' sect/track, ', 0
+msg_cpu:        db 'CPU         : ', 0
+msg_cpu_ok:     db 'x86_64 (long mode) available ', 0
+msg_cpu_no:     db 'this CPU has no 64-bit (long mode) support', 0
+msg_cpu_hint1:  db '  myOS needs a 64-bit x86 CPU. It cannot run here.', 0
+msg_cpu_hint2:  db '  On a virtual machine, set the guest type to a 64-bit OS.', 0
 msg_mem:        db 'Memory map  : ', 0
 msg_via_e820:   db 'INT 15h E820h', 0
 msg_via_e801:   db 'INT 15h E801h', 0
