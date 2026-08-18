@@ -371,8 +371,7 @@ disk_load_high:
         cmp     byte [hi_dots], 32      ; 32 * 32KB = 1MB
         jb      .chunk_loop
         mov     byte [hi_dots], 0
-        mov     al, '.'
-        call    putc
+        call    tick_dots
         jmp     .chunk_loop
 
 .done:

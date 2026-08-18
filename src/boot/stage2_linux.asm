@@ -723,8 +723,8 @@ msg_hdrs_ok:    db "'HdrS' found ", 0
 msg_no_hdrs:    db "no 'HdrS' magic - not a bzImage", 0
 msg_proto:      db '/ boot protocol ', 0
 msg_setupsects: db ' / setup_sects ', 0
-msg_kernel:     db 'Kernel      : loading to 0x100000 ', 0
-msg_initrd:     db 'initramfs   : loading to 0x8000000 ', 0
+msg_kernel:     db 'Booting now', 0
+msg_initrd:     db 'initramfs   : loading ', 0
 msg_no_initrd:  db 'initramfs   : none', 0
 msg_vbe:        db 'VESA (VBE)  : ', 0
 msg_vbe_found:  db 'mode found ', 0

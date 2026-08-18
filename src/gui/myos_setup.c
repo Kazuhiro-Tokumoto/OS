@@ -282,23 +282,22 @@ static void draw_page(void)
 {
     switch (step) {
     case ST_WELCOME:
-        label(24, 50, "Welcome to myOS Setup.");
-        label(24, 76, "This is a self-made operating system:");
-        label(24, 94, "  - the bootloader is hand-written in assembly");
-        label(24, 112, "  - the desktop is drawn with Xlib, no toolkit");
-        label(24, 130, "  - the kernel is Linux, with every driver built in");
-        label(24, 160, "Setup will now create your user account.");
-        label(24, 178, "It only takes a moment.");
-        label(24, 214, "Press Next to continue.");
+        label(24, 56, "Welcome to myOS.");
+        label(24, 88, "Setup will prepare this computer for you.");
+        label(24, 116, "It takes about a minute. You will be asked for:");
+        label(24, 144, "  - a user name");
+        label(24, 162, "  - a password");
+        label(24, 180, "  - your keyboard layout and time zone");
+        label(24, 220, "Press Next to continue.");
         break;
 
     case ST_USER:
-        label(24, 50, "Choose a name for your account.");
-        label(24, 74, "This account will be an administrator, so it can");
-        label(24, 92, "install software and change system settings.");
-        label(24, 130, "User name:");
-        edit_box(120, 126, 260, &ed_user, 1, 0);
-        label(24, 156, "Lower-case letters, digits, - and _ only.");
+        label(24, 50, "Who will use this computer?");
+        label(24, 78, "This account can install software and change");
+        label(24, 96, "system settings.");
+        label(24, 134, "User name:");
+        edit_box(120, 130, 260, &ed_user, 1, 0);
+        label(24, 162, "Lower-case letters, digits, - and _ only.");
         break;
 
     case ST_PASSWORD:
@@ -329,7 +328,7 @@ static void draw_page(void)
             x98_text(&x98, win, bx + 6,
                      by + (20 - x98_text_h(&x98)) / 2, tz_name[tz], x98.text);
         }
-        label(24, 250, "The clock itself comes from the BIOS (RTC).");
+        label(24, 250, "The clock is read from this computer's hardware.");
         break;
 
     case ST_FINISH: {

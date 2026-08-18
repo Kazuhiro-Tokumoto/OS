@@ -175,6 +175,26 @@ if [ "${MONOLITHIC:-1}" = "1" ]; then
         ./scripts/config --enable $o
     done
 
+    # --- ファイアウォール (ufw / iptables) ---
+    # defconfig には netfilter の芯しか入っていない。
+    # ufw が既定で入れるルールは -m limit や -m addrtype を使うので、
+    # これらが無いと "ufw enable" がルールを入れられずに黙って穴が開く。
+    for o in NETFILTER_ADVANCED NF_TABLES NF_TABLES_INET NFT_CT NFT_LOG \
+             NFT_LIMIT NFT_REJECT NFT_REJECT_INET NFT_COMPAT \
+             NETFILTER_NETLINK NETFILTER_NETLINK_QUEUE NF_LOG_SYSLOG \
+             NETFILTER_XT_MATCH_LIMIT NETFILTER_XT_MATCH_ADDRTYPE \
+             NETFILTER_XT_MATCH_COMMENT NETFILTER_XT_MATCH_MULTIPORT \
+             NETFILTER_XT_MATCH_RECENT NETFILTER_XT_MATCH_MAC \
+             NETFILTER_XT_MATCH_IPRANGE NETFILTER_XT_MATCH_TCPMSS \
+             NETFILTER_XT_MATCH_HL NETFILTER_XT_MATCH_PKTTYPE \
+             NETFILTER_XT_TARGET_REJECT NETFILTER_XT_TARGET_MASQUERADE \
+             NETFILTER_XT_TARGET_TCPMSS NETFILTER_XT_TARGET_NFLOG \
+             IP_NF_FILTER IP_NF_MANGLE IP_NF_NAT IP_NF_TARGET_MASQUERADE \
+             IP6_NF_IPTABLES IP6_NF_FILTER IP6_NF_TARGET_REJECT \
+             IP6_NF_MANGLE NF_CONNTRACK_FTP NF_CONNTRACK_IRC; do
+        ./scripts/config --enable $o
+    done
+
     # --- 電源・温度・チップセット ---
     for o in ACPI ACPI_BUTTON ACPI_BATTERY ACPI_AC ACPI_THERMAL \
              CPU_FREQ CPU_FREQ_GOV_ONDEMAND CPU_FREQ_GOV_PERFORMANCE \
