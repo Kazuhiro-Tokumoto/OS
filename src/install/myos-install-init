@@ -18,6 +18,19 @@ mount -t devpts devpts /dev/pts 2>/dev/null
 mount -t tmpfs  tmpfs  /run     2>/dev/null
 mount -t tmpfs  tmpfs  /tmp     2>/dev/null
 
+# 起動メディア。initramfs が /myos-medium に置いてくれている。
+# /run に tmpfs を被せた *あと* に bind すること。順番を逆にすると、
+# tmpfs がこれを覆い隠してしまい、インストーラから中身が見えなくなる。
+mkdir -p /run/myos
+mount --bind /myos-medium /run/myos 2>/dev/null
+if [ ! -f /run/myos/myos.squashfs ]; then
+    echo                                             > /dev/console
+    echo "  The installation medium is not visible." > /dev/console
+    echo "  Expected /run/myos/myos.squashfs."       > /dev/console
+    echo                                             > /dev/console
+    exec /bin/sh < /dev/console > /dev/console 2>&1
+fi
+
 hostname myos-installer
 
 # 入力デバイスは udev が居ないと X から見えない。

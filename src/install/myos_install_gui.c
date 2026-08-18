@@ -38,7 +38,10 @@
 #define STEP_H    46
 
 #define CONF_PATH "/tmp/myos-install.conf"
-#define SQUASH    "/run/myos/payload.squashfs"
+/* メディア上の名前。ISO の中では myos.squashfs という名前で置いてある。
+ * (以前は payload.squashfs という別名を張ろうとしていたが、
+ *  メディアは読み取り専用なのでリンクを作れない) */
+#define SQUASH    "/run/myos/myos.squashfs"
 #define TARGET    "/mnt/target"
 
 enum { ST_PREPARE = 0, ST_COLLECT, ST_COPY, ST_RESTART, ST_N };
@@ -76,6 +79,8 @@ static int    blurb_i = 0;
 static time_t started;
 static int    eta_sec = 0;
 static int    failed = 0;
+/* unsquashfs が最後に吐いた文句。コピーに失敗したときに出す。 */
+static char   copy_err[128] = "";
 
 static char   root_dev[64] = "";
 static char   disk_dev[64] = "";
@@ -265,6 +270,9 @@ static int copy_payload(void)
         close(fd[1]);
         execlp("unsquashfs", "unsquashfs", "-f", "-d", TARGET,
                "-percentage", SQUASH, (char *)NULL);
+        /* execlp が戻ってきたということは unsquashfs が無い。
+         * 呼び出し元は終了コードしか見ないので、ここで理由を残しておく。 */
+        fprintf(stderr, "unsquashfs: %s\n", strerror(errno));
         _exit(127);
     }
     close(fd[1]);
@@ -272,6 +280,14 @@ static int copy_payload(void)
     FILE *fp = fdopen(fd[0], "r");
     char line[128];
     while (fp && fgets(line, sizeof(line), fp)) {
+        /* 進捗の行は数字だけ。それ以外は unsquashfs からの文句なので、
+         * 最後のものを覚えておいて、失敗したときに画面へ出す。 */
+        if (line[0] < '0' || line[0] > '9') {
+            size_t n = strlen(line);
+            while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
+            if (n) snprintf(copy_err, sizeof(copy_err), "%s", line);
+            continue;
+        }
         int v = atoi(line);
         if (v >= 0 && v <= 100) {
             /* コピーは全体の 10% 〜 85% を占める扱いにする */
@@ -312,7 +328,13 @@ static int do_install(void)
     tick(10, "Copying myOS files to your computer...");
     if (!copy_payload()) {
         failed = 1;
-        tick(-1, "Could not copy the files.");
+        if (copy_err[0]) {
+            char m[192];
+            snprintf(m, sizeof(m), "Could not copy the files: %s", copy_err);
+            tick(-1, m);
+        } else {
+            tick(-1, "Could not copy the files.");
+        }
         run(umt);
         return 0;
     }

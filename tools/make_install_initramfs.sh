@@ -97,14 +97,16 @@ mount -t overlay overlay \
       -o lowerdir=/mnt/ro,upperdir=/mnt/rw/upper,workdir=/mnt/rw/work \
       /mnt/root || { echo "  overlay failed"; exec /bin/sh; }
 
-# インストーラが読めるよう、メディアを新しい根っこの下へ移す
-mkdir -p /mnt/root/run/myos
-mount --move /mnt/medium /mnt/root/run/myos 2>/dev/null || \
-    mount --bind /mnt/medium /mnt/root/run/myos
-
-# インストーラは /run/myos/payload.squashfs という名前で探すので、
-# メディア上の名前と繋いでおく。
-ln -sf /run/myos/myos.squashfs /mnt/root/run/myos/payload.squashfs 2>/dev/null || true
+# インストーラが読めるよう、メディアを新しい根っこの下へ移す。
+#
+# 置き場所は /run の下ではなく /myos-medium にする。
+# switch_root の先で PID 1 が /run に tmpfs を被せるので、
+# /run/myos に置くとそこで見えなくなってしまう。
+# (インストーラからは /run/myos で見えるように、PID 1 側で
+#  この /myos-medium を bind し直している)
+mkdir -p /mnt/root/myos-medium
+mount --move /mnt/medium /mnt/root/myos-medium 2>/dev/null || \
+    mount --bind /mnt/medium /mnt/root/myos-medium
 
 # 切り替え先に init が無いとカーネルパニックになる。
 # 何が起きたか分からないまま止まるのが一番困るので、
