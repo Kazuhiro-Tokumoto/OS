@@ -9,8 +9,12 @@
 #   make run        … QEMU で起動して画面とシリアルログを取る
 #
 #   make kernel     … Linux カーネルをビルドする (数十分)
-#   make rootfs     … Debian + Xorg + Firefox のルートファイルシステムを作る
+#   make java-demo  … Java のデモアプリ (build/hello.jar) を作る
+#   make rootfs     … Debian + Xorg + Firefox + Java のルートを作る
 #                     (数十分。ネットワークが要る)
+#
+# GUI だけを速く試す:
+#   make run-wm     … Xvfb 上で WM とファイルマネージャを動かして画面を撮る
 #
 # ブートローダー単体の検証:
 #   make demo       … フェーズ1 + 2-A のデモを載せたイメージ
@@ -38,7 +42,7 @@ BZIMAGE ?= $(KDIR)/linux-$(KVER)/arch/x86/boot/bzImage
 # ルートファイルシステム
 RFSDIR  ?= $(CURDIR)/../rootfs
 RFSIMG  := $(BUILD)/rootfs.ext4
-RFSSIZE ?= 2G
+RFSSIZE ?= 4G
 
 # QEMU。64bit カーネルを動かすので i386 版ではなく x86_64 版を使う。
 # qemu-system-i386 の既定 CPU は long mode 非対応で、カーネルが無反応になる。
@@ -46,7 +50,7 @@ QEMU    ?= qemu-system-x86_64
 MEM     ?= 2048
 
 .PHONY: image run demo run-demo kernel rootfs rootfs-img initramfs fake \
-        run-fake disasm font clean distclean
+        run-fake disasm font clean distclean java-demo run-wm
 
 # --- 本番イメージ -----------------------------------------------------------
 
@@ -77,6 +81,23 @@ rootfs-img:
 
 initramfs:
 	sh tools/make_initramfs.sh
+
+# Java のデモアプリ。バイトコードは可搬なのでホスト側でコンパイルし、
+# rootfs には JRE だけ入れて JDK は入れない。
+# --release を必ず指定すること。ホストの JDK が rootfs の JRE より新しいと
+# クラスファイルのバージョンが上がりすぎて UnsupportedClassVersionError になる。
+JAVA_RELEASE ?= 17
+
+java-demo:
+	mkdir -p $(BUILD)/javaclasses
+	javac --release $(JAVA_RELEASE) -d $(BUILD)/javaclasses \
+		src/java/MyOsHello.java
+	jar --create --file $(BUILD)/hello.jar --main-class MyOsHello \
+		-C $(BUILD)/javaclasses .
+
+# GUI をディスクイメージ抜きで試す (Xvfb 上で動かして画面を撮る)
+run-wm:
+	sh tools/run_wm.sh $(BUILD)/wm.png myos-files
 
 # --- ブートローダー単体の検証 -----------------------------------------------
 

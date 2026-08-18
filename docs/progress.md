@@ -131,12 +131,29 @@ Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...
 - [x] ウィンドウの移動（タイトルバーのドラッグ）
 - [x] X11 のウィンドウマネージャ化（`src/gui/myos_wm.c`）
       Firefox に Win98 のタイトルバーが付き、タスクバーに並ぶところまで
+- [x] デスクトップのアイコンとダブルクリック起動
+      （`/etc/myos/desktop.conf` で定義。図形はコードで描くので画像不要）
+- [x] ファイルマネージャ（`src/gui/myos_files.c`）
+      フォルダ移動 / `.jar` は `java -jar` / 実行可能はそのまま実行
+- [x] 右クリックでデスクトップにリンクを追加（`SIGUSR1` で即反映）
+- [x] 時計を RTC の実時刻にする
 - [ ] メニュー項目のハイライトと、選んだときの動作
 - [ ] Z オーダーと複数ウィンドウ
-- [ ] ウィンドウのリサイズ、最小化・最大化ボタンの動作
-- [ ] キーボード入力（`/dev/input/eventN`）
+- [ ] ウィンドウのリサイズ
+- [ ] コピー / 移動 / 削除などファイル操作
 
-詳細は `docs/gui.md`。
+詳細は `docs/gui.md` と `docs/desktop.md`。
+
+## ユーザーランド
+
+- [x] Debian bookworm の最小構成を ext4 のルートとして同じディスクに載せる
+- [x] Xorg（modesetting ドライバ）
+- [x] Firefox ESR
+- [x] Java 17 (JRE) + Swing のデモアプリ
+- [x] OpenGL（Mesa のソフトウェアラスタライザ、`glxgears` で確認）
+- [x] xterm（MS-DOS Prompt として）
+- [ ] Minecraft は同梱できない（proprietary + 要アカウント）。
+      土台は揃っているが、GPU 無しでは実用速度にならない
 
 ## フェーズ3 以降
 

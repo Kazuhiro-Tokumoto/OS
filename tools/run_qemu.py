@@ -202,6 +202,17 @@ def ppm_to_png(ppm_path: Path, png_path: Path) -> bool:
     return True
 
 
+def move_pointer(mon, dx: int, dy: int, step: int = 100) -> None:
+    """相対移動を PS/2 マウスで送れる大きさに割って送る。"""
+    while dx or dy:
+        sx = max(-step, min(step, dx))
+        sy = max(-step, min(step, dy))
+        mon.cmd(f"mouse_move {sx} {sy}")
+        dx -= sx
+        dy -= sy
+        time.sleep(0.02)
+
+
 def parse_keys(spec: str):
     """"hi,esc" のような指定を QEMU の sendkey 引数列に変換する。"""
     special = {
@@ -247,7 +258,7 @@ def main() -> int:
                     help="シリアル出力の保存先。Linux の起動ログを取るのに使う")
     ap.add_argument("--mouse", default="",
                     help='マウス操作。; 区切りで並べる。"dx:dy" で相対移動、'
-                         '"click" で左クリック、"wait" で少し待つ。'
+                         '"click" 左クリック、"dblclick" ダブルクリック、"wait" 待つ。'
                          '例: "-475:369;click"  (スタートボタンを押す)')
     args = ap.parse_args()
 
@@ -315,6 +326,16 @@ def main() -> int:
                     mon.cmd("mouse_button 1")
                     time.sleep(0.15)
                     mon.cmd("mouse_button 0")
+                elif low in ("dblclick", "double"):
+                    # ダブルクリック判定に間に合う範囲で、押下と解放を
+                    # きちんと分けて 2 回叩く。詰めすぎると PS/2 の
+                    # キューでまとめられてしまい 1 クリックに見える。
+                    for i in range(2):
+                        mon.cmd("mouse_button 1")
+                        time.sleep(0.05)
+                        mon.cmd("mouse_button 0")
+                        if i == 0:
+                            time.sleep(0.08)
                 elif low == "down":
                     mon.cmd("mouse_button 1")
                 elif low == "up":
@@ -323,7 +344,10 @@ def main() -> int:
                     time.sleep(0.5)
                 else:
                     dx, _, dy = step.partition(":")
-                    mon.cmd(f"mouse_move {int(dx)} {int(dy)}")
+                    # PS/2 マウスの 1 パケットで送れる移動量は ±255 まで。
+                    # 大きな値をそのまま渡すと切り詰められて座標がずれるので、
+                    # 100 ピクセルずつに割って送る。
+                    move_pointer(mon, int(dx), int(dy))
                 time.sleep(0.15)
             time.sleep(args.post_wait)
 

@@ -23,7 +23,8 @@ DISP=:99
 mkdir -p "$(dirname "$OUT")"
 
 echo "=== ビルド ==="
-gcc -O2 -Wall -o "$ROOT/build/myos-wm" "$ROOT/src/gui/myos_wm.c" -lX11
+gcc -O2 -o "$ROOT/build/myos-wm"    "$ROOT/src/gui/myos_wm.c"    -lX11
+gcc -O2 -o "$ROOT/build/myos-files" "$ROOT/src/gui/myos_files.c" -lX11
 
 echo "=== Xvfb ==="
 Xvfb $DISP -screen 0 ${W}x${H}x24 >/dev/null 2>&1 &
@@ -47,6 +48,9 @@ if ! kill -0 $WM 2>/dev/null; then
 fi
 
 for a in $APPS; do
+    case "$a" in
+        myos-files) a="$ROOT/build/myos-files" ;;
+    esac
     DISPLAY=$DISP $a >/dev/null 2>&1 &
     sleep 1
 done

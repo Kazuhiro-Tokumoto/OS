@@ -53,6 +53,22 @@ else
     echo "既に $WORK があるのでスキップ"
 fi
 
+# debootstrap の後から足すもの。
+# Java と OpenGL (ソフトウェアレンダリング) はここで入れる。
+# Minecraft のような LWJGL を使うアプリは libGL と X11 の拡張を要求する。
+EXTRA="openjdk-17-jre \
+       libgl1-mesa-dri libglx-mesa0 libgl1 mesa-utils \
+       libxrandr2 libxxf86vm1 libxcursor1 libxi6 libxinerama1 \
+       xterm"
+
+echo "=== 追加パッケージ ==="
+cp /etc/resolv.conf "$WORK/etc/resolv.conf"
+mount --bind /proc "$WORK/proc" 2>/dev/null || true
+chroot "$WORK" sh -c "apt-get update -qq && \
+    apt-get install -y --no-install-recommends $EXTRA >/dev/null && \
+    apt-get clean"
+umount "$WORK/proc" 2>/dev/null || true
+
 echo "=== 基本設定 ==="
 echo "myos" > "$WORK/etc/hostname"
 cat > "$WORK/etc/fstab" <<'EOF'
@@ -83,6 +99,17 @@ mount -o remount,rw /
 
 hostname myos
 
+# udev を上げる。これが無いと X が入力デバイスを見つけられず、
+# マウスもキーボードも効かない画面になる (症状が地味なので注意)。
+# systemd は使わないが、udevd 単体なら普通に動く。
+if [ -x /lib/systemd/systemd-udevd ]; then
+    /lib/systemd/systemd-udevd --daemon
+    udevadm trigger --action=add >/dev/null 2>&1
+    udevadm settle --timeout=10 >/dev/null 2>&1
+fi
+
+echo "[myos-init] input devices:"
+ls /dev/input 2>&1
 echo "[myos-init] framebuffer:"
 ls -l /dev/fb* 2>&1
 echo "[myos-init] starting X on the framebuffer set up by our bootloader"
@@ -96,16 +123,15 @@ echo "[myos-init] dropping to a shell"
 exec /bin/sh
 EOF
 
-# X のセッション: 自作のウィンドウマネージャを上げてから Firefox を出す
+# X のセッション。
+# 自作のウィンドウマネージャがセッションの主になる。
+# これが終わると X も終わる。デスクトップのアイコンから
+# Firefox なりファイルマネージャなりを起動する。
 cat > "$WORK/myos-session" <<'EOF'
 #!/bin/sh
 xset -dpms s off 2>/dev/null
-# 自作ウィンドウマネージャ (まだ無ければ黙って飛ばす)
-if [ -x /usr/local/bin/myos-wm ]; then
-    /usr/local/bin/myos-wm &
-    sleep 1
-fi
-exec firefox-esr --no-remote about:blank
+xsetroot -solid teal 2>/dev/null
+exec /usr/local/bin/myos-wm
 EOF
 
 chmod 755 "$WORK/myos-init" "$WORK/myos-session"
@@ -128,6 +154,17 @@ EndSection
 Section "Device"
     Identifier  "myos-gpu"
     Driver      "modesetting"
+EndSection
+
+# ポインタの加速を切って 1:1 で動くようにする。
+# Win98 の操作感に近いのと、QEMU に mouse_move を送って自動検証するとき
+# 移動量がそのまま座標になるので都合がよい。
+Section "InputClass"
+    Identifier   "myos-pointer"
+    MatchIsPointer "on"
+    Driver       "libinput"
+    Option       "AccelProfile" "flat"
+    Option       "AccelSpeed"   "0"
 EndSection
 
 Section "Monitor"
@@ -162,11 +199,39 @@ if [ ! -x "$WORK/usr/bin/gcc" ]; then
 fi
 
 mkdir -p "$WORK/usr/local/src"
-cp "$ROOTDIR/src/gui/myos_wm.c" "$WORK/usr/local/src/myos_wm.c"
-chroot "$WORK" gcc -O2 -Wall -o /usr/local/bin/myos-wm \
+cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
+   "$ROOTDIR/src/gui/x98.h" "$WORK/usr/local/src/"
+chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-wm \
     /usr/local/src/myos_wm.c -lX11
-chmod 755 "$WORK/usr/local/bin/myos-wm"
-ls -l "$WORK/usr/local/bin/myos-wm"
+chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-files \
+    /usr/local/src/myos_files.c -lX11
+chmod 755 "$WORK/usr/local/bin/myos-wm" "$WORK/usr/local/bin/myos-files"
+ls -l "$WORK/usr/local/bin/myos-wm" "$WORK/usr/local/bin/myos-files"
+
+echo "=== デスクトップのリンク ==="
+# ここに 1 行足すだけでデスクトップにアイコンが増える。
+# ファイルマネージャの右クリックからも追記される。
+mkdir -p "$WORK/etc/myos"
+cat > "$WORK/etc/myos/desktop.conf" <<'EOF'
+# ラベル|アイコン|コマンド
+# アイコン: computer / folder / file / app / globe / java
+My Computer|computer|/usr/local/bin/myos-files /
+My Documents|folder|/usr/local/bin/myos-files /root
+Firefox|globe|/usr/bin/firefox-esr
+Java Demo|java|java -jar /usr/local/share/myos/hello.jar
+OpenGL Test|app|/usr/bin/glxgears
+MS-DOS Prompt|app|/usr/bin/xterm -bg black -fg lightgray -fa Monospace -fs 11
+EOF
+
+echo "=== Java のデモアプリを配置 ==="
+# Java のバイトコードは可搬なので、ホスト側でコンパイルしたものを置くだけでよい。
+# rootfs に JDK を入れずに済む (JRE だけで動く)。
+mkdir -p "$WORK/usr/local/share/myos"
+if [ -f "$ROOTDIR/build/hello.jar" ]; then
+    cp "$ROOTDIR/build/hello.jar" "$WORK/usr/local/share/myos/hello.jar"
+else
+    echo "  build/hello.jar が無いのでスキップ (make java-demo で作る)"
+fi
 
 echo "=== 完成 ==="
 du -sh "$WORK"
