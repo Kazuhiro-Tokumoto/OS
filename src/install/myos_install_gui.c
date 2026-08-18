@@ -30,7 +30,7 @@
 #include <time.h>
 #include <sys/wait.h>
 
-#include "../gui/x98.h"
+#include "x98.h"
 
 /* 情報バーは左。98 と同じ配置。 */
 #define BAR_W    300
@@ -79,6 +79,7 @@ static int    failed = 0;
 
 static char   root_dev[64] = "";
 static char   disk_dev[64] = "";
+static char   boot_lba[32] = "2048";
 
 /* --- 描画 ---------------------------------------------------------------- */
 static void draw_steps(void)
@@ -228,6 +229,7 @@ static void load_conf(void)
         char *k = myos_trim(line), *v = myos_trim(eq + 1);
         if (!strcmp(k, "root")) snprintf(root_dev, sizeof(root_dev), "%s", v);
         else if (!strcmp(k, "disk")) snprintf(disk_dev, sizeof(disk_dev), "%s", v);
+        else if (!strcmp(k, "bootlba")) snprintf(boot_lba, sizeof(boot_lba), "%s", v);
     }
     fclose(f);
 }
@@ -341,7 +343,7 @@ static int do_install(void)
     cur_step = ST_RESTART;
     tick(92, "Installing the boot loader...");
 
-    char *bl[] = { "myos-writeboot", disk_dev, root_dev, NULL };
+    char *bl[] = { "myos-writeboot", disk_dev, root_dev, boot_lba, NULL };
     if (run(bl) != 0) {
         failed = 1;
         tick(-1, "Could not install the boot loader.");

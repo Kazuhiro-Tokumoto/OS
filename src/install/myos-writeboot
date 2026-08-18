@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+# ============================================================================
+# myos-writeboot  -  インストール先のディスクに起動の仕掛けを書く
+#
+#   myos-writeboot <ディスク> <ルートのパーティション> <生領域の開始LBA>
+#   例: myos-writeboot /dev/sda /dev/sda2 2048
+#
+# 書くもの (build_image.py が作るディスクイメージと同じ並び):
+#   LBA 0        Stage1。パーティションテーブルだけは元のまま残す
+#   LBA 1-17     Stage2
+#   LBA 20       ペイロードテーブル
+#   生領域       カーネルの setup 部と本体
+#
+# 元ネタは起動メディアの中身をそのまま使う。
+#   /run/myos/boot/boot.img     Stage1 + Stage2
+#   /run/myos/boot/payload.bin  ペイロードテーブル + カーネル + initramfs
+#
+# インストール先に initramfs は要らない。ルートは ext4 の実体があるので、
+# カーネルが直接そこをマウントすればいい。
+# ============================================================================
+import os
+import struct
+import subprocess
+import sys
+
+SECTOR = 512
+ALIGN = 4                       # 2048 バイト境界 (CD と同じ揃え方)
+
+PTBL_MAGIC = b"MYOSPLD2"
+PTBL_LBA = 20
+CMDLINE_OFF = 0x28              # Stage2 の PT_CMDLINE と同じ値
+CMDLINE_MAX = SECTOR - CMDLINE_OFF
+
+MEDIUM = "/run/myos"
+BOOT_IMG = f"{MEDIUM}/boot/boot.img"
+PAYLOAD = f"{MEDIUM}/boot/payload.bin"
+
+STAGE2_LBA = 1
+STAGE2_SECTORS = 17
+PART_TABLE_OFF = 0x1BE          # ここから先は元のまま残す
+
+
+def die(msg):
+    print(f"myos-writeboot: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def nsect(n):
+    return (n + SECTOR - 1) // SECTOR
+
+
+def align_up(lba):
+    return (lba + ALIGN - 1) // ALIGN * ALIGN
+
+
+def main():
+    if len(sys.argv) < 4:
+        die("usage: myos-writeboot <disk> <rootdev> <boot_area_lba>")
+    disk, rootdev, boot_lba = sys.argv[1], sys.argv[2], int(sys.argv[3])
+
+    for p in (BOOT_IMG, PAYLOAD):
+        if not os.path.exists(p):
+            die(f"{p} がありません (起動メディアが見えていない)")
+
+    boot = open(BOOT_IMG, "rb").read()
+    if len(boot) < (1 + STAGE2_SECTORS) * SECTOR:
+        die("boot.img が小さすぎます")
+    stage1 = bytearray(boot[:SECTOR])
+    stage2 = boot[SECTOR:(1 + STAGE2_SECTORS) * SECTOR]
+
+    # 起動メディアのペイロードから、カーネルの setup 部と本体を取り出す。
+    pay = open(PAYLOAD, "rb").read()
+    if pay[:8] != PTBL_MAGIC:
+        die("payload.bin の目印が違います")
+    s_lba, s_cnt, b_lba, b_cnt, b_size = struct.unpack_from("<IIIII", pay, 0x08)
+
+    # ペイロード内の位置は CD 上の絶対 LBA になっている。
+    # 先頭 (テーブル) の LBA を引いて、ファイル内の位置に直す。
+    base = s_lba - align_up(1)
+    k_setup = pay[(s_lba - base) * SECTOR:(s_lba - base + s_cnt) * SECTOR]
+    k_body = pay[(b_lba - base) * SECTOR:(b_lba - base) * SECTOR + b_size]
+    if k_setup[0x202 - 0:0x206] != b"HdrS" and k_setup[0x202:0x206] != b"HdrS":
+        die("カーネルの 'HdrS' が見つかりません")
+
+    # --- 置き場所を決める ---------------------------------------------------
+    # 生領域 (パーティション 1) の先頭から順に置く。
+    lba = align_up(boot_lba)
+    ks_lba, ks_cnt = lba, nsect(len(k_setup))
+    lba = align_up(lba + ks_cnt)
+    kb_lba, kb_cnt = lba, nsect(len(k_body))
+    lba = align_up(lba + kb_cnt)
+
+    cmdline = (f"console=tty0 root={rootdev} rootfstype=ext4 rw "
+               f"init=/myos-init")
+    cmd = cmdline.encode("ascii", "replace")
+    if len(cmd) >= CMDLINE_MAX:
+        die("コマンドラインが長すぎます")
+
+    tbl = bytearray(SECTOR)
+    tbl[0:8] = PTBL_MAGIC
+    # 並びは Stage2 の PT_* と 1 対 1。バイト数の欄も必ず埋めること。
+    struct.pack_into("<IIIIIIII", tbl, 0x08,
+                     ks_lba, ks_cnt,
+                     kb_lba, kb_cnt, len(k_body),
+                     0, 0, 0)          # initramfs は使わない
+    tbl[CMDLINE_OFF:CMDLINE_OFF + len(cmd)] = cmd
+
+    # --- 書き込む -----------------------------------------------------------
+    with open(disk, "r+b") as f:
+        # Stage1。パーティションテーブルは元のものを残す。
+        # ここを丸ごと上書きすると、切ったばかりのパーティションが消える。
+        f.seek(0)
+        orig = f.read(SECTOR)
+        stage1[PART_TABLE_OFF:SECTOR] = orig[PART_TABLE_OFF:SECTOR]
+        f.seek(0)
+        f.write(bytes(stage1))
+
+        f.seek(STAGE2_LBA * SECTOR)
+        f.write(stage2)
+
+        f.seek(PTBL_LBA * SECTOR)
+        f.write(bytes(tbl))
+
+        f.seek(ks_lba * SECTOR)
+        f.write(k_setup)
+
+        f.seek(kb_lba * SECTOR)
+        f.write(k_body)
+
+        f.flush()
+        os.fsync(f.fileno())
+
+    # 書いたものを読み返して確かめる。
+    # ここで間違っていると、次の起動で初めて分かることになる。
+    with open(disk, "rb") as f:
+        f.seek(0)
+        if f.read(2) != bytes(stage1[:2]):
+            die("Stage1 の書き込みを確認できません")
+        f.seek(PTBL_LBA * SECTOR)
+        if f.read(8) != PTBL_MAGIC:
+            die("ペイロードテーブルの書き込みを確認できません")
+        f.seek(ks_lba * SECTOR + 0x202)
+        if f.read(4) != b"HdrS":
+            die("カーネルの書き込みを確認できません")
+
+    subprocess.run(["sync"], check=False)
+    print(f"myos-writeboot: ok  stage2@{STAGE2_LBA} table@{PTBL_LBA} "
+          f"setup@{ks_lba} body@{kb_lba} root={rootdev}")
+
+
+if __name__ == "__main__":
+    main()

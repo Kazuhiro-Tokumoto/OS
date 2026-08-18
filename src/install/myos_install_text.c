@@ -356,6 +356,21 @@ static int page_confirm(const Disk *d, int whole)
     }
 }
 
+/* 既にあるパーティションの数。空き領域に足すとき、
+ * 新しい番号が何番から始まるかを知るために要る。 */
+static int count_parts_before(const Disk *d)
+{
+    int n = 0;
+    for (int i = 1; i <= 16; i++) {
+        char p[256];
+        snprintf(p, sizeof(p), "/sys/block/%s/%s%d", d->name, d->name, i);
+        if (access(p, F_OK) == 0) { n++; continue; }
+        snprintf(p, sizeof(p), "/sys/block/%s/%sp%d", d->name, d->name, i);
+        if (access(p, F_OK) == 0) n++;
+    }
+    return n;
+}
+
 /* --- 実際の書き込み ------------------------------------------------------ */
 static int run(char *const argv[])
 {
@@ -374,7 +389,8 @@ static int run(char *const argv[])
 
 /* パーティションを切って ext4 で初期化する。
  * ここが 98 でいう FDISK と FORMAT にあたる。 */
-static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn)
+static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
+                        int *first_part)
 {
     char dev[64];
     snprintf(dev, sizeof(dev), "/dev/%s", d->name);
@@ -385,36 +401,39 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn)
     say(8, 6, "  Creating partitions ...");
     fflush(stdout);
 
+    /* どちらの入れ方でも同じ形にする。
+     *   1 つ目 … カーネルを生で置く場所 (128MB)。ファイルシステムは作らない
+     *   2 つ目 … ルート (ext4)
+     *
+     * ブートローダーは ext4 を読めないので、カーネルは生のセクタに置く。
+     * 場所をパーティションとして宣言しておけば、他のものに使われない。 */
+    char cmd[256];
+    FILE *fp;
+
     if (whole) {
-        /* 丸ごと: パーティションテーブルを作り直す。
-         *   1 番目 … ブートローダーとカーネル置き場 (64MB)
-         *   2 番目 … ルート (残り全部)
-         * 1 番目を分けておくのは、カーネルを LBA で素直に読むため。 */
-        char *sgdisk[] = { "sfdisk", dev, NULL };
-        FILE *fp;
-        char cmd[256];
         snprintf(cmd, sizeof(cmd), "sfdisk %s >/dev/null 2>&1", dev);
         fp = popen(cmd, "w");
         if (!fp) return 0;
         fprintf(fp, "label: dos\n");
-        fprintf(fp, ",64M,83,*\n");   /* 1: boot */
-        fprintf(fp, ",,83\n");        /* 2: root */
+        fprintf(fp, ",128M,83,*\n");   /* 1: カーネル置き場 */
+        fprintf(fp, ",,83\n");         /* 2: ルート */
         if (pclose(fp) != 0) return 0;
-        (void)sgdisk;
+        *first_part = 1;
     } else {
-        /* 空き領域: 末尾の未使用部分に 1 つ足すだけ。 */
-        char cmd[256];
+        /* 空き領域に 2 つ足す。番号は既存の次から振られる。 */
         snprintf(cmd, sizeof(cmd), "sfdisk --append %s >/dev/null 2>&1", dev);
-        FILE *fp = popen(cmd, "w");
+        fp = popen(cmd, "w");
         if (!fp) return 0;
+        fprintf(fp, ",128M,83\n");
         fprintf(fp, ",,83\n");
         if (pclose(fp) != 0) return 0;
+        *first_part = count_parts_before(d) + 1;
     }
 
     /* パーティション名。nvme は p が入る。 */
     const char *sep = (strstr(d->name, "nvme") || strstr(d->name, "mmcblk"))
                       ? "p" : "";
-    snprintf(rootdev, rn, "/dev/%s%s%d", d->name, sep, whole ? 2 : 1);
+    snprintf(rootdev, rn, "/dev/%s%s%d", d->name, sep, *first_part + 1);
 
     /* カーネルにテーブルを読み直させる */
     char *pr[] = { "partprobe", dev, NULL };
@@ -439,6 +458,19 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn)
     say(11, 6, "Done.");
     fflush(stdout);
     return 1;
+}
+
+/* 生領域 (1 つ目のパーティション) が何セクタ目から始まるか。
+ * sfdisk が決めるので、切ったあとに sysfs から読むのが確実。 */
+static long long part_start(const Disk *d, int idx)
+{
+    char p[256];
+    snprintf(p, sizeof(p), "/sys/block/%s/%s%d/start", d->name, d->name, idx);
+    long long v = read_ll(p);
+    if (v > 0) return v;
+    snprintf(p, sizeof(p), "/sys/block/%s/%sp%d/start", d->name, d->name, idx);
+    v = read_ll(p);
+    return v > 0 ? v : 2048;
 }
 
 /* --- 本体 ---------------------------------------------------------------- */
@@ -468,12 +500,16 @@ int main(void)
     }
 
     char rootdev[64];
-    if (!do_partition(&disks[di], mode == 0, rootdev, sizeof(rootdev))) {
+    int first_part = 1;
+    if (!do_partition(&disks[di], mode == 0, rootdev, sizeof(rootdev),
+                      &first_part)) {
         restore_mode();
         cls();
         printf(C_RESET "\n");
         return 1;
     }
+
+    long long boot_lba = part_start(&disks[di], first_part);
 
     /* 決めた内容を後半へ渡す */
     FILE *f = fopen(CONF_PATH, "w");
@@ -481,6 +517,7 @@ int main(void)
         fprintf(f, "disk    = /dev/%s\n", disks[di].name);
         fprintf(f, "root    = %s\n", rootdev);
         fprintf(f, "whole   = %d\n", mode == 0 ? 1 : 0);
+        fprintf(f, "bootlba = %lld\n", boot_lba);
         fclose(f);
     }
 

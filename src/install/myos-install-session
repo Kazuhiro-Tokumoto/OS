@@ -1,0 +1,4 @@
+#!/bin/sh
+# X が上がったあとに動く。ウィザード本体を出すだけ。
+xsetroot -solid "#000080" 2>/dev/null
+exec /usr/local/bin/myos-install-gui

@@ -467,13 +467,21 @@ echo "=== myOS ウィンドウマネージャをビルド ==="
 # 中でコンパイルしてしまうのがいちばん素直。
 ROOTDIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-if [ ! -x "$WORK/usr/bin/gcc" ]; then
-    echo "--- rootfs に gcc を入れる ---"
+# gcc の有無だけでなくヘッダの有無も見る。
+# 最後の掃除で gcc とヘッダを消しているので、2 回目以降のビルドでは
+# 「gcc はあるが X11/Xlib.h が無い」という状態になりうる。
+# そこを見ていないと、作り直すたびにコンパイルが通らなくなる。
+if [ ! -x "$WORK/usr/bin/gcc" ] || [ ! -f "$WORK/usr/include/X11/Xlib.h" ]; then
+    echo "--- rootfs に gcc とヘッダを入れる ---"
     cp /etc/resolv.conf "$WORK/etc/resolv.conf"
     mount --bind /proc "$WORK/proc" 2>/dev/null || true
+    # --reinstall を付ける。記録と実体がずれていても確実に戻せるように。
     chroot "$WORK" sh -c \
-        'apt-get update -qq && apt-get install -y --no-install-recommends \
-         gcc libc6-dev libx11-dev >/dev/null && apt-get clean'
+        'apt-get update -qq && apt-get install -y --reinstall \
+         --no-install-recommends gcc libc6-dev libx11-dev >/dev/null \
+         && apt-get clean'
+    [ -f "$WORK/usr/include/X11/Xlib.h" ] || {
+        echo "X11 のヘッダを用意できませんでした" >&2; exit 1; }
     umount "$WORK/proc" 2>/dev/null || true
 fi
 
@@ -507,6 +515,24 @@ chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-open \
     /usr/local/src/myos_open.c
 chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-alert \
     /usr/local/src/myos_alert.c -lX11
+
+# --- インストーラ ---------------------------------------------------------
+# インストールディスクの中身は、入る中身と同じ squashfs を使う。
+# なのでインストーラもここに入れておく。
+mkdir -p "$WORK/usr/local/src/install"
+cp "$ROOTDIR/src/install/myos_install_text.c" \
+   "$ROOTDIR/src/install/myos_install_gui.c" "$WORK/usr/local/src/install/"
+chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-install-text \
+    /usr/local/src/install/myos_install_text.c
+chroot "$WORK" gcc -O2 -I /usr/local/src -o /usr/local/bin/myos-install-gui \
+    /usr/local/src/install/myos_install_gui.c -lX11
+
+cp "$ROOTDIR/src/install/myos-install-init"    "$WORK/myos-install-init"
+cp "$ROOTDIR/src/install/myos-install-session" "$WORK/usr/local/bin/"
+cp "$ROOTDIR/src/install/myos-writeboot"       "$WORK/usr/local/bin/"
+chmod 755 "$WORK/myos-install-init" \
+          "$WORK/usr/local/bin/myos-install-session" \
+          "$WORK/usr/local/bin/myos-writeboot"
 chmod 755 "$WORK"/usr/local/bin/myos-*
 
 echo "=== 一般の Linux アプリを入れるための道具 ==="
@@ -1116,6 +1142,16 @@ if [ "${SLIM:-1}" = "1" ]; then
     #
     # 1 つずつ外す。まとめて渡すと、入っていないものが 1 つあるだけで
     # apt が全体を中止してしまい、何も消えずに終わる。
+    # X11 の dev パッケージ (libx11-dev / x11proto-dev) はここで外さない。
+    # 数 MB しかないうえ、外すと次のビルドで
+    # 「Xlib.h はあるが X.h が無い」のような半端な状態になりやすい。
+    # 作り直しが必ず通ることのほうが、数 MB より価値がある。
+    #
+    # ヘッダは rm で消さず、パッケージとして外す。
+    # rm -rf /usr/include すると dpkg の記録だけ残り、
+    # 次のビルドで apt が「もう入っている」と判断して入れ直さない。
+    # 結果、gcc はあるのに X11/Xlib.h が無い状態になり、
+    # 作り直すたびにコンパイルが通らなくなる。
     for pkg in gcc g++ cpp build-essential libc6-dev linux-libc-dev \
                gcc-12 cpp-12 g++-12 libstdc++-12-dev libgcc-12-dev \
                geany geany-common \
@@ -1124,7 +1160,6 @@ if [ "${SLIM:-1}" = "1" ]; then
     done
     chroot "$WORK" sh -c "apt-get autoremove --purge -y >/dev/null 2>&1; \
                           apt-get clean" || true
-    rm -rf "$WORK/usr/include"/* 2>/dev/null || true
 
     # --- 2. ファイルを消す -------------------------------------------------
     # 文書。読み物であって動作には要らない。

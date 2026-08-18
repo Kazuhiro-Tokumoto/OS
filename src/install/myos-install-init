@@ -1,0 +1,47 @@
+#!/bin/sh
+# ============================================================================
+# myos-install-init  -  インストーラ live 環境の PID 1
+#
+# initramfs が squashfs へ switch_root した直後にこれが動く。
+# Windows 98 と同じ順で進める。
+#   前半: 青いテキスト画面 (ディスクの選択とフォーマット)
+#   後半: GUI のウィザード (ファイルのコピー)
+# ============================================================================
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+mount -t proc     proc /proc 2>/dev/null
+mount -t sysfs    sys  /sys  2>/dev/null
+mount -t devtmpfs dev  /dev  2>/dev/null
+mkdir -p /dev/pts /run /tmp
+mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t tmpfs  tmpfs  /run     2>/dev/null
+mount -t tmpfs  tmpfs  /tmp     2>/dev/null
+
+hostname myos-installer
+
+# 入力デバイスは udev が居ないと X から見えない。
+if [ -x /lib/systemd/systemd-udevd ]; then
+    /lib/systemd/systemd-udevd --daemon
+    udevadm trigger --action=add >/dev/null 2>&1
+    udevadm settle --timeout=10 >/dev/null 2>&1
+fi
+
+# --- 前半: 青いテキスト画面 ---------------------------------------------
+# コンソールに直接出す。X はまだ上げない。
+/usr/local/bin/myos-install-text < /dev/console > /dev/console 2>&1
+rc=$?
+
+if [ "$rc" != "0" ] || [ ! -f /tmp/myos-install.conf ]; then
+    echo                                        > /dev/console
+    echo "  Setup was cancelled."               > /dev/console
+    echo "  Remove the disc and restart, or use this shell." > /dev/console
+    echo                                        > /dev/console
+    exec /bin/sh < /dev/console > /dev/console 2>&1
+fi
+
+# --- 後半: GUI のウィザード ---------------------------------------------
+echo "  Starting the graphical part of Setup..." > /dev/console
+exec /usr/bin/xinit /usr/local/bin/myos-install-session -- \
+     /usr/bin/X :0 vt1 -nolisten tcp -novtswitch \
+     > /dev/console 2>&1

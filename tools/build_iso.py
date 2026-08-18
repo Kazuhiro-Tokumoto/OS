@@ -221,8 +221,17 @@ def main():
                     help="インストールする中身 (squashfs)")
     ap.add_argument("--out", default=str(BUILD / "myos-install.iso"))
     ap.add_argument("--label", default="MYOS_INSTALL")
+    # console= は「最後に書いたものが /dev/console になる」。
+    # インストーラは画面とキーボードで操作するので tty0 を最後に置く。
+    # 逆にするとインストーラの表示がシリアルへ出てしまい、
+    # 画面にはカーネルログしか出ないのにキーだけ画面側、という
+    # 噛み合わない状態になる (カーネルのログは両方に出るので気付きにくい)。
+    #
+    # loglevel=3 はカーネルのログでインストーラの画面が
+    # 上書きされるのを防ぐため。
     ap.add_argument("--cmdline",
-                    default="console=tty0 console=ttyS0,115200 myos.install=1")
+                    default="console=ttyS0,115200 console=tty0 loglevel=3 "
+                            "myos.install=1")
     args = ap.parse_args()
 
     out = Path(args.out)
