@@ -229,8 +229,11 @@ if [ -x /lib/systemd/systemd-udevd ]; then
 fi
 
 # ファイアウォール。ネットワークが上がる前に入れておく。
+# 効いているかどうかは起動ログに出す。黙って失敗していると
+# 「入れたつもりで素通し」になり、それが一番まずい。
 if [ -x /usr/sbin/ufw ]; then
     /usr/sbin/ufw --force enable >/dev/null 2>&1
+    echo "[myos-init] firewall: $(/usr/sbin/ufw status 2>&1 | head -1)"
 fi
 
 # cron。ClamAV の定期スキャンと定義更新がこれで動く。
