@@ -14,6 +14,8 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* --- Win98 の配色 -------------------------------------------------------- */
 #define RGB_DESKTOP   0x008080      /* ティール */
@@ -29,6 +31,18 @@
 #define RGB_SELECT    0x000080      /* 選択中の背景 */
 #define RGB_FOLDER    0xFFD060      /* フォルダの黄色 */
 
+/* テーマ。/etc/myos/theme.conf で上書きできる。
+ * 設定アプリ (myos-settings) がこのファイルを書き、
+ * ウィンドウマネージャに SIGUSR1 を送って読み直させる。 */
+#define X98_THEME_CONF "/etc/myos/theme.conf"
+
+typedef struct {
+    /* 24bit RGB のまま持っておく。ピクセル値は x98_apply() で作る。
+     * 読み直しのたびに再計算できるようにするため。 */
+    unsigned int desktop, face, title1, title2, titletxt, text, select_bg;
+    int dblclick_ms;
+} X98Theme;
+
 typedef struct {
     Display *dpy;
     int      screen;
@@ -37,6 +51,8 @@ typedef struct {
     int      truecolor;
     int      r_shift, g_shift, b_shift;
     int      r_bits, g_bits, b_bits;
+
+    X98Theme theme;
 
     unsigned long desktop, face, light, shadow, dkshadow;
     unsigned long titletxt, text, white, select_bg, folder;
@@ -89,6 +105,71 @@ static inline void x98_open_font(X98 *x)
     if (!x->font) x->font = XLoadQueryFont(x->dpy, "fixed");
 }
 
+/* テーマの既定値。theme.conf が無いときはこれになる。 */
+static inline void x98_theme_defaults(X98Theme *t)
+{
+    t->desktop     = RGB_DESKTOP;
+    t->face        = RGB_FACE;
+    t->title1      = RGB_TITLE1;
+    t->title2      = RGB_TITLE2;
+    t->titletxt    = RGB_TITLETXT;
+    t->text        = RGB_TEXT;
+    t->select_bg   = RGB_SELECT;
+    t->dblclick_ms = 700;
+}
+
+/* theme.conf を読む。"key = value" の並び。値は 6 桁の 16 進 RGB。
+ * 知らないキーは黙って飛ばす (前方互換のため)。 */
+static inline void x98_load_theme(X98Theme *t, const char *path)
+{
+    FILE *f = fopen(path ? path : X98_THEME_CONF, "r");
+    if (!f) return;
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        char key[64], val[64];
+        if (sscanf(line, " %63[^= \t] = %63s", key, val) != 2) continue;
+
+        unsigned int v = (unsigned int)strtoul(val, NULL, 16);
+        if      (!strcmp(key, "desktop"))   t->desktop   = v;
+        else if (!strcmp(key, "face"))      t->face      = v;
+        else if (!strcmp(key, "title1"))    t->title1    = v;
+        else if (!strcmp(key, "title2"))    t->title2    = v;
+        else if (!strcmp(key, "titletext")) t->titletxt  = v;
+        else if (!strcmp(key, "text"))      t->text      = v;
+        else if (!strcmp(key, "select"))    t->select_bg = v;
+        else if (!strcmp(key, "dblclick_ms"))
+            t->dblclick_ms = (int)strtol(val, NULL, 10);
+    }
+    fclose(f);
+}
+
+/* テーマの RGB からピクセル値を作り直す。読み直しのたびに呼ぶ。
+ * ハイライトと影は面色から機械的に導くので、面色を変えると
+ * 立体枠もそれらしく付いてくる。 */
+static inline void x98_apply(X98 *x)
+{
+    const X98Theme *t = &x->theme;
+
+    x->desktop   = x98_rgb24(x, t->desktop);
+    x->face      = x98_rgb24(x, t->face);
+    x->titletxt  = x98_rgb24(x, t->titletxt);
+    x->text      = x98_rgb24(x, t->text);
+    x->select_bg = x98_rgb24(x, t->select_bg);
+    x->white     = x98_rgb24(x, RGB_WHITE);
+    x->folder    = x98_rgb24(x, RGB_FOLDER);
+
+    int fr = (t->face >> 16) & 0xFF;
+    int fg = (t->face >> 8) & 0xFF;
+    int fb = t->face & 0xFF;
+    x->light    = x98_rgb(x, fr + (255 - fr) / 2 + 60 > 255 ? 255 : fr + 90,
+                             fg + 90 > 255 ? 255 : fg + 90,
+                             fb + 90 > 255 ? 255 : fb + 90);
+    x->shadow   = x98_rgb(x, fr / 2, fg / 2, fb / 2);
+    x->dkshadow = x98_rgb24(x, 0x000000);
+}
+
 static inline void x98_init(X98 *x, Display *dpy, int screen)
 {
     memset(x, 0, sizeof(*x));
@@ -107,16 +188,9 @@ static inline void x98_init(X98 *x, Display *dpy, int screen)
         x->b_bits  = x98_mask_bits(vis->blue_mask);
     }
 
-    x->desktop   = x98_rgb24(x, RGB_DESKTOP);
-    x->face      = x98_rgb24(x, RGB_FACE);
-    x->light     = x98_rgb24(x, RGB_LIGHT);
-    x->shadow    = x98_rgb24(x, RGB_SHADOW);
-    x->dkshadow  = x98_rgb24(x, RGB_DKSHADOW);
-    x->titletxt  = x98_rgb24(x, RGB_TITLETXT);
-    x->text      = x98_rgb24(x, RGB_TEXT);
-    x->white     = x98_rgb24(x, RGB_WHITE);
-    x->select_bg = x98_rgb24(x, RGB_SELECT);
-    x->folder    = x98_rgb24(x, RGB_FOLDER);
+    x98_theme_defaults(&x->theme);
+    x98_load_theme(&x->theme, X98_THEME_CONF);
+    x98_apply(x);
 
     x98_open_font(x);
 }
@@ -206,10 +280,13 @@ static inline void x98_button(X98 *x, Drawable d, int px, int py, int w, int h,
 static inline void x98_titlebar(X98 *x, Drawable d, int px, int py, int w, int h,
                          const char *title)
 {
+    int r1 = (x->theme.title1 >> 16) & 0xFF, r2 = (x->theme.title2 >> 16) & 0xFF;
+    int g1 = (x->theme.title1 >> 8) & 0xFF,  g2 = (x->theme.title2 >> 8) & 0xFF;
+    int b1 = x->theme.title1 & 0xFF,         b2 = x->theme.title2 & 0xFF;
     for (int i = 0; i < w; i++) {
-        int r = (0x00 * (w - i) + 0x10 * i) / w;
-        int g = (0x00 * (w - i) + 0x84 * i) / w;
-        int b = (0x80 * (w - i) + 0xD0 * i) / w;
+        int r = (r1 * (w - i) + r2 * i) / w;
+        int g = (g1 * (w - i) + g2 * i) / w;
+        int b = (b1 * (w - i) + b2 * i) / w;
         x98_vline(x, d, px + i, py, h, x98_rgb(x, r, g, b));
     }
     if (title)

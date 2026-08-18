@@ -55,7 +55,7 @@
 #define MENU_W       168
 #define MENU_ITEM_H  22
 
-#define ICON_CELL_W  96
+#define ICON_CELL_W  108
 #define ICON_CELL_H  84
 #define ICON_TOP     16
 #define ICON_LEFT    12
@@ -64,6 +64,10 @@
 
 #define MAX_ICONS    24
 #define DESKTOP_CONF "/etc/myos/desktop.conf"
+#define STARTMENU_CONF "/etc/myos/startmenu.conf"
+#define RESIZE_GRIP  6       /* 枠のこの幅を掴むとリサイズ */
+#define MIN_W        180
+#define MIN_H        100
 
 static Display *dpy;
 static int      screen;
@@ -85,6 +89,10 @@ static Icon icons[MAX_ICONS];
 static int  n_icons = 0;
 static int  sel_icon = -1;
 
+/* スタートメニューの項目も同じ形で持つ */
+static Icon menu[MAX_ICONS];
+static int  n_menu = 0;
+
 /* 起動直後の既定。/etc/myos/desktop.conf が無いときに使う。 */
 static const char *default_icons[] = {
     "My Computer|computer|/usr/local/bin/myos-files /",
@@ -93,9 +101,9 @@ static const char *default_icons[] = {
     NULL
 };
 
-static void add_icon_line(const char *line)
+static void add_line_to(Icon *arr, int *n, const char *line)
 {
-    if (n_icons >= MAX_ICONS) return;
+    if (*n >= MAX_ICONS) return;
     if (line[0] == '#' || line[0] == '\n' || line[0] == 0) return;
 
     char buf[400];
@@ -112,23 +120,42 @@ static void add_icon_line(const char *line)
     if (!p2) return;
     *p2++ = 0;
 
-    Icon *ic = &icons[n_icons++];
+    Icon *ic = &arr[(*n)++];
     snprintf(ic->label, sizeof(ic->label), "%s", buf);
     snprintf(ic->icon,  sizeof(ic->icon),  "%s", p1);
     snprintf(ic->cmd,   sizeof(ic->cmd),   "%s", p2);
 }
 
-static void load_icons(void)
+static void load_list(const char *path, Icon *arr, int *n,
+                      const char **fallback)
 {
-    n_icons = 0;
-    FILE *f = fopen(DESKTOP_CONF, "r");
+    *n = 0;
+    FILE *f = fopen(path, "r");
     if (f) {
         char line[400];
-        while (fgets(line, sizeof(line), f)) add_icon_line(line);
+        while (fgets(line, sizeof(line), f)) add_line_to(arr, n, line);
         fclose(f);
     }
-    if (!n_icons)
-        for (int i = 0; default_icons[i]; i++) add_icon_line(default_icons[i]);
+    if (!*n && fallback)
+        for (int i = 0; fallback[i]; i++) add_line_to(arr, n, fallback[i]);
+}
+
+/* スタートメニューの既定。設定ファイルが無いときに使う。 */
+static const char *default_menu[] = {
+    "Programs|app|/usr/local/bin/myos-files /usr/bin",
+    "Documents|folder|/usr/local/bin/myos-files /root",
+    "Settings|app|/usr/local/bin/myos-settings",
+    "Files|folder|/usr/local/bin/myos-files /",
+    "Web|globe|/usr/bin/firefox-esr",
+    "MS-DOS Prompt|app|/usr/bin/xterm -bg black -fg lightgray",
+    "Shut Down|app|/sbin/poweroff",
+    NULL
+};
+
+static void load_icons(void)
+{
+    load_list(DESKTOP_CONF, icons, &n_icons, default_icons);
+    load_list(STARTMENU_CONF, menu, &n_menu, default_menu);
 }
 
 static void draw_icon_glyph(const char *name, Drawable d, int px, int py)
@@ -159,16 +186,29 @@ static void draw_desktop(void)
         int gx = px + (ICON_CELL_W - X98_ICON_W) / 2;
         draw_icon_glyph(icons[i].icon, desktop, gx, py);
 
-        int tw = x98_text_w(&x98, icons[i].label);
+        /* セルより長いラベルは尻を落として "…" にする。
+         * そのまま描くと画面の端で切れて読めなくなる。 */
+        char label[sizeof(icons[i].label) + 1];
+        memcpy(label, icons[i].label, sizeof(icons[i].label));
+        label[sizeof(icons[i].label)] = 0;
+        while (x98_text_w(&x98, label) > ICON_CELL_W - 4 &&
+               strlen(label) > 4) {
+            label[strlen(label) - 1] = 0;
+            label[strlen(label) - 1] = '.';
+            label[strlen(label) - 2] = '.';
+        }
+
+        int tw = x98_text_w(&x98, label);
         int tx = px + (ICON_CELL_W - tw) / 2;
+        if (tx < px + 2) tx = px + 2;
         int ty = py + X98_ICON_H + 6;
         if (i == sel_icon) {
             /* 選択中は Win98 と同じく反転した帯を敷く */
             x98_fill(&x98, desktop, tx - 2, ty - 1, tw + 4,
                      x98_text_h(&x98) + 2, x98.select_bg);
-            x98_text(&x98, desktop, tx, ty, icons[i].label, x98.white);
+            x98_text(&x98, desktop, tx, ty, label, x98.white);
         } else {
-            x98_text_sh(&x98, desktop, tx, ty, icons[i].label,
+            x98_text_sh(&x98, desktop, tx, ty, label,
                         x98.white, x98_rgb24(&x98, 0x004040));
         }
     }
@@ -257,6 +297,19 @@ static void draw_frame(Client *c)
     x98_bevel(&x98, c->frame, BORDER - 2, BORDER + TITLE_H - 1,
               c->w - 2 * (BORDER - 2),
               c->h - (BORDER + TITLE_H - 1) - (BORDER - 2), 0);
+
+    /* 右下のリサイズつまみ (Win98 の斜線) */
+    if (!c->maximized) {
+        for (int i = 0; i < 3; i++) {
+            int o = 3 + i * 4;
+            for (int k = 0; k < 8; k++) {
+                x98_fill(&x98, c->frame, c->w - o - k, c->h - 3 - (8 - k),
+                         2, 2, x98.light);
+                x98_fill(&x98, c->frame, c->w - o - k + 1,
+                         c->h - 2 - (8 - k), 1, 1, x98.shadow);
+            }
+        }
+    }
 }
 
 static void fetch_title(Client *c)
@@ -285,11 +338,9 @@ static void fetch_title(Client *c)
 }
 
 /* --- タスクバー / スタートメニュー --------------------------------------- */
-static const char *menu_items[] = {
-    "Programs", "Documents", "Settings", "Find", "Help", "Run...", "Shut Down"
-};
-#define MENU_N ((int)(sizeof(menu_items) / sizeof(menu_items[0])))
-#define MENU_H (MENU_N * MENU_ITEM_H + 8)
+#define MENU_H (n_menu * MENU_ITEM_H + 8)
+
+static int menu_hover = -1;
 
 static void draw_startmenu(void)
 {
@@ -307,11 +358,15 @@ static void draw_startmenu(void)
     }
 
     int iy = 4;
-    for (int i = 0; i < MENU_N; i++) {
+    for (int i = 0; i < n_menu; i++) {
+        if (i == menu_hover) {
+            x98_fill(&x98, startmenu, 26, iy, w - 30, MENU_ITEM_H,
+                     x98.select_bg);
+        }
         x98_text(&x98, startmenu, 32,
                  iy + (MENU_ITEM_H - x98_text_h(&x98)) / 2,
-                 menu_items[i], x98.text);
-        if (i == MENU_N - 2) {
+                 menu[i].label, i == menu_hover ? x98.titletxt : x98.text);
+        if (i == n_menu - 2) {
             x98_hline(&x98, startmenu, 26, iy + MENU_ITEM_H - 2, w - 32,
                       x98.shadow);
             x98_hline(&x98, startmenu, 26, iy + MENU_ITEM_H - 1, w - 32,
@@ -664,6 +719,8 @@ int main(void)
      * select() で 1 秒ごとに起き、分が変わったらタスクバーを描き直す。 */
     int dragging = 0, drag_dx = 0, drag_dy = 0;
     Client *drag_c = NULL;
+    int resizing = 0, rz_x0 = 0, rz_y0 = 0, rz_w0 = 0, rz_h0 = 0;
+    Client *resize_c = NULL;
     long last_click_ms = 0;
     int  last_click_icon = -1;
     char last_clock[16] = "";
@@ -679,9 +736,21 @@ int main(void)
 
             if (reload_icons) {
                 reload_icons = 0;
+                /* 設定アプリが色を変えたかもしれないので、
+                 * アイコンだけでなくテーマも読み直して塗り直す。 */
+                x98_theme_defaults(&x98.theme);
+                x98_load_theme(&x98.theme, X98_THEME_CONF);
+                x98_apply(&x98);
                 load_icons();
                 sel_icon = -1;
+                XSetWindowBackground(dpy, root, x98.desktop);
+                XSetWindowBackground(dpy, desktop, x98.desktop);
+                XSetWindowBackground(dpy, taskbar, x98.face);
+                XSetWindowBackground(dpy, startmenu, x98.face);
                 draw_desktop();
+                draw_taskbar();
+                for (int i = 0; i < MAX_CLIENTS; i++)
+                    if (clients[i].used) draw_frame(&clients[i]);
                 XFlush(dpy);
             }
 
@@ -776,7 +845,7 @@ int main(void)
                         (long)(t - last_click_ms));
                 fflush(stderr);
                 if (i >= 0 && i == last_click_icon &&
-                    t - last_click_ms < DBLCLICK_MS) {
+                    t - last_click_ms < x98.theme.dblclick_ms) {
                     spawn(icons[i].cmd);
                     last_click_icon = -1;
                 } else {
@@ -804,7 +873,9 @@ int main(void)
             }
 
             if (w == startmenu) {
+                int i = (ev.xbutton.y - 4) / MENU_ITEM_H;
                 set_menu(0);
+                if (i >= 0 && i < n_menu) spawn(menu[i].cmd);
                 break;
             }
 
@@ -831,11 +902,45 @@ int main(void)
                 drag_c = c;
                 drag_dx = ev.xbutton.x_root - c->x;
                 drag_dy = ev.xbutton.y_root - c->y;
+                break;
+            }
+
+            /* 枠の右端 / 下端 / 右下を掴んだらリサイズ */
+            if (!c->maximized) {
+                int zone = 0;
+                if (mx >= c->w - RESIZE_GRIP - 8) zone |= 1;   /* 右 */
+                if (my >= c->h - RESIZE_GRIP - 8) zone |= 2;   /* 下 */
+                if (zone) {
+                    resizing = zone;
+                    resize_c = c;
+                    rz_x0 = ev.xbutton.x_root;
+                    rz_y0 = ev.xbutton.y_root;
+                    rz_w0 = c->w;
+                    rz_h0 = c->h;
+                }
             }
             break;
         }
 
         case MotionNotify: {
+            if (resizing && resize_c) {
+                while (XCheckTypedEvent(dpy, MotionNotify, &ev)) { }
+                Client *c = resize_c;
+                int nw = c->w, nh = c->h;
+                if (resizing & 1) nw = rz_w0 + (ev.xmotion.x_root - rz_x0);
+                if (resizing & 2) nh = rz_h0 + (ev.xmotion.y_root - rz_y0);
+                if (nw < MIN_W) nw = MIN_W;
+                if (nh < MIN_H) nh = MIN_H;
+                if (c->x + nw > scr_w) nw = scr_w - c->x;
+                if (c->y + nh > scr_h - TASKBAR_H)
+                    nh = scr_h - TASKBAR_H - c->y;
+                c->w = nw;
+                c->h = nh;
+                c->cw = nw - 2 * BORDER;
+                c->ch = nh - BORDER - TITLE_H - BORDER;
+                set_geometry(c);
+                break;
+            }
             if (!dragging || !drag_c) break;
             /* たまった移動イベントは間引く。追従が重くなるのを防ぐ */
             while (XCheckTypedEvent(dpy, MotionNotify, &ev)) { }
@@ -853,6 +958,8 @@ int main(void)
         case ButtonRelease:
             dragging = 0;
             drag_c = NULL;
+            resizing = 0;
+            resize_c = NULL;
             break;
 
         default:

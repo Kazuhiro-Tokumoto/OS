@@ -108,6 +108,9 @@ if [ -x /lib/systemd/systemd-udevd ]; then
     udevadm settle --timeout=10 >/dev/null 2>&1
 fi
 
+# USB メモリなどを自動でマウントする常駐を上げる
+/usr/local/bin/myos-automount &
+
 echo "[myos-init] input devices:"
 ls /dev/input 2>&1
 echo "[myos-init] framebuffer:"
@@ -135,6 +138,54 @@ exec /usr/local/bin/myos-wm
 EOF
 
 chmod 755 "$WORK/myos-init" "$WORK/myos-session"
+
+echo "=== リムーバブルメディアの自動マウント ==="
+# USB メモリを挿したら /media/<デバイス名> にマウントする常駐スクリプト。
+# udev のルールでもできるが、ポーリングのほうが挙動が読みやすい。
+cat > "$WORK/usr/local/bin/myos-automount" <<'EOF'
+#!/bin/sh
+# myOS: リムーバブルメディアを自動でマウント / アンマウントする。
+# /sys/block/*/removable が 1 のものだけを対象にする
+# (内蔵ディスクを勝手に触らないため)。
+mkdir -p /media
+
+while true; do
+    for dev in /sys/block/sd*; do
+        [ -e "$dev" ] || continue
+        name=$(basename "$dev")
+        [ "$(cat "$dev/removable" 2>/dev/null)" = "1" ] || continue
+
+        # パーティションがあればそれを、無ければデバイス自体をマウントする
+        parts=$(ls -d "$dev"/"$name"[0-9]* 2>/dev/null)
+        [ -n "$parts" ] || parts="$dev"
+
+        for p in $parts; do
+            pn=$(basename "$p")
+            mp="/media/$pn"
+            mountpoint -q "$mp" 2>/dev/null && continue
+            mkdir -p "$mp"
+            if mount -o rw,noatime "/dev/$pn" "$mp" 2>/dev/null; then
+                echo "[automount] mounted /dev/$pn on $mp"
+            else
+                rmdir "$mp" 2>/dev/null
+            fi
+        done
+    done
+
+    # 抜かれたメディアの後始末
+    for mp in /media/*; do
+        [ -d "$mp" ] || continue
+        pn=$(basename "$mp")
+        [ -b "/dev/$pn" ] && continue
+        umount -l "$mp" 2>/dev/null
+        rmdir "$mp" 2>/dev/null
+        echo "[automount] removed $mp"
+    done
+
+    sleep 2
+done
+EOF
+chmod 755 "$WORK/usr/local/bin/myos-automount"
 
 echo "=== Xorg の設定 (fbdev) ==="
 # 自作ブートローダーが VBE で設定したフレームバッファをそのまま使う。
@@ -200,13 +251,17 @@ fi
 
 mkdir -p "$WORK/usr/local/src"
 cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
+   "$ROOTDIR/src/gui/myos_settings.c" \
    "$ROOTDIR/src/gui/x98.h" "$WORK/usr/local/src/"
 chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-wm \
     /usr/local/src/myos_wm.c -lX11
 chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-files \
     /usr/local/src/myos_files.c -lX11
-chmod 755 "$WORK/usr/local/bin/myos-wm" "$WORK/usr/local/bin/myos-files"
-ls -l "$WORK/usr/local/bin/myos-wm" "$WORK/usr/local/bin/myos-files"
+chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-settings \
+    /usr/local/src/myos_settings.c -lX11
+chmod 755 "$WORK/usr/local/bin/myos-wm" "$WORK/usr/local/bin/myos-files" \
+    "$WORK/usr/local/bin/myos-settings"
+ls -l "$WORK/usr/local/bin/"
 
 echo "=== デスクトップのリンク ==="
 # ここに 1 行足すだけでデスクトップにアイコンが増える。
@@ -221,6 +276,19 @@ Firefox|globe|/usr/bin/firefox-esr
 Java Demo|java|java -jar /usr/local/share/myos/hello.jar
 OpenGL Test|app|/usr/bin/glxgears
 MS-DOS Prompt|app|/usr/bin/xterm -bg black -fg lightgray -fa Monospace -fs 11
+Settings|app|/usr/local/bin/myos-settings
+Removable Media|folder|/usr/local/bin/myos-files /media
+EOF
+
+cat > "$WORK/etc/myos/startmenu.conf" <<'EOF'
+# スタートメニュー。ラベル|アイコン|コマンド
+Programs|app|/usr/local/bin/myos-files /usr/bin
+Documents|folder|/usr/local/bin/myos-files /root
+Settings|app|/usr/local/bin/myos-settings
+Removable Media|folder|/usr/local/bin/myos-files /media
+Web|globe|/usr/bin/firefox-esr
+MS-DOS Prompt|app|/usr/bin/xterm -bg black -fg lightgray
+Shut Down|app|/sbin/poweroff
 EOF
 
 echo "=== Java のデモアプリを配置 ==="

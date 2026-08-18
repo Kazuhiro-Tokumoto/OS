@@ -256,6 +256,10 @@ def main() -> int:
     ap.add_argument("--mem", default="128", help="QEMU に渡すメモリ量 (MB)")
     ap.add_argument("--serial", default="",
                     help="シリアル出力の保存先。Linux の起動ログを取るのに使う")
+    ap.add_argument("--usb-hid", action="store_true",
+                    help="USB のキーボードとマウスを繋ぐ (xHCI 経由)")
+    ap.add_argument("--usb-storage", default="",
+                    help="USB メモリとして繋ぐイメージファイル")
     ap.add_argument("--mouse", default="",
                     help='マウス操作。; 区切りで並べる。"dx:dy" で相対移動、'
                          '"click" 左クリック、"dblclick" ダブルクリック、"wait" 待つ。'
@@ -294,6 +298,18 @@ def main() -> int:
         "-no-reboot",
         "-monitor", f"unix:{sock_path},server,nowait",
     ]
+    # --- USB デバイス ---
+    if args.usb_hid or args.usb_storage:
+        # xHCI にしておけば USB 3.0/2.0/1.1 のデバイスがすべてぶら下がる
+        cmd += ["-device", "qemu-xhci,id=xhci"]
+    if args.usb_hid:
+        cmd += ["-device", "usb-kbd,bus=xhci.0",
+                "-device", "usb-mouse,bus=xhci.0"]
+    if args.usb_storage:
+        stick = Path(args.usb_storage).resolve()
+        cmd += ["-drive", f"file={stick},format=raw,if=none,id=usbstick",
+                "-device", "usb-storage,bus=xhci.0,drive=usbstick,removable=on"]
+
     serial_path = None
     if args.serial:
         serial_path = Path(args.serial).resolve()

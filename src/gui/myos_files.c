@@ -31,6 +31,8 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 #include "x98.h"
 
@@ -41,6 +43,19 @@
 #define PAD         6
 #define DBLCLICK_MS 700
 #define MAX_ENTRIES 4096
+
+/* ツールバーのボタン配置 */
+#define TB_UP_X     4
+#define TB_UP_W     40
+#define TB_HOME_X   (TB_UP_X + TB_UP_W + 4)
+#define TB_HOME_W   54
+#define TB_REFR_X   (TB_HOME_X + TB_HOME_W + 4)
+#define TB_REFR_W   70
+#define TB_NEW_X    (TB_REFR_X + TB_REFR_W + 4)
+#define TB_NEW_W    92
+#define TB_DEL_X    (TB_NEW_X + TB_NEW_W + 4)
+#define TB_DEL_W    64
+#define TB_PATH_X   (TB_DEL_X + TB_DEL_W + 6)
 #define DESKTOP_CONF "/etc/myos/desktop.conf"
 
 typedef struct {
@@ -62,6 +77,7 @@ static int    n_entries = 0;
 static int    top = 0;          /* 一覧の先頭に出している行 */
 static int    sel = -1;
 static int    win_w = WIN_W, win_h = WIN_H;
+static int    confirm_delete = 0;   /* 削除の確認を出しているか */
 
 /* --- 小さいアイコン (16x16) ---------------------------------------------- */
 static void small_folder(int px, int py)
@@ -152,6 +168,47 @@ static void spawn(const char *cmd)
     }
 }
 
+/* シェルを通さずに実行して終わるまで待つ。
+ * パスに空白や引用符が入っていても壊れない。 */
+static void run_wait(const char *file, const char *a1, const char *a2)
+{
+    pid_t p = fork();
+    if (p == 0) {
+        execlp(file, file, a1, a2, (char *)NULL);
+        _exit(127);
+    }
+    if (p > 0) {
+        int st;
+        while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
+    }
+}
+
+static void make_new_folder(void)
+{
+    for (int i = 1; i < 100; i++) {
+        char path[PATH_MAX];
+        if (i == 1)
+            snprintf(path, sizeof(path), "%s/New Folder",
+                     strcmp(cwd, "/") ? cwd : "");
+        else
+            snprintf(path, sizeof(path), "%s/New Folder (%d)",
+                     strcmp(cwd, "/") ? cwd : "", i);
+        if (mkdir(path, 0755) == 0) { read_dir(); return; }
+        if (errno != EEXIST) return;
+    }
+}
+
+static void delete_selected(void)
+{
+    if (sel < 0 || sel >= n_entries) return;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s",
+             strcmp(cwd, "/") ? cwd : "", entries[sel].name);
+    /* ディレクトリは中身ごと消す。rm に任せるのがいちばん確実。 */
+    run_wait("rm", "-rf", path);
+    read_dir();
+}
+
 static int ends_with(const char *s, const char *suf)
 {
     size_t ls = strlen(s), lf = strlen(suf);
@@ -224,16 +281,31 @@ static void draw_toolbar(void)
 {
     x98_fill(&x98, win, 0, 0, win_w, TOOLBAR_H, x98.face);
 
-    x98_button(&x98, win, 4, 4, 44, TOOLBAR_H - 8, "Up", 0);
-    x98_button(&x98, win, 52, 4, 56, TOOLBAR_H - 8, "Home", 0);
-    x98_button(&x98, win, 112, 4, 64, TOOLBAR_H - 8, "Refresh", 0);
+    /* ボタンの幅は文字がはみ出さないよう余裕を持たせてある。
+     * 詰めすぎるとラベルが隣に食い込んで読めなくなる。 */
+    x98_button(&x98, win, TB_UP_X,   4, TB_UP_W,   TOOLBAR_H - 8, "Up", 0);
+    x98_button(&x98, win, TB_HOME_X, 4, TB_HOME_W, TOOLBAR_H - 8, "Home", 0);
+    x98_button(&x98, win, TB_REFR_X, 4, TB_REFR_W, TOOLBAR_H - 8, "Refresh", 0);
+    x98_button(&x98, win, TB_NEW_X,  4, TB_NEW_W,  TOOLBAR_H - 8, "New Folder", 0);
+    x98_button(&x98, win, TB_DEL_X,  4, TB_DEL_W,  TOOLBAR_H - 8, "Delete", 0);
 
-    int bx = 184;
+    int bx = TB_PATH_X;
     int bw = win_w - bx - 4;
     x98_fill(&x98, win, bx, 4, bw, TOOLBAR_H - 8, x98.white);
     x98_bevel(&x98, win, bx, 4, bw, TOOLBAR_H - 8, 0);
-    x98_text(&x98, win, bx + 4, 4 + (TOOLBAR_H - 8 - x98_text_h(&x98)) / 2,
-             cwd, x98.text);
+
+    if (confirm_delete && sel >= 0 && sel < n_entries) {
+        /* 確認は別の窓を出さず、パス欄をそのまま使う */
+        char msg[300];
+        snprintf(msg, sizeof(msg), "Delete \"%s\" ?", entries[sel].name);
+        x98_text(&x98, win, bx + 6,
+                 4 + (TOOLBAR_H - 8 - x98_text_h(&x98)) / 2, msg, x98.text);
+        x98_button(&x98, win, win_w - 104, 6, 44, TOOLBAR_H - 12, "Yes", 0);
+        x98_button(&x98, win, win_w - 56, 6, 44, TOOLBAR_H - 12, "No", 0);
+    } else {
+        x98_text(&x98, win, bx + 4,
+                 4 + (TOOLBAR_H - 8 - x98_text_h(&x98)) / 2, cwd, x98.text);
+    }
 
     x98_hline(&x98, win, 0, TOOLBAR_H - 2, win_w, x98.shadow);
     x98_hline(&x98, win, 0, TOOLBAR_H - 1, win_w, x98.light);
@@ -389,20 +461,32 @@ int main(int argc, char **argv)
 
             /* ツールバー */
             if (my < TOOLBAR_H) {
-                if (mx >= 4 && mx < 48) {
+                if (confirm_delete) {
+                    if (mx >= win_w - 104 && mx < win_w - 60)
+                        delete_selected();
+                    confirm_delete = 0;
+                    redraw();
+                    break;
+                }
+                if (mx >= TB_UP_X && mx < TB_UP_X + TB_UP_W) {
                     char up[PATH_MAX];
                     snprintf(up, sizeof(up), "%s/..", cwd);
                     go_to(up);
-                } else if (mx >= 52 && mx < 108) {
+                } else if (mx >= TB_HOME_X && mx < TB_HOME_X + TB_HOME_W) {
                     go_to("/root");
-                } else if (mx >= 112 && mx < 176) {
+                } else if (mx >= TB_REFR_X && mx < TB_REFR_X + TB_REFR_W) {
                     read_dir();
+                } else if (mx >= TB_NEW_X && mx < TB_NEW_X + TB_NEW_W) {
+                    make_new_folder();
+                } else if (mx >= TB_DEL_X && mx < TB_DEL_X + TB_DEL_W) {
+                    if (sel >= 0 && sel < n_entries) confirm_delete = 1;
                 }
                 redraw();
                 break;
             }
 
             /* 一覧 */
+            confirm_delete = 0;
             int ly = TOOLBAR_H + PAD + 2;
             int row = (my - ly) / ROW_H;
             int i = top + row;

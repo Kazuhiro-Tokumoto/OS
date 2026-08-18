@@ -48,6 +48,37 @@ Java Demo|java|java -jar /usr/local/share/myos/hello.jar
 - 上へ / ホーム / 更新
 - ホイールでスクロール、上下キーと Enter でも操作できる
 
+## 設定アプリ (`src/gui/myos_settings.c`)
+
+Win98 の「画面のプロパティ」相当。配色を選んで `/etc/myos/theme.conf` に
+書き、ウィンドウマネージャに `SIGUSR1` を送って即座に反映させる。
+
+- 配色プリセット 6 種（Windows Standard / Desert / Eggplant /
+  Rainy Day / Slate / Rose）
+- デスクトップの色だけを 16 色から選ぶ
+- ダブルクリックの速さ（Slow / Normal / Fast）
+- OK / Apply / Cancel
+
+**このアプリ自身も `x98.h` の色で描いているので、選んだ配色が
+そのまま自分の見た目に反映される。** 生きたプレビューになっている。
+
+### theme.conf
+
+```
+desktop     = 008080
+face        = C0C0C0
+title1      = 000080
+title2      = 1084D0
+titletext   = FFFFFF
+text        = 000000
+select      = 000080
+dblclick_ms = 700
+```
+
+ハイライトと影の色は面色 (`face`) から機械的に導いている。
+面色を変えれば立体枠もそれらしく付いてくるので、
+設定項目を増やさずに済んでいる。
+
 ## 時計
 
 **RTC (CMOS) から取れている。** ブートローダー側で何かする必要はない。
@@ -102,6 +133,49 @@ Option "AccelSpeed"   "0"
 
 あわせて、QEMU の PS/2 マウスは 1 パケットで送れる移動量が ±255 までなので、
 `tools/run_qemu.py` は大きな移動を 100 ピクセルずつに割って送るようにした。
+
+## USB
+
+**ドライバは全部カーネルに組み込み済み。** 追加で何かする必要はなかった。
+
+| 用途 | 設定 |
+| --- | --- |
+| USB 3.0 / 2.0 / 1.1 | `USB_XHCI_HCD` / `USB_EHCI_HCD` / `USB_OHCI_HCD` / `USB_UHCI_HCD` |
+| キーボード・マウス | `USB_HID` + `HID_GENERIC` |
+| USB メモリ | `USB_STORAGE` + `SCSI` |
+| ファイルシステム | `VFAT_FS`（FAT32）/ `EXFAT_FS` / `NTFS3_FS` |
+
+exFAT と NTFS は今どきの USB メモリ向けに後から足した。
+
+### 自動マウント
+
+`/usr/local/bin/myos-automount` が常駐して 2 秒ごとに見張り、
+`/sys/block/*/removable` が 1 のものだけを `/media/<デバイス名>` に
+マウントする。**内蔵ディスクを勝手に触らないため**にこの条件を入れている。
+抜かれたら `/media` の下を片付ける。
+
+udev のルールでも書けるが、ポーリングのほうが挙動が読みやすい。
+
+デスクトップの "Removable Media" アイコンから `/media` を開ける。
+
+### 動作確認
+
+```bash
+python3 tools/run_qemu.py --image build/myos.img --media hdd \
+    --usb-hid --usb-storage build/usbstick.img
+```
+
+起動ログでこう出れば通っている。
+
+```
+usb 1-1: Product: QEMU USB Keyboard
+input: QEMU QEMU USB Keyboard as /devices/.../input/input4
+usb 1-2: Product: QEMU USB Mouse
+hid-generic 0003:0627:0001.0002: input,hidraw1: USB HID v0.01 Mouse ...
+usb-storage 2-3:1.0: USB Mass Storage device detected
+sd 2:0:0:0: [sdb] Attached SCSI removable disk
+[automount] mounted /dev/sdb on /media/sdb
+```
 
 ## Java
 

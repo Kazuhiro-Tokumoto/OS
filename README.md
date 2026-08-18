@@ -136,8 +136,15 @@ Windows 98 もどきのデスクトップ（デスクトップアイコン / ウ
 X11 もツールキットも使わず `/dev/fb0` へ直接書いている。
 
 デスクトップにはアイコンが並び、ダブルクリックでアプリが起動する。
-ファイルマネージャ、Firefox、Java 17、OpenGL が載っている。
+ファイルマネージャ、設定アプリ、Firefox、Java 17、OpenGL が載っている。
 時計は BIOS (RTC) 由来のシステム時刻。
+USB のキーボード / マウス / メモリが使え、USB メモリは
+`/media/<デバイス名>` に自動マウントされる。
+
+**このOSは 64bit (x86_64) です。**
+16bit リアルモードで始まるのはブートローダーだけで、
+Linux Boot Protocol の 32bit エントリでカーネルに渡したあと、
+long mode への移行はカーネルが行う。
 
 詳しくは `docs/progress.md` / `docs/gui.md` / `docs/desktop.md` /
 `docs/image-layout.md` を参照。
