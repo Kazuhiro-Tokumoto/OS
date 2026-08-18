@@ -142,5 +142,31 @@ Section "Screen"
 EndSection
 EOF
 
+echo "=== myOS ウィンドウマネージャをビルド ==="
+# rootfs の中でコンパイルする。
+# ホスト (Ubuntu 24.04 / glibc 2.39) と rootfs (Debian bookworm / glibc 2.36)
+# では glibc の版が違うので、ホストで作ったバイナリはそのままでは動かない。
+# 静的リンクで逃げようとすると、libX11 がカーソル作成で libXcursor を
+# dlopen した瞬間に別版の glibc を読み込んで落ちる (SIGFPE)。
+# 中でコンパイルしてしまうのがいちばん素直。
+ROOTDIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ ! -x "$WORK/usr/bin/gcc" ]; then
+    echo "--- rootfs に gcc を入れる ---"
+    cp /etc/resolv.conf "$WORK/etc/resolv.conf"
+    mount --bind /proc "$WORK/proc" 2>/dev/null || true
+    chroot "$WORK" sh -c \
+        'apt-get update -qq && apt-get install -y --no-install-recommends \
+         gcc libc6-dev libx11-dev >/dev/null && apt-get clean'
+    umount "$WORK/proc" 2>/dev/null || true
+fi
+
+mkdir -p "$WORK/usr/local/src"
+cp "$ROOTDIR/src/gui/myos_wm.c" "$WORK/usr/local/src/myos_wm.c"
+chroot "$WORK" gcc -O2 -Wall -o /usr/local/bin/myos-wm \
+    /usr/local/src/myos_wm.c -lX11
+chmod 755 "$WORK/usr/local/bin/myos-wm"
+ls -l "$WORK/usr/local/bin/myos-wm"
+
 echo "=== 完成 ==="
 du -sh "$WORK"

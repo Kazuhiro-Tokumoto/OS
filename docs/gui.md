@@ -1,5 +1,18 @@
 # GUI 層 (フェーズ5・6)
 
+GUI には 2 つの実装がある。目的が違う。
+
+| | `src/gui/win98.c` | `src/gui/myos_wm.c` |
+| --- | --- | --- |
+| 動く場所 | `/dev/fb0` に直接描く | X11 のウィンドウマネージャ |
+| 使う場面 | X を使わない構成 / ブートローダー検証 | 本番 (Firefox などを載せる) |
+| 依存 | 無し (libc も使わない) | libX11 |
+
+Firefox は素のフレームバッファでは動かず X11 を要求する。
+そのため本番の見た目は**ウィンドウマネージャ**が担う形になった。
+`win98.c` で作った描き方 (立体枠・グラデーションのタイトルバー・
+タスクバー) はそのまま `myos_wm.c` に引き継いでいる。
+
 ## どこに作るか
 
 カーネルを自作せず Linux を採用した以上、**GUI はカーネル内ではなく
@@ -87,6 +100,30 @@ Console: colour dummy device 80x25
 | `/dev/fb0` | 29, 0 |
 | `/dev/input/mice` | 13, 63 |
 | `/dev/input/eventN` | 13, 64+N |
+
+### ハマった点: X の fbdev ドライバが simplefb を認識しない
+
+X を上げようとしたら `xserver-xorg-video-fbdev` が
+
+```
+(EE) Unable to find a valid framebuffer device
+(EE) no screens found
+```
+
+で落ちた。`/dev/fb0` は存在していて、自作の `win98.c` からは
+問題なく描けているのに、である。
+
+fbdev ドライバは vesafb の時代に書かれたもので、
+`simple-framebuffer` を素性のわからないデバイスとして弾いてしまう。
+vesafb に切り替えても同じだった。
+
+結局 X は `modesetting` ドライバ (カーネルの DRM の上で動く) に切り替え、
+カーネルに `CONFIG_DRM_BOCHS` と `CONFIG_DRM_FBDEV_EMULATION` を足した。
+
+**この結果、役割分担が少し変わっている。**
+自作ブートローダーの VBE モード設定は早期コンソール (起動ログ) で使われ、
+X が上がる段階では DRM がモード設定を引き継ぐ。
+ブートローダーが画面モードを決めるのは起動画面までになった。
 
 ### ハマった点: init の出力先
 
@@ -197,6 +234,72 @@ make run-gui-drag    # ウィンドウをドラッグする
   （下から上に読ませているだけ）
 - メニュー項目を押しても閉じるだけで、何も起きない
 - 時計は `12:00` の固定表示
+
+## ウィンドウマネージャ (`src/gui/myos_wm.c`)
+
+```
+自作ブートローダー
+  -> Linux カーネル
+    -> Xorg (画面を持つ)
+      -> myos-wm (見た目を持つ)
+        -> Firefox などのアプリ
+```
+
+reparenting 方式。クライアントのウィンドウを自前の枠 (frame) の中に
+入れ直し、枠の側にタイトルバーとボタンを描く。
+
+やっていること:
+
+- ルートウィンドウを Win98 のティール色に塗る
+- タイトルバーを横グラデーション (濃紺 → 明るい青) で描く
+- 最小化 / 最大化 / 閉じるボタン
+- タイトルバーのドラッグでウィンドウを移動
+- 画面下にタスクバー (スタートボタン + タスクボタン + 時計)
+- スタートメニューの開閉
+- 閉じるボタンは `WM_DELETE_WINDOW` に対応していれば行儀よく頼み、
+  対応していなければ `XKillClient` で切る
+
+### ハマった点: 静的リンクした Xlib が落ちる
+
+ビルドするホスト (Ubuntu 24.04 / glibc 2.39) と、動かす rootfs
+(Debian bookworm / glibc 2.36) では glibc の版が違う。
+動的リンクしたバイナリはそのままでは rootfs で動かない。
+
+静的リンクで逃げようとしたが、**起動直後に SIGFPE で落ちた**。
+
+原因は libX11 がカーソルを作るときに `libXcursor` を `dlopen` すること。
+静的リンクした実行ファイルで `dlopen` が起きると、リンク時とは別の版の
+glibc が読み込まれて壊れる。リンク時に ld が出していた警告がそのまま的中していた。
+
+```
+warning: Using 'dlopen' in statically linked applications requires at runtime
+         the shared libraries from the glibc version used for linking
+```
+
+`XCreateFontCursor` を `XCreateGlyphCursor` に変えても駄目だった
+(どちらも libX11 の同じカーソル生成経路を通る)。
+
+結局 **rootfs の中でコンパイルする**のがいちばん素直だった。
+`tools/build_rootfs.sh` が rootfs に `gcc` と `libx11-dev` を入れ、
+`chroot` してビルドしている。バイナリは 2.3MB (静的) から 32KB になった。
+
+### 検証を速くする
+
+2GB のイメージを毎回作り直していては手戻りが重すぎるので、
+`tools/run_wm.sh` で Xvfb 上に WM とテスト用アプリ (xclock など) を上げ、
+`xwd` で画面を撮れるようにした。見た目の調整はここで回し、
+通ったものだけイメージに入れる。
+
+```bash
+sh tools/run_wm.sh build/wm.png xclock
+```
+
+rootfs と同じ環境で動くかは chroot で確かめられる。
+
+```bash
+Xvfb :98 -screen 0 1024x768x24 &
+chroot ../rootfs env DISPLAY=:98 /usr/local/bin/myos-wm
+```
 
 ## これから
 
