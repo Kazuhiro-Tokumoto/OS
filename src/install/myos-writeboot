@@ -90,7 +90,14 @@ def main():
     kb_lba, kb_cnt = lba, nsect(len(k_body))
     lba = align_up(lba + kb_cnt)
 
-    cmdline = (f"console=tty0 root={rootdev} rootfstype=ext4 rw "
+    # nomodeset を必ず入れる。
+    # カーネルは .ko を全て =y にしてあるので vmwgfx などの DRM
+    # ドライバも入っている。VirtualBox の既定 (VMSVGA) のような環境では
+    # それが画面を掴み、ブートローダーが VBE で用意した
+    # フレームバッファを捨てて何も映らない画面に切り替えてしまう。
+    # 動いているのに真っ黒、という一番分かりにくい壊れ方をする。
+    # myOS の X は fbdev を使うので DRM のモード設定は要らない。
+    cmdline = (f"console=tty0 nomodeset root={rootdev} rootfstype=ext4 rw "
                f"init=/myos-init")
     cmd = cmdline.encode("ascii", "replace")
     if len(cmd) >= CMDLINE_MAX:

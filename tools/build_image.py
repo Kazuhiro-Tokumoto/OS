@@ -250,7 +250,10 @@ def main():
 
     # --- コマンドラインの既定値を決める ---
     if cmdline is None:
-        base = "console=tty0 console=ttyS0,115200"
+        # nomodeset は画面を DRM ドライバに取られないため。
+        # .ko を全て =y にしてあるので vmwgfx なども入っており、
+        # 仮想環境によっては起動しているのに画面だけ真っ黒になる。
+        base = "console=tty0 console=ttyS0,115200 nomodeset"
         if rootfs_path:
             cmdline = f"{base} root=/dev/sda2 rootfstype=ext4 rw init=/myos-init"
         elif args.initrd:

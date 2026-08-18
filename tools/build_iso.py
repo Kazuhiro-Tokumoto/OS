@@ -229,9 +229,22 @@ def main():
     #
     # loglevel=3 はカーネルのログでインストーラの画面が
     # 上書きされるのを防ぐため。
+    #
+    # nomodeset は「画面を DRM ドライバに取られない」ため。
+    #
+    # カーネルは .ko を全て =y にしてあるので vmwgfx なども入っている。
+    # VirtualBox の既定 (VMSVGA) だと vmwgfx がそのデバイスを掴み、
+    # ブートローダーが VBE で用意したフレームバッファを捨てて
+    # 自前の画面に切り替える。ところがその画面には何も映らない。
+    # 結果、カーネルもインストーラも正常に動いているのに
+    # 画面だけ真っ黒、という一番たちの悪い出方をする。
+    # (実際これで何時間も溶かした)
+    #
+    # myOS の X は fbdev (/dev/fb0) を使うので、DRM のモード設定は
+    # そもそも要らない。取られないほうが挙動が読みやすい。
     ap.add_argument("--cmdline",
                     default="console=ttyS0,115200 console=tty0 loglevel=3 "
-                            "myos.install=1")
+                            "nomodeset myos.install=1")
     args = ap.parse_args()
 
     out = Path(args.out)
