@@ -477,21 +477,35 @@ echo "=== myOS ウィンドウマネージャをビルド ==="
 ROOTDIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # gcc の有無だけでなくヘッダの有無も見る。
-# 最後の掃除で gcc とヘッダを消しているので、2 回目以降のビルドでは
-# 「gcc はあるが X11/Xlib.h が無い」という状態になりうる。
-# そこを見ていないと、作り直すたびにコンパイルが通らなくなる。
-if [ ! -x "$WORK/usr/bin/gcc" ] || [ ! -f "$WORK/usr/include/X11/Xlib.h" ]; then
+# 最後の掃除で gcc を消しているので、2 回目以降のビルドでは
+# 「gcc は無いがヘッダはある」「その逆」といった半端な状態になりうる。
+#
+# 見るヘッダは Xlib.h だけでは足りない。
+# Xlib.h は libx11-dev、X.h は x11proto-dev と、別のパッケージから来る。
+# Xlib.h だけ見ていると、X.h が無い状態を「揃っている」と判断して
+# ここを飛ばし、コンパイルの段になって
+#   Xlib.h:44: fatal error: X11/X.h: No such file or directory
+# で落ちる。実際に踏んだ。要るものは全部並べて見る。
+need_dev=0
+[ -x "$WORK/usr/bin/gcc" ]                    || need_dev=1
+[ -f "$WORK/usr/include/X11/Xlib.h" ]         || need_dev=1
+[ -f "$WORK/usr/include/X11/X.h" ]            || need_dev=1
+[ -f "$WORK/usr/include/X11/keysym.h" ]       || need_dev=1
+[ -f "$WORK/usr/include/stdio.h" ]            || need_dev=1
+if [ "$need_dev" = "1" ]; then
     echo "--- rootfs に gcc とヘッダを入れる ---"
     cp /etc/resolv.conf "$WORK/etc/resolv.conf"
     mount --bind /proc "$WORK/proc" 2>/dev/null || true
     # --reinstall を付ける。記録と実体がずれていても確実に戻せるように。
     chroot "$WORK" sh -c \
         'apt-get update -qq && apt-get install -y --reinstall \
-         --no-install-recommends gcc libc6-dev libx11-dev >/dev/null \
-         && apt-get clean'
-    [ -f "$WORK/usr/include/X11/Xlib.h" ] || {
-        echo "X11 のヘッダを用意できませんでした" >&2; exit 1; }
+         --no-install-recommends gcc libc6-dev libx11-dev x11proto-dev \
+         >/dev/null && apt-get clean'
     umount "$WORK/proc" 2>/dev/null || true
+    for h in X11/Xlib.h X11/X.h X11/keysym.h stdio.h; do
+        [ -f "$WORK/usr/include/$h" ] || {
+            echo "$h を用意できませんでした" >&2; exit 1; }
+    done
 fi
 
 mkdir -p "$WORK/usr/local/src"
