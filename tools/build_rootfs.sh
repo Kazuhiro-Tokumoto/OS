@@ -99,6 +99,13 @@ INSTALLER="fdisk parted squashfs-tools dosfstools e2fsprogs"
 # 原因の分かりにくい状態になる。実際そうなった。
 NET="iproute2 isc-dhcp-client"
 
+# 音。
+# alsa-utils が要るのは再生のためだけでなく、ミュートを外すため。
+# ALSA は初期状態でミュートになっている機械が多く、
+# 「音が出ない = 壊れている」と誤解される。
+# pulseaudio は Firefox とゲームがまず前提にしているので入れる。
+SOUND="alsa-utils pulseaudio libopenal1"
+
 SECURITY="ufw iptables nftables \
           clamav clamav-freshclam clamav-daemon \
           cron inotify-tools \
@@ -177,6 +184,9 @@ apt_install "インストーラ" "--no-install-recommends" $INSTALLER
 
 echo "=== ネットワーク ==="
 apt_install "ネットワーク" "--no-install-recommends" $NET
+
+echo "=== 音 ==="
+apt_install "音" "--no-install-recommends" $SOUND
 
 # 証明書。これが無いと HTTPS が全部こけるので、
 # ClamAV の定義取得より先に必ず通しておく。
@@ -307,6 +317,21 @@ if [ -x /usr/bin/freshclam ] && ! ls /var/lib/clamav/*.c[vl]d >/dev/null 2>&1; t
     (sleep 20; /usr/bin/freshclam --quiet) &
 fi
 
+# --- 音 -----------------------------------------------------------------
+# ALSA は初期状態でミュートになっている機械が多い。外しておかないと
+# 「音が出ない = 壊れている」と思われる。原因が見えない類の不具合。
+if [ -x /usr/sbin/alsactl ]; then
+    /usr/sbin/alsactl init >/dev/null 2>&1
+fi
+if [ -x /usr/bin/amixer ] && [ -r /proc/asound/cards ]; then
+    for c in $(sed -n 's/^ *\([0-9]\+\) .*/\1/p' /proc/asound/cards); do
+        for ctl in Master PCM Speaker Headphone Front; do
+            amixer -c "$c" sset "$ctl" unmute >/dev/null 2>&1
+        done
+        amixer -c "$c" sset Master 80% >/dev/null 2>&1
+    done
+fi
+
 # USB メモリなどを自動でマウントする常駐を上げる
 /usr/local/bin/myos-automount &
 
@@ -378,6 +403,14 @@ EOF
 cat > "$WORK/usr/local/bin/myos-desktop" <<'EOF'
 #!/bin/sh
 # デスクトップ本体。一般ユーザーで動く。
+
+# 音。pulseaudio はユーザーごとに 1 つ動く作りなのでここで上げる。
+# Firefox もゲームもまずこれを探す。
+# --exit-idle-time=-1 は「誰も使っていなくても落ちない」。
+# 落ちたあと再生しようとしたアプリが黙って無音になるのを防ぐ。
+if command -v pulseaudio >/dev/null 2>&1; then
+    pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1
+fi
 
 # 落としてきたファイルをその場で検査する常駐。
 # 一般ユーザーで動かす (見張るのは本人のダウンロード先なので)。
@@ -454,9 +487,10 @@ done
 EOF
 chmod 755 "$WORK/usr/local/bin/myos-automount"
 
-echo "=== Xorg の設定 (fbdev) ==="
-# 自作ブートローダーが VBE で設定したフレームバッファをそのまま使う。
-# DRM ドライバは要らない。
+echo "=== Xorg の設定 (modesetting + glamor) ==="
+# GPU を使う。カーネルの DRM (i915 / amdgpu / nouveau) の上で
+# modesetting ドライバを動かし、描画は glamor に任せる。
+# これが無いと全部 CPU が塗ることになり、3D が実用にならない。
 mkdir -p "$WORK/etc/X11"
 cat > "$WORK/etc/X11/xorg.conf" <<'EOF'
 Section "ServerFlags"
@@ -465,13 +499,23 @@ Section "ServerFlags"
     Option "BlankTime"      "0"
 EndSection
 
-# modesetting は xserver-xorg-core に同梱されているドライバで、
-# カーネルの DRM (QEMU なら bochs-drm) の上で動く。
-# 自作ブートローダーが VBE で設定したモードは早期コンソール用に使われ、
-# X が上がる段階では DRM がモード設定を引き継ぐ。
-Section "Device"
+# ドライバは決め打ちにしない。
+#
+# Driver を書いてしまうと、そのドライバが使えない機械で X が
+# 起動しなくなる。書かなければ X が自分で選ぶ:
+#   DRM がある     -> modesetting (下の OutputClass で glamor が付く)
+#   DRM が無い     -> fbdev に落ちる (起動中に S を押した場合など)
+#
+# OutputClass は「当てはまったときだけ効く」ので、fbdev への
+# 逃げ道を塞がずに glamor の設定だけを足せる。
+Section "OutputClass"
     Identifier  "myos-gpu"
+    MatchDriver "drm"
     Driver      "modesetting"
+    # glamor = OpenGL で描く。GPU がある機械ではこれが効いて
+    # ウィンドウの移動やスクロールが GPU 側で行われる。
+    Option      "AccelMethod" "glamor"
+    Option      "DRI"         "3"
 EndSection
 
 # ポインタの加速を切って 1:1 で動くようにする。
@@ -491,7 +535,6 @@ EndSection
 
 Section "Screen"
     Identifier   "myos-screen"
-    Device       "myos-gpu"
     Monitor      "myos-monitor"
     DefaultDepth 24
 EndSection
