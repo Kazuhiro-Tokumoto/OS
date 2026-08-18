@@ -64,7 +64,14 @@ jobs:
       - name: 空きを確認して置き場を作る
         run: |
           df -h / /mnt
-          sudo mkdir -p "$ROOTFS" "$KDIR" build
+          # /mnt の下は root で作る。build/ は *root で作らない*。
+          # sudo mkdir で作ると root 所有になり、あとで一般ユーザーとして
+          # 走る手順 (make java-demo、キャッシュの復元、成果物の収集) が
+          # そこに書けなくなる。実際それで 2 回落とした。
+          # root は他人のディレクトリにも書けるので、こちらを緩くしておけば
+          # 両方通る。
+          sudo mkdir -p "$ROOTFS" "$KDIR"
+          mkdir -p build
 
       - name: ビルドに要るものを入れる
         run: |
@@ -98,7 +105,10 @@ jobs:
 
       # デスクトップに置く Java のデモ。
       # build_rootfs.sh はこれが無ければ黙って飛ばすので、先に作っておく。
+      # 失敗しても続ける。デモの jar 1 個のために ISO を諦める理由が無い。
+      # 無ければ build_rootfs.sh が「スキップ」と言って先へ進む。
       - name: Java のデモアプリ
+        continue-on-error: true
         run: |
           sudo apt-get install -y --no-install-recommends default-jdk-headless
           make java-demo
