@@ -86,6 +86,12 @@ APPS="gtk2-engines-pixbuf libgtk-3-0 libgtk2.0-0 libcanberra-gtk3-module \
 # --- セキュリティ ------------------------------------------------------------
 # ufw はファイアウォール、ClamAV はウイルス対策。
 # cron は定期スキャン、inotify-tools はダウンロード監視に使う。
+# インストーラが使う道具。
+# これが無いとパーティションを切れず、コピーもできない。
+# (入っていなくてもインストーラは起動するので、
+#  「確認画面まで進んで急に中止される」という形で刺さる)
+INSTALLER="fdisk parted squashfs-tools dosfstools e2fsprogs"
+
 SECURITY="ufw iptables nftables \
           clamav clamav-freshclam clamav-daemon \
           cron inotify-tools \
@@ -158,6 +164,9 @@ apt_install "アプリ用ランタイム" "" $APPS
 
 echo "=== セキュリティ (ufw / ClamAV / sshd) ==="
 apt_install "セキュリティ" "--no-install-recommends" $SECURITY
+
+echo "=== インストーラが使う道具 ==="
+apt_install "インストーラ" "--no-install-recommends" $INSTALLER
 
 # 証明書。これが無いと HTTPS が全部こけるので、
 # ClamAV の定義取得より先に必ず通しておく。

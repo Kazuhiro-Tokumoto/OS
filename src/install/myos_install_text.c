@@ -387,6 +387,24 @@ static int run(char *const argv[])
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
+/* 失敗したら何が失敗したかを出して止まる。
+ * 黙って前の画面に戻ると「なぜか中止された」ようにしか見えず、
+ * 直しようが無い。 */
+static void fail_page(const char *what, int rc)
+{
+    cls();
+    frame(" myOS Setup - Error ", " Press any key ");
+    say(6, 6, "Setup could not prepare the disk.");
+    char line[128];
+    snprintf(line, sizeof(line), "The command '%s' failed (exit %d).",
+             what, rc);
+    say(8, 6, line);
+    say(11, 6, "This usually means the tool is missing from the");
+    say(12, 6, "installation medium, or the disk is in use.");
+    fflush(stdout);
+    getkey();
+}
+
 /* パーティションを切って ext4 で初期化する。
  * ここが 98 でいう FDISK と FORMAT にあたる。 */
 static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
@@ -417,7 +435,8 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
         fprintf(fp, "label: dos\n");
         fprintf(fp, ",128M,83,*\n");   /* 1: カーネル置き場 */
         fprintf(fp, ",,83\n");         /* 2: ルート */
-        if (pclose(fp) != 0) return 0;
+        int rc = pclose(fp);
+        if (rc != 0) { fail_page("sfdisk", rc); return 0; }
         *first_part = 1;
     } else {
         /* 空き領域に 2 つ足す。番号は既存の次から振られる。 */
@@ -426,7 +445,8 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
         if (!fp) return 0;
         fprintf(fp, ",128M,83\n");
         fprintf(fp, ",,83\n");
-        if (pclose(fp) != 0) return 0;
+        int rc = pclose(fp);
+        if (rc != 0) { fail_page("sfdisk --append", rc); return 0; }
         *first_part = count_parts_before(d) + 1;
     }
 
@@ -445,15 +465,8 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
 
     char *mk[] = { "mkfs.ext4", "-F", "-q", "-m", "0", "-L", "myos",
                    rootdev, NULL };
-    if (run(mk) != 0) {
-        fputs(C_WARN, stdout);
-        say(12, 6, "Setup could not format the partition.");
-        say(13, 6, "Press any key to quit.");
-        fputs(C_SCREEN, stdout);
-        fflush(stdout);
-        getkey();
-        return 0;
-    }
+    int rc = run(mk);
+    if (rc != 0) { fail_page("mkfs.ext4", rc); return 0; }
 
     say(11, 6, "Done.");
     fflush(stdout);
