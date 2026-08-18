@@ -28,7 +28,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <poll.h>
 #include <sys/wait.h>
+#include <sys/statvfs.h>
 
 #include "x98.h"
 
@@ -253,11 +255,38 @@ static int run(char *const argv[])
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
-/* unsquashfs の進捗を読みながら展開する。
- * -percentage を付けると数字だけを 1 行ずつ吐くので、それを拾う。
- * (自分でファイル数を数えるより、展開する側に言わせたほうが確か) */
+/* squashfs に入っている中身の合計バイト数。
+ * unsquashfs 4.5 には -percentage が無く (4.6 で入った)、
+ * 進捗を数字で言わせることができない。
+ * なので「入れ先がどれだけ埋まったか」で進捗を出す。その分母。
+ * -lls はメタデータだけを読むので 1 秒もかからない。 */
+static long long payload_bytes(void)
+{
+    FILE *fp = popen("unsquashfs -lls " SQUASH " 2>/dev/null | "
+                     "awk '$1 ~ /^-/ { s += $3 } END { print s+0 }'", "r");
+    if (!fp) return 0;
+    char buf[64] = "";
+    if (!fgets(buf, sizeof(buf), fp)) buf[0] = 0;
+    pclose(fp);
+    return strtoll(buf, NULL, 10);
+}
+
+/* パーティションの使用量。統計は 1 ブロック単位に丸まるが、
+ * 進捗の目安としてはそれで足りる。 */
+static long long fs_used(const char *path)
+{
+    struct statvfs v;
+    if (statvfs(path, &v) != 0) return -1;
+    return (long long)(v.f_blocks - v.f_bfree) * (long long)v.f_frsize;
+}
+
+/* 展開する。走らせている間も画面を動かし続ける。 */
 static int copy_payload(void)
 {
+    long long total = payload_bytes();
+    long long base  = fs_used(TARGET);
+    if (base < 0) base = 0;
+
     int fd[2];
     if (pipe(fd) != 0) return 0;
 
@@ -268,8 +297,11 @@ static int copy_payload(void)
         dup2(fd[1], 1);
         dup2(fd[1], 2);
         close(fd[1]);
-        execlp("unsquashfs", "unsquashfs", "-f", "-d", TARGET,
-               "-percentage", SQUASH, (char *)NULL);
+        /* -n で unsquashfs 自身の進捗バーを止める。
+         * こちらで進捗を出すので要らないし、\r まみれの行が
+         * エラー欄に流れ込むのも困る。 */
+        execlp("unsquashfs", "unsquashfs", "-n", "-f", "-d", TARGET,
+               SQUASH, (char *)NULL);
         /* execlp が戻ってきたということは unsquashfs が無い。
          * 呼び出し元は終了コードしか見ないので、ここで理由を残しておく。 */
         fprintf(stderr, "unsquashfs: %s\n", strerror(errno));
@@ -277,28 +309,54 @@ static int copy_payload(void)
     }
     close(fd[1]);
 
-    FILE *fp = fdopen(fd[0], "r");
-    char line[128];
-    while (fp && fgets(line, sizeof(line), fp)) {
-        /* 進捗の行は数字だけ。それ以外は unsquashfs からの文句なので、
-         * 最後のものを覚えておいて、失敗したときに画面へ出す。 */
-        if (line[0] < '0' || line[0] > '9') {
-            size_t n = strlen(line);
-            while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
-            if (n) snprintf(copy_err, sizeof(copy_err), "%s", line);
-            continue;
+    /* 子の言い分を読みつつ、0.5 秒ごとに進捗を測り直す。
+     * poll を挟まないと、無口なまま数分走るあいだ画面が固まる。 */
+    struct pollfd pf = { .fd = fd[0], .events = POLLIN };
+    char buf[512];
+    int done = 0;
+    for (;;) {
+        int r = poll(&pf, 1, 500);
+        if (r > 0 && (pf.revents & (POLLIN | POLLHUP))) {
+            ssize_t n = read(fd[0], buf, sizeof(buf) - 1);
+            if (n <= 0) { done = 1; }
+            else {
+                buf[n] = 0;
+                /* 最後の 1 行だけ覚えておいて、失敗したときに出す。 */
+                char *nl = strrchr(buf, '\n');
+                if (nl) *nl = 0;
+                char *last = strrchr(buf, '\n');
+                last = last ? last + 1 : buf;
+                if (*last) snprintf(copy_err, sizeof(copy_err), "%s", last);
+            }
         }
-        int v = atoi(line);
-        if (v >= 0 && v <= 100) {
-            /* コピーは全体の 10% 〜 85% を占める扱いにする */
-            tick(10 + v * 75 / 100, "Copying myOS files to your computer...");
+
+        if (total > 0) {
+            long long now = fs_used(TARGET);
+            if (now > base) {
+                int v = (int)((now - base) * 100 / total);
+                if (v > 100) v = 100;
+                /* コピーは全体の 10% 〜 85% を占める扱いにする */
+                tick(10 + v * 75 / 100,
+                     "Copying myOS files to your computer...");
+            } else {
+                tick(-1, "Copying myOS files to your computer...");
+            }
+        } else {
+            tick(-1, "Copying myOS files to your computer...");
         }
+
+        if (done) break;
     }
-    if (fp) fclose(fp);
+    close(fd[0]);
 
     int st = 0;
     while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
-    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
+        copy_err[0] = 0;        /* 成功したので、途中の出力は捨てる */
+        tick(85, "Copying myOS files to your computer...");
+        return 1;
+    }
+    return 0;
 }
 
 /* --- 手順 ---------------------------------------------------------------- */
