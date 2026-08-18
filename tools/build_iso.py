@@ -230,21 +230,25 @@ def main():
     # loglevel=3 はカーネルのログでインストーラの画面が
     # 上書きされるのを防ぐため。
     #
-    # nomodeset は「画面を DRM ドライバに取られない」ため。
+    # nomodeset は使わない。あれは KMS を丸ごと切るので、
+    # 実機に GPU があっても使われず、描画が全て CPU に落ちる
+    # (Minecraft のような 3D は実用にならない)。
     #
-    # カーネルは .ko を全て =y にしてあるので vmwgfx なども入っている。
-    # VirtualBox の既定 (VMSVGA) だと vmwgfx がそのデバイスを掴み、
-    # ブートローダーが VBE で用意したフレームバッファを捨てて
-    # 自前の画面に切り替える。ところがその画面には何も映らない。
-    # 結果、カーネルもインストーラも正常に動いているのに
-    # 画面だけ真っ黒、という一番たちの悪い出方をする。
-    # (実際これで何時間も溶かした)
+    # VirtualBox の既定 (VMSVGA) で画面が真っ黒になる原因は
+    # vmwgfx ただ 1 つ。それがブートローダーの用意した画面を奪って
+    # 何も映さない。だから KMS 全体ではなく vmwgfx だけを止める。
     #
-    # myOS の X は fbdev (/dev/fb0) を使うので、DRM のモード設定は
-    # そもそも要らない。取られないほうが挙動が読みやすい。
+    # 名前はビルド済みカーネルの System.map で確認したもの:
+    #   t vmw_pci_driver_init
+    #   d __initcall__kmod_vmwgfx__553_1695_vmw_pci_driver_init6
+    # 組み込み (=y) なので modprobe.blacklist は効かない。initcall で外す。
+    #
+    # これで
+    #   実機          i915 / amdgpu / nouveau が動き、GPU 支援が効く
+    #   VirtualBox    vmwgfx が出てこないので simpledrm が画面を持つ
     ap.add_argument("--cmdline",
                     default="console=ttyS0,115200 console=tty0 loglevel=3 "
-                            "nomodeset myos.install=1")
+                            "initcall_blacklist=vmw_pci_driver_init myos.install=1")
     args = ap.parse_args()
 
     out = Path(args.out)

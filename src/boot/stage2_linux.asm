@@ -488,6 +488,23 @@ stage2_start:
         mov     byte [cur_attr], ATTR_NORMAL
         mov     si, msg_vbe
         call    puts
+        ; S が押されていればセーフグラフィックスにする。
+        ; INT 16h AH=01h は「キーがあるか見るだけ」で待たない。
+        ; 押しっぱなしにしていれば BIOS のバッファに溜まっている。
+        mov     ah, 0x01
+        int     0x16
+        jz      .no_safe_key            ; ZF=1 なら何も来ていない
+        and     al, 0xDF                ; 小文字を大文字に寄せる
+        cmp     al, 'S'
+        jne     .no_safe_key
+        mov     byte [safe_gfx], 1
+        mov     ah, ATTR_WARN
+        mov     si, msg_safe_gfx
+        call    puts_attr
+        call    newline
+        mov     byte [cur_attr], ATTR_NORMAL
+.no_safe_key:
+
         ; ペイロードテーブルに希望が書いてあれば、それを最優先で試す。
         ; (設定アプリが書き込む。合うモードが無ければ既定の並びに落ちる)
         mov     ax, [PTBL_OFF + PT_VIDEO_W]
@@ -714,17 +731,36 @@ build_boot_params:
 .video_done:
 
         ; --- コマンドラインをコピー ---
+        ; 終端の 0 は書かず、位置を控えておく。
+        ; セーフグラフィックスのときはその後ろに足す。
         mov     si, PTBL_OFF + PT_CMDLINE
         mov     di, CMDLINE_OFF
         mov     cx, 256
 .cmd_loop:
         lodsb
-        stosb
         test    al, al
         jz      .cmd_done
+        stosb
         loop    .cmd_loop
-        mov     byte [es:di], 0
 .cmd_done:
+        ; --- セーフグラフィックス ---
+        ; 既定では KMS を有効にして GPU を使う。実機で描画が CPU に
+        ; 落ちると 3D が実用にならないため。
+        ; ただし相性で画面が出ない機械もありうる。そのとき何も手が
+        ; 無いのが一番困るので、S を押しっぱなしにしていたら
+        ; nomodeset を足して、確実に映る側に倒す。
+        ; 待ち時間は増やさない (押されていなければ素通り)。
+        cmp     byte [safe_gfx], 0
+        je      .cmd_term
+        mov     si, str_nomodeset
+.safe_copy:
+        lodsb
+        test    al, al
+        jz      .cmd_term
+        stosb
+        jmp     .safe_copy
+.cmd_term:
+        mov     byte [es:di], 0
 
         ; --- E820 メモリマップを 20 バイト単位に詰め直す ---
         ; 取得時は ACPI3.0 拡張属性込みの 24 バイトで受けているが、
@@ -851,6 +887,7 @@ msg_mem_fail:   db 'FAILED (no BIOS method worked)', 0
 msg_a20:        db 'A20 gate    : ', 0
 msg_unreal:     db 'Unreal mode : ', 0
 msg_ptbl:       db 'Payload tbl : ', 0
+msg_safe_gfx:   db 'Safe graphics (nomodeset) requested', 0
 msg_ptbl_fail:  db 'NOT FOUND (build the image with --kernel)', 0
 msg_hdr:        db 'bzImage hdr : ', 0
 msg_hdrs_ok:    db "'HdrS' found ", 0
@@ -867,6 +904,8 @@ align 4
 cd_ptbl_magic:  db 'CDPT'
 cd_ptbl_lba:    dd 0
 ptbl_retry:     db 0
+safe_gfx:       db 0
+str_nomodeset:  db ' nomodeset', 0
 msg_initrd:     db 'initramfs   : loading ', 0
 msg_no_initrd:  db 'initramfs   : none', 0
 msg_vbe:        db 'VESA (VBE)  : ', 0

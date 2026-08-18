@@ -90,14 +90,17 @@ def main():
     kb_lba, kb_cnt = lba, nsect(len(k_body))
     lba = align_up(lba + kb_cnt)
 
-    # nomodeset を必ず入れる。
-    # カーネルは .ko を全て =y にしてあるので vmwgfx などの DRM
-    # ドライバも入っている。VirtualBox の既定 (VMSVGA) のような環境では
-    # それが画面を掴み、ブートローダーが VBE で用意した
-    # フレームバッファを捨てて何も映らない画面に切り替えてしまう。
-    # 動いているのに真っ黒、という一番分かりにくい壊れ方をする。
-    # myOS の X は fbdev を使うので DRM のモード設定は要らない。
-    cmdline = (f"console=tty0 nomodeset root={rootdev} rootfstype=ext4 rw "
+    # nomodeset は使わない。あれは KMS を丸ごと切るので、実機に GPU が
+    # あっても使われず、描画が全て CPU に落ちる (3D は実用にならない)。
+    #
+    # 画面が真っ黒になる原因は vmwgfx だけなので、そこだけ止める。
+    # 名前はビルド済みカーネルの System.map で確認したもの。
+    # 組み込み (=y) なので modprobe.blacklist は効かない。initcall で外す。
+    #
+    #   実機        i915 / amdgpu / nouveau が動き GPU 支援が効く
+    #   VirtualBox  vmwgfx が出てこないので simpledrm が画面を持つ
+    cmdline = (f"console=tty0 initcall_blacklist=vmw_pci_driver_init "
+               f"root={rootdev} rootfstype=ext4 rw "
                f"init=/myos-init")
     cmd = cmdline.encode("ascii", "replace")
     if len(cmd) >= CMDLINE_MAX:

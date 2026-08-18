@@ -250,10 +250,10 @@ def main():
 
     # --- コマンドラインの既定値を決める ---
     if cmdline is None:
-        # nomodeset は画面を DRM ドライバに取られないため。
-        # .ko を全て =y にしてあるので vmwgfx なども入っており、
-        # 仮想環境によっては起動しているのに画面だけ真っ黒になる。
-        base = "console=tty0 console=ttyS0,115200 nomodeset"
+        # vmwgfx だけ止める。nomodeset で KMS を丸ごと切ると、
+        # 実機の GPU が使われず描画が全て CPU に落ちる。
+        base = ("console=tty0 console=ttyS0,115200 "
+                "initcall_blacklist=vmw_pci_driver_init")
         if rootfs_path:
             cmdline = f"{base} root=/dev/sda2 rootfstype=ext4 rw init=/myos-init"
         elif args.initrd:
