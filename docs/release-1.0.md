@@ -14,6 +14,10 @@ Windows 98 の見た目と操作感を目指した自作 OS の、最初の公�
 CD-R 1 枚（703 MiB）に 85 MiB の余裕を残して収まる。
 書き終わったら `sha256sum` を突き合わせること。
 
+```
+4de837a7f47d6b44cc9f887c1d8edd9d06deadb1779ae8be39c5e640df52b865  myos-install-1.0.iso
+```
+
 ## 使い方
 
 ### CD に焼く
@@ -112,3 +116,41 @@ sudo apt install gimp vlc gcc
 - `docs/security.md` — 権限とセットアップ
 - `docs/apps-and-security.md` — アプリ、ファイアウォール、ウイルス対策
 - `docs/install-size.md` — 容量の内訳
+
+## 作り直す
+
+```bash
+# 1. ルートファイルシステム (debootstrap から。1 回目は 30 分ほど)
+sudo tools/build_rootfs.sh
+
+# 2. カーネル (.ko を全て =y にしたモノリシック構成)
+sudo tools/build_kernel.sh
+
+# 3. インストーラの initramfs
+sudo tools/make_install_initramfs.sh
+
+# 4. ルートを固める
+sudo mksquashfs /home/user/rootfs build/myos.squashfs \
+     -comp zstd -Xcompression-level 19 -b 1M -noappend
+
+# 5. ISO
+sudo python3 tools/build_iso.py \
+     --kernel  ../kernelbuild/linux-6.12.9/arch/x86/boot/bzImage \
+     --initrd  build/install-initramfs.cpio.gz \
+     --payload build/myos.squashfs
+```
+
+## 確かめたこと
+
+QEMU 上で、CD から入れて再起動するところまで通してある。
+
+| 段階 | 結果 |
+| --- | --- |
+| CD から起動 (El Torito, ノーエミュレーション) | Stage2 が CD を認識、2048 バイトセクタで読む |
+| initramfs がメディアを探す | `/dev/sr0` を見つけて squashfs をマウント |
+| 青いテキスト画面 | ディスク一覧 → 入れ方 → 確認 |
+| パーティションとフォーマット | 128 MB の生領域 + ext4 のルート |
+| GUI のコピー | 1.7 GiB を展開、進捗が進む |
+| ブートローダーの書き込み | MBR / Stage2 / ペイロードテーブル / カーネル |
+| 再起動して installed から起動 | `/dev/sda2` を ext4 で read-write マウント |
+| 初回セットアップ | 「myOS Setup - Step 1 of 5」が出る |
