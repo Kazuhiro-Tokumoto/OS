@@ -151,6 +151,15 @@ stage2_start:
         call    puts
         mov     dl, [boot_drive]
         call    disk_init
+        call    disk_detect_cdrom
+        cmp     byte [dsk_cdrom], 0
+        je      .not_cd
+        mov     ah, ATTR_OK
+        mov     si, msg_cdrom
+        call    puts_attr
+        call    newline
+        mov     byte [cur_attr], ATTR_NORMAL
+.not_cd:
         cmp     byte [dsk_edd], 0
         je      .no_edd
         mov     ah, ATTR_OK
@@ -240,6 +249,13 @@ stage2_start:
         mov     es, ax
         mov     bx, PTBL_OFF
         mov     eax, PTBL_LBA
+        ; CD から起動したときは、ペイロードは ISO の中の別の場所にある。
+        ; その位置は ISO を作るときに cd_ptbl_lba へ書き込まれる。
+        cmp     byte [dsk_cdrom], 0
+        je      .ptbl_lba_ok
+        mov     eax, [cd_ptbl_lba]
+        shl     eax, 2                  ; 2048 → 512 バイト単位に直す
+.ptbl_lba_ok:
         mov     cx, 1
         call    disk_read
         jc      .ptbl_failed
@@ -723,7 +739,15 @@ msg_hdrs_ok:    db "'HdrS' found ", 0
 msg_no_hdrs:    db "no 'HdrS' magic - not a bzImage", 0
 msg_proto:      db '/ boot protocol ', 0
 msg_setupsects: db ' / setup_sects ', 0
+msg_cdrom:      db 'Boot medium : CD-ROM (El Torito, 2048-byte sectors)', 0
 msg_kernel:     db 'Booting now', 0
+
+; ISO を作るときに build_iso.py が書き換える場所。
+; 'CDPT' を目印に探して、直後の 4 バイトへペイロードの LBA
+; (2048 バイト単位) を入れる。ここが 0 のままだと CD からは起動できない。
+align 4
+cd_ptbl_magic:  db 'CDPT'
+cd_ptbl_lba:    dd 0
 msg_initrd:     db 'initramfs   : loading ', 0
 msg_no_initrd:  db 'initramfs   : none', 0
 msg_vbe:        db 'VESA (VBE)  : ', 0

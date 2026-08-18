@@ -107,8 +107,13 @@ disk_read:
 
         mov     di, DISK_RETRY
 .retry:
+        ; CD は必ず LBA で読む。CHS には 2048 バイトセクタという
+        ; 考えが無いので、そちらへ落ちると壊れた読み方になる。
+        cmp     byte [dsk_cdrom], 0
+        jne     .lba_only
         cmp     byte [dsk_edd], 0
         je      .chs
+.lba_only:
         call    .do_lba
         jnc     .ok
         jmp     .after
@@ -138,11 +143,27 @@ disk_read:
         ret
 
 ; --- LBA 拡張読み込み (INT 13h AH=42h) ---
+;
+; CD の場合、BIOS が扱う 1 セクタは 2048 バイトで、LBA もその単位になる。
+; 呼び出し側は常に 512 バイト単位で話すことにして、ここで 4 で割る。
+; そうしておけば、ディスクから起動しても CD から起動しても
+; 上位のコードは何も変えなくていい。
+;
+; 端数は切り上げて読む。ペイロードは 2048 境界に揃えて置いてあるので
+; 開始位置は必ず割り切れる。最後のチャンクだけ数が半端になりうるが、
+; バウンスバッファは 32KB あるので 3 セクタ余分に読んでも溢れない。
 .do_lba:
         mov     eax, [dsk_lba]
+        mov     cx, [dsk_cnt]
+        cmp     byte [dsk_cdrom], 0
+        je      .lba_units_ok
+        shr     eax, 2                  ; 512 → 2048 バイト単位
+        add     cx, 3
+        shr     cx, 2                   ; 切り上げ
+.lba_units_ok:
         mov     [dap_lba], eax
         mov     dword [dap_lba + 4], 0
-        mov     ax, [dsk_cnt]
+        mov     ax, cx
         mov     [dap_count], ax
         mov     ax, [dsk_off]
         mov     [dap_off], ax
@@ -295,6 +316,60 @@ check_unreal:
         ret
 
 ; ---------------------------------------------------------------------------
+; disk_detect_cdrom - El Torito (CD) から起動したかを調べる
+;   入力: [dsk_drive] にブートドライブ番号が入っていること
+;   出力: [dsk_cdrom] に 0 (ディスク) または 1 (CD)
+;         CF は壊さない前提では使わない
+;
+; INT 13h AH=4Bh AL=01h は「El Torito の起動情報を返せ」という命令。
+; CD から起動していればこれが通り、そうでなければ CF が立つ。
+; 返ってくる 0x13 バイトの中身:
+;   +0  パケットの大きさ (0x13)
+;   +1  エミュレーション種別 (0 = ノーエミュレーション)
+;   +2  ドライブ番号
+;   ...
+;
+; ドライブ番号を決め打ちで 0xE0 などと見るやり方もあるが、
+; 機種によって値が違うので当てにならない。BIOS に聞くのが確実。
+; ---------------------------------------------------------------------------
+disk_detect_cdrom:
+        push    ax
+        push    dx
+        push    si
+
+        mov     byte [dsk_cdrom], 0
+
+        ; パケットを 0 で埋めて大きさだけ入れておく
+        mov     si, etspec
+        mov     byte [si], 0x13
+
+        mov     ax, 0x4B01
+        mov     dl, [dsk_drive]
+        int     0x13
+        jc      .not_cd
+
+        ; ノーエミュレーション起動のときだけ 2048 バイトセクタになる。
+        ; フロッピー/HDD エミュレーションでは BIOS が 512 バイトに
+        ; 見せてくれるので、そのときは通常の扱いでよい。
+        cmp     byte [etspec + 1], 0
+        jne     .not_cd
+
+        mov     byte [dsk_cdrom], 1
+
+        ; BIOS が教えてくれたドライブ番号を採用する。
+        ; DL で渡ってきた値と食い違う機種があるため。
+        mov     al, [etspec + 2]
+        test    al, al
+        jz      .keep_drive
+        mov     [dsk_drive], al
+.keep_drive:
+.not_cd:
+        pop     si
+        pop     dx
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
 ; disk_load_high - ディスクから 1MB 超の物理アドレスへ読み込む
 ;   入力: EAX = 開始 LBA
 ;         ECX = セクタ数
@@ -408,6 +483,11 @@ dsk_spt:        dw 18           ; セクタ/トラック
 dsk_heads:      dw 2            ; ヘッド数
 dsk_lba:        dd 0
 dsk_cnt:        dw 0
+dsk_cdrom:      db 0            ; 1 なら 1 セクタ 2048 バイトの CD
+
+; INT 13h AH=4Bh が書き込む El Torito の起動情報 (0x13 バイト)
+align 4
+etspec:         times 0x14 db 0
 dsk_off:        dw 0
 dsk_seg:        dw 0
 chs_lba:        dd 0            ; CHS 経路の作業用コピー

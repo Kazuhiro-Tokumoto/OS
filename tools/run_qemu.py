@@ -285,7 +285,7 @@ def main() -> int:
     ap.add_argument("--png", default=str(BUILD / "screen.png"),
                     help="スクリーンショットの出力先 PNG")
     ap.add_argument("--qemu", default="qemu-system-i386")
-    ap.add_argument("--media", choices=["floppy", "hdd"], default="floppy",
+    ap.add_argument("--media", choices=["floppy", "hdd", "cd"], default="floppy",
                     help="イメージをフロッピーとして繋ぐか、ハードディスクとして繋ぐか")
     ap.add_argument("--mem", default="128", help="QEMU に渡すメモリ量 (MB)")
     ap.add_argument("--serial", default="",
@@ -319,6 +319,10 @@ def main() -> int:
     if args.media == "floppy":
         drive = f"file={image},format=raw,if=floppy,index=0"
         boot = "order=a"
+    elif args.media == "cd":
+        # El Torito の起動を試すとき。BIOS には CD から起動させる。
+        drive = f"file={image},format=raw,if=ide,index=2,media=cdrom"
+        boot = "order=d"
     else:
         drive = f"file={image},format=raw,if=ide,index=0,media=disk"
         boot = "order=c"

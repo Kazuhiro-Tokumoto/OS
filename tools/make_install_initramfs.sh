@@ -1,0 +1,132 @@
+#!/bin/sh
+# ============================================================================
+# make_install_initramfs.sh  -  インストールディスク用の initramfs を作る
+#
+# やること:
+#   1. 起動メディア (CD / USB) を探す
+#   2. その中の myos.squashfs を読み取り専用でマウントする
+#   3. 上に tmpfs を重ねて (overlay) 書けるようにする
+#   4. そこへ switch_root して、インストーラを起動する
+#
+# squashfs をそのまま live の根っこにしているので、
+# 「インストーラが動く環境」と「インストールされる中身」が同じものになる。
+# 別々に用意すると、片方だけ古いという事故が起きる。
+#
+# 使い方:
+#   sh tools/make_install_initramfs.sh [出力先]
+# ============================================================================
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT="${1:-$ROOT/build/install-initramfs.cpio.gz}"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+BUSYBOX="$(command -v busybox || echo /bin/busybox)"
+[ -x "$BUSYBOX" ] || { echo "busybox が見つかりません" >&2; exit 1; }
+
+echo "=== 骨組みを作る ==="
+mkdir -p "$WORK"/bin "$WORK"/sbin "$WORK"/proc "$WORK"/sys "$WORK"/dev \
+         "$WORK"/run "$WORK"/mnt/medium "$WORK"/mnt/ro "$WORK"/mnt/rw \
+         "$WORK"/mnt/root "$WORK"/tmp
+
+cp "$BUSYBOX" "$WORK/bin/busybox"
+chmod 755 "$WORK/bin/busybox"
+
+# busybox の別名を張る。init から使うものだけで十分。
+for a in sh mount umount mkdir sleep echo cat ls losetup switch_root \
+         findfs blkid dmesg mknod modprobe cp mv rm ln grep sed \
+         head tail printf test poweroff; do
+    ln -sf busybox "$WORK/bin/$a"
+done
+
+cat > "$WORK/init" <<'INIT'
+#!/bin/busybox sh
+# myOS インストールディスクの init。
+# ここは initramfs の中なので、まだ本物のルートは無い。
+
+/bin/busybox --install -s /bin 2>/dev/null
+
+mount -t proc     proc /proc
+mount -t sysfs    sys  /sys
+mount -t devtmpfs dev  /dev 2>/dev/null || true
+
+echo
+echo "  myOS installer"
+echo
+
+# --- 起動メディアを探す --------------------------------------------------
+# CD とは限らない (USB に焼いた場合もある) ので、
+# 「myos.squashfs が入っているもの」を探すという条件で見る。
+# ラベルで探すやり方もあるが、USB に dd したときにラベルが
+# 変わっていることがあるので中身で判断する。
+find_medium() {
+    for try in 1 2 3 4 5 6 7 8 9 10; do
+        for dev in /dev/sr0 /dev/sr1 /dev/sda /dev/sda1 /dev/sdb /dev/sdb1 \
+                   /dev/sdc /dev/sdc1 /dev/vda /dev/vdb /dev/hda; do
+            [ -b "$dev" ] || continue
+            mount -t iso9660 -o ro "$dev" /mnt/medium 2>/dev/null || \
+            mount -o ro "$dev" /mnt/medium 2>/dev/null || continue
+            if [ -f /mnt/medium/myos.squashfs ]; then
+                echo "  found the installation medium on $dev"
+                return 0
+            fi
+            umount /mnt/medium 2>/dev/null
+        done
+        # USB は認識されるまで少し待つことがある
+        sleep 1
+    done
+    return 1
+}
+
+if ! find_medium; then
+    echo
+    echo "  Could not find the installation medium."
+    echo "  Dropping to a shell."
+    exec /bin/sh
+fi
+
+# --- squashfs を重ねて書けるようにする ------------------------------------
+echo "  mounting the system image"
+mount -t squashfs -o ro,loop /mnt/medium/myos.squashfs /mnt/ro || {
+    echo "  Could not mount myos.squashfs"; exec /bin/sh; }
+
+mount -t tmpfs -o size=512m tmpfs /mnt/rw
+mkdir -p /mnt/rw/upper /mnt/rw/work
+
+mount -t overlay overlay \
+      -o lowerdir=/mnt/ro,upperdir=/mnt/rw/upper,workdir=/mnt/rw/work \
+      /mnt/root || { echo "  overlay failed"; exec /bin/sh; }
+
+# インストーラが読めるよう、メディアを新しい根っこの下へ移す
+mkdir -p /mnt/root/run/myos
+mount --move /mnt/medium /mnt/root/run/myos 2>/dev/null || \
+    mount --bind /mnt/medium /mnt/root/run/myos
+
+# インストーラは /run/myos/payload.squashfs という名前で探すので、
+# メディア上の名前と繋いでおく。
+ln -sf /run/myos/myos.squashfs /mnt/root/run/myos/payload.squashfs 2>/dev/null || true
+
+# 切り替え先に init が無いとカーネルパニックになる。
+# 何が起きたか分からないまま止まるのが一番困るので、
+# 無ければシェルを出して調べられるようにしておく。
+if [ ! -x /mnt/root/myos-install-init ]; then
+    echo
+    echo "  /myos-install-init is missing from the system image."
+    echo "  The medium booted correctly, but there is nothing to run."
+    echo "  Dropping to a shell inside the initramfs."
+    echo
+    exec /bin/sh
+fi
+
+echo "  starting the installer"
+echo
+
+exec switch_root /mnt/root /myos-install-init
+INIT
+chmod 755 "$WORK/init"
+
+echo "=== cpio に固める ==="
+( cd "$WORK" && find . | cpio -o -H newc --quiet ) | gzip -9 > "$OUT"
+
+echo "=== 完成 ==="
+ls -lh "$OUT"
