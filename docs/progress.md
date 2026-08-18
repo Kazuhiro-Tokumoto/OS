@@ -163,6 +163,36 @@ Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...
 | 画像ビューア | `myos_image.c` | PNG / JPEG / GIF / BMP。拡大縮小とスクロール |
 | 設定 | `myos_settings.c` | 配色 / デスクトップ色 / ダブルクリック速度 |
 | MS-DOS プロンプト | `dosrc` + `myos-prompt` | xterm + DOS 風の別名とプロンプト |
+| 初回セットアップ | `myos_setup.c` | 青い画面のウィザード。ユーザーとパスワードを決める |
+| ログオン画面 | `myos_login.c` | 自動ログインを切ったときだけ出る |
+| 管理者として実行 | `myos_runas.c` | パスワードを聞いて sudo に渡す |
+| 開くの振り分け | `myos_open.c` | 関連付けの表を見てアプリを選ぶ (X 非依存) |
+
+## 権限とセットアップ
+
+- [x] デスクトップを一般ユーザーで動かす（root は `passwd -l` で塞ぐ）
+- [x] 最初のユーザーが管理者（`sudo` グループ）。昇格は自分のパスワード
+- [x] `NOPASSWD` は電源まわりだけに絞る
+- [x] 管理者として実行するダイアログ（可否の判定は `sudo` に任せる）
+- [x] 初回セットアップのウィザード（ユーザー / パスワード /
+      自動ログイン / キーボード / タイムゾーン）
+- [x] ログオン画面（`/etc/shadow` を `crypt()` で照合）
+- [x] X に一般ユーザーから繋ぐ（`xhost si:localuser` + クッキーのコピー）
+- [x] 設定を `/etc/myos`（既定）と `~/.myos`（ユーザー）の 2 段にする
+- [x] USB メモリを一般ユーザーの所有でマウントする
+- [ ] 画面のロック / スクリーンセーバー
+- [ ] ユーザーの追加・削除（今は初回セットアップの 1 人だけ）
+
+詳細は `docs/security.md`。
+
+## ファイルの関連付け
+
+- [x] `/etc/myos/filetypes.conf` に「拡張子 → アプリ」の表を出す
+- [x] `myos-open` が振り分ける（ファイルマネージャもデスクトップもこれ経由）
+- [x] 「開く」と「実行」の 2 つの動詞（右クリックに出る）
+- [x] 設定アプリの File Types タブで書き換えられる
+- [x] `myos-term` で py / sh の実行結果が読める
+- [x] `myos-java` がヒープの上限をメモリ量から決める
 
 ## ユーザーランド
 
@@ -172,6 +202,8 @@ Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...
 - [x] Java 17 (JRE) + Swing のデモアプリ
 - [x] OpenGL（Mesa のソフトウェアラスタライザ、`glxgears` で確認）
 - [x] xterm（MS-DOS Prompt として。`dir` / `cls` / `copy` などの別名付き）
+- [x] Python 3（`.py` をダブルクリックの「実行」で走らせるため）
+- [x] sudo / xserver-xorg-legacy（権限を分けるため）
 - [x] ImageMagick（画像ビューアのデコーダとして使う）
 - [x] USB キーボード / マウス / メモリ（ドライバは全部カーネル組み込み済み）
 - [x] リムーバブルメディアの自動マウント（`/media/<デバイス名>`）

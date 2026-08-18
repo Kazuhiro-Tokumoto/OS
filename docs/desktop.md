@@ -205,21 +205,105 @@ PS1='$(dos_pwd)> '
 （`fixed` 系の 2 バイトフォントを併用すれば日本語も出せるが、
 Win98 の DOS 窓らしさを優先して英語のままにしてある）
 
+## ファイルの関連付け
+
+「どの拡張子を何で開くか」はコードに書かず、表に出してある。
+Win98 の「フォルダオプション → ファイルの種類」にあたる。
+
+```
+# 拡張子(カンマ区切り)|説明|アイコン|開く|実行(任意)
+html,htm|HTML Document|globe|firefox-esr %1|myos-notepad %1
+py|Python Script|app|myos-notepad %1|myos-term python3 %1
+c|C Source|file|myos-notepad %1|myos-term myos-cc %1
+jar|Java Archive|java|myos-java -jar %1|
+png,jpg,gif,bmp|Image|file|myos-image %1|
+```
+
+- `/etc/myos/filetypes.conf` … システム既定
+- `~/.myos/filetypes.conf` … ユーザーの上書き（こちらが優先）
+
+`%1` がファイルのパスに置き換わる。
+**シェルを通さず自分で argv に割っている**ので、
+空白や引用符の入ったファイル名でも壊れない。
+
+「開く」がダブルクリックの動作、「実行」は右クリックに出る 2 つ目の動詞。
+Windows でいう open 動詞とその他の動詞。
+`.py` や `.c` を「開く」とメモ帳、「実行」で走る、という具合。
+
+### myos-open
+
+振り分けは `myos-open` が一手に引き受ける。
+ファイルマネージャもデスクトップのリンクもここを通す。
+
+```
+myos-open <パス>          既定の動作で開く
+myos-open -run <パス>     2 つ目の動詞で開く
+myos-open -query <パス>   何で開くか表示するだけ
+```
+
+| 順番 | 条件 | 動作 |
+| --- | --- | --- |
+| 1 | ディレクトリ | ファイルマネージャ |
+| 2 | 拡張子が表にある | そのコマンド |
+| 3 | 実行属性が付いている | そのまま実行 |
+| 4 | それ以外 | Firefox に渡す |
+
+X には触らないので、端末やスクリプトからも使える。
+
+### myos-term
+
+`py` や `sh` を実行したときに出力が読めるよう、
+DOS 窓の見た目の xterm で走らせて、終わっても閉じずに止まる。
+
+```
+----- finished (exit status 0) -----
+Press Enter to close this window.
+```
+
+`myos-cc` は C のソースをその場でコンパイルして走らせる小物。
+
+### Java の走らせ方
+
+`myos-java` がヒープの上限をメモリ量から決める（1/4、192〜1024MB）。
+既定のままだと、メモリの少ない実機で Java だけが全部持っていってしまう。
+`/etc/myos/java.conf` か設定アプリの System タブで固定もできる。
+
+JRE だけ同梱しているので `.jar` と `.class` は走るが、
+`.java` のコンパイルは出来ない（`javac` は入れていない）。
+
 ## 設定アプリ (`src/gui/myos_settings.c`)
 
-Win98 の「画面のプロパティ」相当。配色を選んで `/etc/myos/theme.conf` に
-書き、ウィンドウマネージャに `SIGUSR1` を送って即座に反映させる。
+Win98 の「画面のプロパティ」相当。設定を `~/.myos/` に書き、
+ウィンドウマネージャに `SIGUSR1` を送って即座に反映させる。
+書き先がユーザーの側なので、**配色を変えるのに管理者権限は要らない**。
 
+タブが 3 枚ある。
+
+**Appearance**
 - 配色プリセット 6 種（Windows Standard / Desert / Eggplant /
   Rainy Day / Slate / Rose）
 - デスクトップの色だけを 16 色から選ぶ
 - ダブルクリックの速さ（Slow / Normal / Fast）
-- OK / Apply / Cancel
+
+**File Types**
+- 登録されている種類の一覧
+- 「Opens with」「Runs with」をその場で書き換えられる
+- 保存先は `~/.myos/filetypes.conf`
+
+**System**
+- 今のアカウントと、管理者かどうか
+- Java のヒープの上限
+- 設定がどこに書かれるかの説明
+
+OK / Apply は 3 枚ぶんまとめて保存する。
+「どのタブを見ていたかで保存されるものが変わる」のは分かりにくいので。
 
 **このアプリ自身も `x98.h` の色で描いているので、選んだ配色が
 そのまま自分の見た目に反映される。** 生きたプレビューになっている。
 
 ### theme.conf
+
+`~/.myos/theme.conf` が優先され、無ければ `/etc/myos/theme.conf`。
 
 ```
 desktop     = 008080

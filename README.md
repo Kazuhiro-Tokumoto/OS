@@ -39,7 +39,13 @@ src/gui/      Win98 もどきの GUI
   myos_files.c          ファイルマネージャ
   myos_notepad.c        メモ帳
   myos_image.c          画像ビューア
-  myos_settings.c       設定 (画面のプロパティ)
+  myos_settings.c       設定 (配色 / ファイルの種類 / システム)
+  myos_setup.c          初回セットアップ (青い画面のウィザード)
+  myos_login.c          ログオン画面
+  myos_runas.c          管理者として実行 (パスワードを聞いて sudo へ)
+  myos_open.c           開くの振り分け (関連付けの表を見る)
+  filetypes.h           関連付けの表の読み書き
+  myosconf.h            設定ファイルの置き場所 (/etc/myos と ~/.myos)
   win98.c               /dev/fb0 に直接描く版 (X なしのデモ)
 src/init/     initramfs 用の最小 init (libc 非依存)
 src/test/     fake_kernel.asm … ローダー検証用の偽 bzImage
@@ -55,7 +61,8 @@ tools/        ビルド・検証スクリプト
 docs/         設計メモ・進捗
   kernel.md             カーネルの構成 (モノリシック、ファームウェア)
   image-layout.md       ディスクイメージの構成
-  desktop.md            デスクトップ環境 (WM / アプリ / USB)
+  desktop.md            デスクトップ環境 (WM / アプリ / 関連付け / USB)
+  security.md           権限とセットアップ (ユーザー / 昇格 / ログオン)
   install-size.md       容量の見積もり
 build/        生成物 (git 管理外)
 ```
@@ -155,6 +162,17 @@ X11 もツールキットも使わず `/dev/fb0` へ直接書いている。
 USB のキーボード / マウス / メモリが使え、USB メモリは
 `/media/<デバイス名>` に自動マウントされる。
 
+初回起動時は青いセットアップ画面が出て、ユーザー名とパスワード、
+自動ログインの有無、キーボード配列、タイムゾーンを決める。
+**デスクトップは一般ユーザーで動き、root には直接ログインできない。**
+管理者権限が要る操作は、そのつどパスワードを聞くダイアログが出る
+（詳しくは `docs/security.md`）。
+
+どのファイルをどのアプリで開くかは `/etc/myos/filetypes.conf` の表で決まる。
+`.html` は Firefox、`.py` は「開く」でメモ帳・「実行」で python3、
+`.c` はコンパイルして実行、`.jar` は Java、画像は画像ビューア。
+設定アプリの「File Types」タブから書き換えられる。
+
 **見た目は Windows 98、操作は今の Windows に寄せてある。**
 `Alt+Tab` でウィンドウを巡回、`Alt+F4` で閉じる、Windows キーで
 スタートメニュー、タイトルバーのダブルクリックで最大化。
@@ -172,7 +190,7 @@ Linux Boot Protocol の 32bit エントリでカーネルに渡したあと、
 long mode への移行はカーネルが行う。
 
 ディスクイメージは **4.03 GiB**（カーネル 19.4 MiB + ext4 ルート 4 GiB）、
-ルートの実使用は **1.6 GiB**。圧縮すると 497 MiB なので、
+ルートの実使用は **1.7 GiB**。圧縮すると 497 MiB なので、
 インストール用の ISO は **530 MiB 前後**で CD-R 1 枚に収まる見込み。
 詳しくは `docs/install-size.md`。
 
