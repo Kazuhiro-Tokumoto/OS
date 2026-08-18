@@ -1,0 +1,412 @@
+/* ==========================================================================
+ * myos_install_gui.c  -  インストーラの後半 (Windows 98 の GUI ウィザード)
+ *
+ * 実物の Windows 98 のセットアップは、青い背景の上に情報バーが乗り、
+ * そこに 5 段階の進み具合と「estimated time remaining」が出ていた。
+ * その形をそのまま真似る。
+ *
+ *   1. Preparing to run myOS Setup
+ *   2. Collecting information about your computer
+ *   3. Copying myOS files to your computer
+ *   4. Restarting your computer
+ *   5. Setting up hardware and finalizing settings
+ *
+ * 5 番目は再起動後の myos-setup が担当する (98 も再起動後に
+ * ユーザー名や地域を聞いていた)。ここは 1〜4 をやる。
+ *
+ * 前半 (myos-install-text) が /tmp/myos-install.conf に
+ * 書き込み先を残しているので、それを読んで進める。
+ *
+ * ビルド:
+ *   gcc -O2 -o myos-install-gui myos_install_gui.c -lX11
+ * ========================================================================== */
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/wait.h>
+
+#include "../gui/x98.h"
+
+/* 情報バーは左。98 と同じ配置。 */
+#define BAR_W    300
+#define BAR_PAD   24
+#define STEP_H    46
+
+#define CONF_PATH "/tmp/myos-install.conf"
+#define SQUASH    "/run/myos/payload.squashfs"
+#define TARGET    "/mnt/target"
+
+enum { ST_PREPARE = 0, ST_COLLECT, ST_COPY, ST_RESTART, ST_N };
+
+static const char *step_name[ST_N] = {
+    "Preparing to run myOS Setup",
+    "Collecting information about your computer",
+    "Copying myOS files to your computer",
+    "Restarting your computer",
+};
+
+/* コピー中に右側へ出す文句。98 も似たようなことをしていた。 */
+static const char *blurb[][2] = {
+    { "A desktop you already know",
+      "Windows 98 looks, with today's shortcuts." },
+    { "Everything is already installed",
+      "Browser, Java, and an antivirus, ready to go." },
+    { "Your files stay yours",
+      "Downloads are scanned the moment they arrive." },
+    { "Built to run anywhere",
+      "Every driver is compiled into the kernel." },
+};
+#define N_BLURB ((int)(sizeof(blurb) / sizeof(blurb[0])))
+
+static Display *dpy;
+static int      screen;
+static Window   win;
+static X98      x98;
+static int      scr_w, scr_h;
+
+static int    cur_step = ST_PREPARE;
+static int    percent  = 0;
+static char   status[160] = "";
+static int    blurb_i = 0;
+static time_t started;
+static int    eta_sec = 0;
+static int    failed = 0;
+
+static char   root_dev[64] = "";
+static char   disk_dev[64] = "";
+
+/* --- 描画 ---------------------------------------------------------------- */
+static void draw_steps(void)
+{
+    int x = BAR_PAD, y = 90;
+
+    x98_text(&x98, win, x, 44, "myOS Setup", x98.white);
+
+    for (int i = 0; i < ST_N; i++) {
+        int sy = y + i * STEP_H;
+        unsigned long fg = x98.white;
+
+        /* 済んだものにはチェック、今のものには矢印を付ける。
+         * 98 の情報バーと同じで、どこまで進んだかが一目で分かる。 */
+        if (i < cur_step) {
+            XSetForeground(dpy, x98.gc, x98.white);
+            XDrawLine(dpy, win, x98.gc, x, sy + 6, x + 4, sy + 11);
+            XDrawLine(dpy, win, x98.gc, x + 4, sy + 11, x + 12, sy - 1);
+        } else if (i == cur_step) {
+            XPoint p[3] = { {(short)x, (short)(sy - 1)},
+                            {(short)x, (short)(sy + 11)},
+                            {(short)(x + 10), (short)(sy + 5)} };
+            XSetForeground(dpy, x98.gc, x98.white);
+            XFillPolygon(dpy, win, x98.gc, p, 3, Convex, CoordModeOrigin);
+        } else {
+            /* まだのものは薄く */
+            fg = x98_rgb24(&x98, 0x8090C0);
+        }
+
+        /* 文が長いので 2 行に折る */
+        const char *s = step_name[i];
+        char l1[64], l2[64];
+        l1[0] = l2[0] = 0;
+        if (x98_text_w(&x98, s) > BAR_W - 40) {
+            const char *sp = strchr(s + 20, ' ');
+            if (sp) {
+                size_t n = (size_t)(sp - s);
+                if (n > sizeof(l1) - 1) n = sizeof(l1) - 1;
+                memcpy(l1, s, n);
+                l1[n] = 0;
+                snprintf(l2, sizeof(l2), "%s", sp + 1);
+            }
+        }
+        if (l1[0]) {
+            x98_text(&x98, win, x + 20, sy, l1, fg);
+            x98_text(&x98, win, x + 20, sy + 15, l2, fg);
+        } else {
+            x98_text(&x98, win, x + 20, sy, s, fg);
+        }
+    }
+
+    /* 残り時間。98 のあれ。 */
+    char t[64];
+    if (eta_sec > 0) {
+        int m = (eta_sec + 59) / 60;
+        snprintf(t, sizeof(t), "Estimated time remaining: %d minute%s",
+                 m, m == 1 ? "" : "s");
+    } else {
+        snprintf(t, sizeof(t), "Estimated time remaining: calculating...");
+    }
+    x98_text(&x98, win, x, y + ST_N * STEP_H + 24, t, x98.white);
+}
+
+static void draw_right(void)
+{
+    int x = BAR_W + 60;
+    int w = scr_w - x - 60;
+    if (w < 200) return;
+
+    /* 宣伝の枠。コピー中だけ出す。 */
+    if (cur_step == ST_COPY) {
+        int by = scr_h / 2 - 120;
+        x98_fill(&x98, win, x, by, w, 150, x98.face);
+        x98_bevel(&x98, win, x, by, w, 150, 1);
+        x98_text(&x98, win, x + 20, by + 30, blurb[blurb_i][0], x98.text);
+        x98_text(&x98, win, x + 20, by + 56, blurb[blurb_i][1], x98.shadow);
+    }
+
+    /* 進捗バー */
+    int py = scr_h / 2 + 60;
+    x98_text(&x98, win, x, py - 26, status, x98.white);
+
+    x98_bevel(&x98, win, x, py, w, 24, 0);
+    x98_fill(&x98, win, x + 2, py + 2, w - 4, 20, x98.face);
+    int fillw = (w - 6) * percent / 100;
+    /* 98 の進捗バーは細かいブロックの並びだった */
+    for (int i = 0; i * 10 < fillw; i++)
+        x98_fill(&x98, win, x + 3 + i * 10, py + 3, 8, 18,
+                 x98_rgb24(&x98, 0x000080));
+
+    char pc[32];
+    snprintf(pc, sizeof(pc), "%d%%", percent);
+    x98_text(&x98, win, x + w / 2 - 12, py + 32, pc, x98.white);
+
+    if (failed) {
+        x98_text(&x98, win, x, py + 70,
+                 "Setup could not complete. See the console for details.",
+                 x98_rgb24(&x98, 0xFFFF80));
+    }
+}
+
+static void redraw(void)
+{
+    /* 98 のセットアップのあの青。 */
+    x98_fill(&x98, win, 0, 0, scr_w, scr_h, x98_rgb24(&x98, 0x000080));
+    /* 左の情報バーは少し濃い帯で区切る */
+    x98_fill(&x98, win, 0, 0, BAR_W, scr_h, x98_rgb24(&x98, 0x000060));
+    x98_vline(&x98, win, BAR_W, 0, scr_h, x98_rgb24(&x98, 0x1084D0));
+
+    draw_steps();
+    draw_right();
+    XFlush(dpy);
+}
+
+/* 進捗を出しつつ、X のイベントも捌く。
+ * 長い処理の途中でも画面が固まらないようにするため。 */
+static void tick(int pct, const char *msg)
+{
+    if (pct >= 0) percent = pct;
+    if (msg) snprintf(status, sizeof(status), "%s", msg);
+
+    /* 経過から残りを見積もる。98 も実際そんなものだった。 */
+    if (percent > 3) {
+        time_t now = time(NULL);
+        double elapsed = difftime(now, started);
+        eta_sec = (int)(elapsed * (100.0 - percent) / percent);
+    }
+    blurb_i = (int)(difftime(time(NULL), started) / 12) % N_BLURB;
+
+    while (XPending(dpy)) {
+        XEvent ev;
+        XNextEvent(dpy, &ev);
+    }
+    redraw();
+}
+
+/* --- 設定の読み込み ------------------------------------------------------ */
+static void load_conf(void)
+{
+    FILE *f = fopen(CONF_PATH, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char *k = myos_trim(line), *v = myos_trim(eq + 1);
+        if (!strcmp(k, "root")) snprintf(root_dev, sizeof(root_dev), "%s", v);
+        else if (!strcmp(k, "disk")) snprintf(disk_dev, sizeof(disk_dev), "%s", v);
+    }
+    fclose(f);
+}
+
+/* --- 外部コマンド -------------------------------------------------------- */
+static int run(char *const argv[])
+{
+    pid_t p = fork();
+    if (p < 0) return -1;
+    if (p == 0) {
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int st = 0;
+    while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+/* unsquashfs の進捗を読みながら展開する。
+ * -percentage を付けると数字だけを 1 行ずつ吐くので、それを拾う。
+ * (自分でファイル数を数えるより、展開する側に言わせたほうが確か) */
+static int copy_payload(void)
+{
+    int fd[2];
+    if (pipe(fd) != 0) return 0;
+
+    pid_t p = fork();
+    if (p < 0) { close(fd[0]); close(fd[1]); return 0; }
+    if (p == 0) {
+        close(fd[0]);
+        dup2(fd[1], 1);
+        dup2(fd[1], 2);
+        close(fd[1]);
+        execlp("unsquashfs", "unsquashfs", "-f", "-d", TARGET,
+               "-percentage", SQUASH, (char *)NULL);
+        _exit(127);
+    }
+    close(fd[1]);
+
+    FILE *fp = fdopen(fd[0], "r");
+    char line[128];
+    while (fp && fgets(line, sizeof(line), fp)) {
+        int v = atoi(line);
+        if (v >= 0 && v <= 100) {
+            /* コピーは全体の 10% 〜 85% を占める扱いにする */
+            tick(10 + v * 75 / 100, "Copying myOS files to your computer...");
+        }
+    }
+    if (fp) fclose(fp);
+
+    int st = 0;
+    while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+/* --- 手順 ---------------------------------------------------------------- */
+static int do_install(void)
+{
+    char *mk[]  = { "mkdir", "-p", TARGET, NULL };
+    char *mnt[] = { "mount", root_dev, TARGET, NULL };
+    char *umt[] = { "umount", TARGET, NULL };
+
+    /* 1. 準備 */
+    cur_step = ST_PREPARE;
+    tick(2, "Preparing to run Setup...");
+    run(mk);
+    if (run(mnt) != 0) {
+        failed = 1;
+        tick(-1, "Could not mount the target partition.");
+        return 0;
+    }
+
+    /* 2. 情報を集める */
+    cur_step = ST_COLLECT;
+    tick(6, "Collecting information about your computer...");
+    sleep(1);
+
+    /* 3. コピー */
+    cur_step = ST_COPY;
+    tick(10, "Copying myOS files to your computer...");
+    if (!copy_payload()) {
+        failed = 1;
+        tick(-1, "Could not copy the files.");
+        run(umt);
+        return 0;
+    }
+
+    /* 起動に要るものを書く。
+     * fstab はインストール先のパーティション名に合わせて作り直す。
+     * イメージに入っていたものは作成時のもので、ここでは合わない。 */
+    tick(88, "Writing the startup files...");
+    char path[256];
+    snprintf(path, sizeof(path), "%s/etc/fstab", TARGET);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fprintf(f, "%-12s /      ext4  defaults  0 1\n", root_dev);
+        fprintf(f, "proc         /proc  proc  defaults  0 0\n");
+        fprintf(f, "sysfs        /sys   sysfs defaults  0 0\n");
+        fclose(f);
+    }
+
+    /* 初回セットアップをもう一度やらせる。
+     * 配布イメージを作ったときの設定が残っていると、
+     * 入れた人ではなく作った人のユーザーで起動してしまう。 */
+    snprintf(path, sizeof(path), "%s/etc/myos/setup-done", TARGET);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/etc/myos/login.conf", TARGET);
+    unlink(path);
+
+    /* 4. ブートローダーを書いて再起動 */
+    cur_step = ST_RESTART;
+    tick(92, "Installing the boot loader...");
+
+    char *bl[] = { "myos-writeboot", disk_dev, root_dev, NULL };
+    if (run(bl) != 0) {
+        failed = 1;
+        tick(-1, "Could not install the boot loader.");
+        run(umt);
+        return 0;
+    }
+
+    tick(98, "Finishing...");
+    run(umt);
+    tick(100, "Setup is complete. The computer will restart.");
+    return 1;
+}
+
+int main(void)
+{
+    load_conf();
+    if (!root_dev[0]) {
+        fprintf(stderr, "myos-install-gui: %s missing or incomplete\n",
+                CONF_PATH);
+        return 2;
+    }
+
+    dpy = XOpenDisplay(NULL);
+    if (!dpy) { fprintf(stderr, "myos-install-gui: no display\n"); return 1; }
+    screen = DefaultScreen(dpy);
+    scr_w = DisplayWidth(dpy, screen);
+    scr_h = DisplayHeight(dpy, screen);
+    x98_init(&x98, dpy, screen);
+
+    XSetWindowAttributes swa;
+    swa.override_redirect = True;
+    swa.background_pixel = x98_rgb24(&x98, 0x000080);
+    swa.event_mask = ExposureMask;
+    win = XCreateWindow(dpy, RootWindow(dpy, screen), 0, 0, scr_w, scr_h, 0,
+                        CopyFromParent, InputOutput, CopyFromParent,
+                        CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
+    XStoreName(dpy, win, "myOS Setup");
+    XMapRaised(dpy, win);
+
+    started = time(NULL);
+    tick(0, "Starting Setup...");
+
+    int ok = do_install();
+
+    if (ok) {
+        /* 少し見せてから再起動。いきなり落ちると
+         * 終わったのか失敗したのか分からない。 */
+        for (int i = 10; i > 0; i--) {
+            char m[80];
+            snprintf(m, sizeof(m),
+                     "Setup is complete. Restarting in %d second%s...",
+                     i, i == 1 ? "" : "s");
+            tick(100, m);
+            sleep(1);
+        }
+        char *rb[] = { "reboot", "-f", NULL };
+        run(rb);
+    } else {
+        /* 失敗したら消さずに残す。何が起きたか見えないと直せない。 */
+        for (;;) {
+            tick(-1, NULL);
+            sleep(2);
+        }
+    }
+
+    XCloseDisplay(dpy);
+    return ok ? 0 : 1;
+}
