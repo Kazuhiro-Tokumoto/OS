@@ -107,10 +107,20 @@ jobs:
       # build_rootfs.sh はこれが無ければ黙って飛ばすので、先に作っておく。
       # 失敗しても続ける。デモの jar 1 個のために ISO を諦める理由が無い。
       # 無ければ build_rootfs.sh が「スキップ」と言って先へ進む。
+      #
+      # timeout-minutes が要る。continue-on-error は「失敗」は拾うが
+      # 「終わらない」は拾わない。実際 apt がここで 24 分止まった
+      # (ロック待ちか debconf のプロンプト待ち)。時間で切らないと、
+      # ジョブの上限 350 分までぶら下がったままになる。
       - name: Java のデモアプリ
         continue-on-error: true
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get install -y --no-install-recommends default-jdk-headless
+          # ロックは待たずに諦める。待つと止まったように見える。
+          sudo apt-get install -y --no-install-recommends \
+            -o DPkg::Lock::Timeout=60 default-jdk-headless
           make java-demo
           ls -l build/hello.jar
 
