@@ -238,6 +238,15 @@ if [ -x /usr/sbin/cron ]; then
     /usr/sbin/cron
 fi
 
+# ウイルス定義。イメージに焼いてあるが、
+# 何かの理由で入っていなければ起動後に取りに行く。
+# 定義の無い ClamAV は「入っているのに何も見つけない」状態になり、
+# 守られているつもりで守られていないのが一番まずい。
+if [ -x /usr/bin/freshclam ] && ! ls /var/lib/clamav/*.c[vl]d >/dev/null 2>&1; then
+    echo "[myos-init] virus definitions missing, fetching in the background"
+    (sleep 20; /usr/bin/freshclam --quiet) &
+fi
+
 # USB メモリなどを自動でマウントする常駐を上げる
 /usr/local/bin/myos-automount &
 
@@ -632,20 +641,33 @@ EOF
 mkdir -p "$WORK/var/log/clamav"
 chroot "$WORK" chown -R clamav:clamav /var/lib/clamav /var/log/clamav 2>/dev/null || true
 
-# ビルドしている側がプロキシ越しに出ている場合、その CA も要る。
-# 無ければ何もしない (普通の環境ではこの分岐に入らない)。
+# ビルドしている環境がプロキシ越しに出ている場合の下ごしらえ。
+# 普通の環境では何も起きない。
+#
+# freshclam は root で起動したあと clamav ユーザーに降りるので、
+# CA バンドルは「そのユーザーが読める場所」に置く必要がある。
+# /root の下に置いたままだと権限で読めず、
+# "Problem with the SSL CA cert" とだけ言って落ちる (原因が見えない)。
+BUILD_CA=""
 for ca in /root/.ccr/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
     if [ -f "$ca" ]; then
-        mkdir -p "$WORK/usr/local/share/ca-certificates"
-        cp "$ca" "$WORK/usr/local/share/ca-certificates/build-host.crt" 2>/dev/null || true
-        chroot "$WORK" update-ca-certificates >/dev/null 2>&1 || true
+        cp "$ca" "$WORK/etc/ssl/certs/myos-build-ca.crt" 2>/dev/null || true
+        chmod 644 "$WORK/etc/ssl/certs/myos-build-ca.crt" 2>/dev/null || true
+        BUILD_CA=/etc/ssl/certs/myos-build-ca.crt
         break
     fi
 done
 
 echo "  定義ファイルを取得中 (数分かかる)"
-chroot "$WORK" freshclam --quiet 2>/dev/null && echo "  取得できた" \
-    || echo "  取得できず (初回起動時に取りに行く)"
+chroot "$WORK" env \
+    CURL_CA_BUNDLE="$BUILD_CA" SSL_CERT_FILE="$BUILD_CA" \
+    HTTPS_PROXY="${HTTPS_PROXY:-}" https_proxy="${HTTPS_PROXY:-}" \
+    freshclam --quiet 2>/dev/null \
+    && echo "  取得できた" || echo "  取得できず (初回起動時に取りに行く)"
+
+# ビルド用の CA は成果物に残さない。
+# 出来上がったイメージには関係の無いものなので。
+rm -f "$WORK/etc/ssl/certs/myos-build-ca.crt"
 
 # --- 定期スキャン -----------------------------------------------------------
 # 「cron でできる?」に対しては、できる。cron を入れてある。
