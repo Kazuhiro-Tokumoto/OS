@@ -1,0 +1,153 @@
+# ============================================================================
+# myOS のインストール ISO を GitHub のマシンで作って、リリースに添付する。
+#
+# 手で走らせる:
+#   Actions タブ -> "Build install ISO" -> Run workflow
+# タグを押したときにも走る:
+#   git tag v1.0 && git push origin v1.0
+#
+# 出来上がるもの:
+#   - ワークフローの成果物 (Artifacts)      … 90 日で消える。確認用
+#   - リリースへの添付                      … こちらが本番
+#
+# 時間の目安: カーネル 60〜90 分 + それ以外 20 分。
+# 2 回目からは bzImage をキャッシュから取るので 20 分ほどで終わる。
+# ============================================================================
+name: Build install ISO
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版 (タグは v を付けたものになる)"
+        required: true
+        default: "1.0"
+      release:
+        description: "リリースに添付する"
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write          # リリースの作成と添付に要る
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    env:
+      KVER: "6.12.9"
+      # 大きいものは / ではなく /mnt に置く。
+      # GitHub のランナーは / の空きが 20GB ほどしかないが、
+      # /mnt には 60GB 以上ある。カーネルの木だけで数 GB 使う。
+      ROOTFS: /mnt/myos/rootfs
+      KDIR: /mnt/myos/kernelbuild
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 版を決める
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="${{ inputs.version }}"
+          fi
+          echo "version=$v"   >> "$GITHUB_OUTPUT"
+          echo "tag=v$v"      >> "$GITHUB_OUTPUT"
+          echo "iso=myos-install-$v.iso" >> "$GITHUB_OUTPUT"
+
+      - name: 空きを確認して置き場を作る
+        run: |
+          df -h / /mnt
+          sudo mkdir -p "$ROOTFS" "$KDIR" build
+
+      - name: ビルドに要るものを入れる
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap nasm xorriso squashfs-tools busybox-static \
+            build-essential bc bison flex libelf-dev libssl-dev \
+            cpio zstd curl python3
+          # busybox は initramfs にそのまま入れるので静的リンクのものが要る
+          ldd "$(command -v busybox)" >/dev/null 2>&1 \
+            && { echo "busybox が動的リンクです"; exit 1; } || true
+
+      # カーネルは一番重い。中身が変わらない限り作り直さない。
+      # 鍵はビルドスクリプトの中身と版。設定を変えれば自然に作り直される。
+      - name: カーネルのキャッシュ
+        id: kcache
+        uses: actions/cache@v4
+        with:
+          path: build/bzImage
+          key: bzImage-${{ env.KVER }}-${{ hashFiles('tools/build_kernel.sh') }}
+
+      - name: カーネルをビルド
+        if: steps.kcache.outputs.cache-hit != 'true'
+        run: |
+          sudo -E sh tools/build_kernel.sh "$KDIR" "$KVER"
+          sudo cp "$KDIR/linux-$KVER/arch/x86/boot/bzImage" build/bzImage
+          sudo chown "$USER" build/bzImage
+          # 木は 3GB ほどある。ISO には要らないので消して空きを戻す。
+          sudo rm -rf "$KDIR"
+          ls -l build/bzImage
+
+      - name: ルートファイルシステムをビルド
+        run: sudo -E sh tools/build_rootfs.sh "$ROOTFS"
+
+      - name: インストーラの initramfs
+        run: sudo -E sh tools/make_install_initramfs.sh build/install-initramfs.cpio.gz
+
+      # ルートを掃除し終わった *あと* に固めること。
+      # 先に固めると gcc やヘッダが入ったままの大きいものが出来る。
+      - name: ルートを固める
+        run: |
+          sudo rm -f build/myos.squashfs
+          sudo mksquashfs "$ROOTFS" build/myos.squashfs \
+            -comp zstd -Xcompression-level 19 -b 1M -noappend -quiet
+          sudo rm -rf "$ROOTFS"
+          ls -l build/myos.squashfs
+
+      - name: ISO にまとめる
+        run: |
+          sudo python3 tools/build_iso.py \
+            --kernel  build/bzImage \
+            --initrd  build/install-initramfs.cpio.gz \
+            --payload build/myos.squashfs \
+            --out     "build/${{ steps.ver.outputs.iso }}"
+          sudo chown "$USER" "build/${{ steps.ver.outputs.iso }}"
+          cd build && sha256sum "${{ steps.ver.outputs.iso }}" \
+            | tee "${{ steps.ver.outputs.iso }}.sha256"
+
+      # リリースが作れなかったときの逃げ道。ここからでも落とせる。
+      - name: 成果物として残す
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.iso }}
+          path: |
+            build/${{ steps.ver.outputs.iso }}
+            build/${{ steps.ver.outputs.iso }}.sha256
+          retention-days: 90
+          compression-level: 0     # ISO は縮まない。時間の無駄
+
+      - name: リリースに添付
+        if: github.event_name == 'push' || inputs.release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          ISO: ${{ steps.ver.outputs.iso }}
+        run: |
+          # 既にあれば作り直さない。同じタグで何度も走らせられるように。
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "myOS ${{ steps.ver.outputs.version }}" \
+              --notes-file docs/release-1.0.md \
+              --target "$GITHUB_SHA"
+          fi
+          gh release upload "$TAG" \
+            "build/$ISO" "build/$ISO.sha256" --clobber
+          gh release view "$TAG" --json url --jq .url
