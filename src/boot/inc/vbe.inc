@@ -78,6 +78,31 @@ vbe_find:
         mov     ax, [es:VBE_INFO_BUF + 0x10]
         mov     [modelist_seg], ax
 
+        ; --- 設定アプリからの希望があれば、まずそれを試す ---
+        ; 合うモードが無ければ黙って既定の並びに落ちる。
+        ; 「設定した解像度がこの画面では出せない」ときに
+        ; 起動しなくなるのが一番困るので、失敗しても止めない。
+        mov     ax, [vbe_req_w]
+        test    ax, ax
+        jz      .use_defaults
+        mov     [want_w], ax
+        mov     ax, [vbe_req_h]
+        mov     [want_h], ax
+        mov     al, [vbe_req_bpp]
+        test    al, al
+        jnz     .req_bpp_ok
+        mov     al, 32                  ; 色深度の指定が無ければ 32bpp
+.req_bpp_ok:
+        mov     [want_bpp], al
+        call    .scan_modes
+        jnc     .found
+
+        ; 32bpp で駄目なら 24bpp でもう一度だけ試す
+        mov     byte [want_bpp], 24
+        call    .scan_modes
+        jnc     .found
+
+.use_defaults:
         ; --- 希望の解像度リストを上から順に試す ---
         mov     si, wanted_modes
 .want_loop:
@@ -278,6 +303,11 @@ vbe_rsvd_pos:   db 0
 modelist_off:   dw 0
 modelist_seg:   dw 0
 try_mode:       dw 0
+; 設定アプリからの希望 (Stage2 がペイロードテーブルから読んで入れる)
+vbe_req_w:      dw 0
+vbe_req_h:      dw 0
+vbe_req_bpp:    db 0
+
 want_w:         dw 0
 want_h:         dw 0
 want_bpp:       db 0

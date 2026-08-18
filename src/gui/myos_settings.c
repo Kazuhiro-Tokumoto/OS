@@ -141,9 +141,9 @@ static void save_theme(void)
 }
 
 /* --- タブ ---------------------------------------------------------------- */
-enum { TAB_LOOK = 0, TAB_TYPES, TAB_SYSTEM, N_TABS };
+enum { TAB_LOOK = 0, TAB_TYPES, TAB_DISPLAY, TAB_SYSTEM, N_TABS };
 static const char *tab_name[N_TABS] = {
-    "Appearance", "File Types", "System"
+    "Appearance", "File Types", "Display", "System"
 };
 static int tab = TAB_LOOK;
 
@@ -404,6 +404,118 @@ static void draw_types(void)
              x98.shadow);
 }
 
+/* --- 画面 ---------------------------------------------------------------- */
+/* 解像度は X からは変えられない。nomodeset で DRM に触らせず、
+ * ブートローダーが VBE で決めたフレームバッファを使い続ける作りなので、
+ * 「次に起動するときの希望」をディスクに書いて再起動する形になる。
+ * (Windows 98 も色深度の変更に再起動が要った) */
+static const struct { int w, h; } resolutions[] = {
+    {  640,  480 }, {  800,  600 }, { 1024,  768 }, { 1152,  864 },
+    { 1280,  720 }, { 1280, 1024 }, { 1440,  900 }, { 1600,  900 },
+    { 1680, 1050 }, { 1920, 1080 },
+};
+#define N_RES ((int)(sizeof(resolutions) / sizeof(resolutions[0])))
+
+static int res_sel = -1;            /* -1 = おまかせ */
+static char res_now[64] = "";       /* いま書かれている値 */
+static char res_msg[128] = "";      /* 直近の結果 */
+
+#define RES_Y (TAB_H + 92)
+#define RES_ROW 20
+
+static void res_load(void)
+{
+    res_sel = -1;
+    snprintf(res_now, sizeof(res_now), "auto");
+    FILE *f = popen("myos-setres 2>/dev/null", "r");
+    if (!f) return;
+    char line[128];
+    if (fgets(line, sizeof(line), f)) {
+        int w, h;
+        if (sscanf(line, "current: %dx%d", &w, &h) == 2) {
+            snprintf(res_now, sizeof(res_now), "%dx%d", w, h);
+            for (int i = 0; i < N_RES; i++)
+                if (resolutions[i].w == w && resolutions[i].h == h) {
+                    res_sel = i;
+                    break;
+                }
+        }
+    }
+    pclose(f);
+}
+
+static void res_apply(void)
+{
+    char cmd[256];
+    if (res_sel < 0)
+        snprintf(cmd, sizeof(cmd), "myos-runas myos-setres auto");
+    else
+        snprintf(cmd, sizeof(cmd), "myos-runas myos-setres %d %d",
+                 resolutions[res_sel].w, resolutions[res_sel].h);
+
+    /* このプログラムは SIGCHLD を SIG_IGN にしている (子を放置しても
+     * ゾンビにしないため)。ところがその状態だと system() は子を
+     * 待てず、成功しても -1 を返す。ここだけ既定に戻して呼ぶ。
+     * 戻さないと「保存できたのに失敗と出る」ことになる。 */
+    void (*old_chld)(int) = signal(SIGCHLD, SIG_DFL);
+    int rc = system(cmd);
+    signal(SIGCHLD, old_chld);
+
+    if (rc == 0) {
+        snprintf(res_msg, sizeof(res_msg),
+                 "Saved. The new size is used the next time you start myOS.");
+        res_load();
+    } else {
+        snprintf(res_msg, sizeof(res_msg),
+                 "Could not save. Administrator rights are needed.");
+    }
+}
+
+static void draw_display(void)
+{
+    char buf[160];
+    int y = TAB_H + 20;
+
+    x98_text(&x98, win, 16, y, "Screen area", x98.text);
+    snprintf(buf, sizeof(buf), "    Currently set to:  %s", res_now);
+    x98_text(&x98, win, 16, y + 22, buf, x98.text);
+    x98_text(&x98, win, 16, y + 40,
+             "    A restart is needed before the new size is used.",
+             x98.shadow);
+
+    /* おまかせ */
+    int ry = RES_Y;
+    x98_bevel(&x98, win, 32, ry, 13, 13, 0);
+    x98_fill(&x98, win, 34, ry + 2, 9, 9, x98.white);
+    if (res_sel < 0) x98_fill(&x98, win, 36, ry + 4, 5, 5, x98.text);
+    x98_text(&x98, win, 54, ry + (13 - x98_text_h(&x98)) / 2 - 1,
+             "Let myOS choose (recommended)", x98.text);
+
+    for (int i = 0; i < N_RES; i++) {
+        ry = RES_Y + (i + 1) * RES_ROW;
+        x98_bevel(&x98, win, 32, ry, 13, 13, 0);
+        x98_fill(&x98, win, 34, ry + 2, 9, 9, x98.white);
+        if (i == res_sel) x98_fill(&x98, win, 36, ry + 4, 5, 5, x98.text);
+        snprintf(buf, sizeof(buf), "%d by %d pixels",
+                 resolutions[i].w, resolutions[i].h);
+        x98_text(&x98, win, 54, ry + (13 - x98_text_h(&x98)) / 2 - 1,
+                 buf, x98.text);
+    }
+
+    ry = RES_Y + (N_RES + 1) * RES_ROW + 10;
+    x98_button(&x98, win, 32, ry, 90, 22, "Apply", 0);
+
+    if (res_msg[0])
+        x98_text(&x98, win, 132, ry + 5, res_msg, x98.shadow);
+    else
+        x98_text(&x98, win, 132, ry + 5,
+                 "If the screen cannot show the size you pick,",
+                 x98.shadow);
+    if (!res_msg[0])
+        x98_text(&x98, win, 132, ry + 20,
+                 "myOS falls back to one that works.", x98.shadow);
+}
+
 static void draw_system(void)
 {
     char buf[256];
@@ -461,6 +573,7 @@ static void redraw(void)
         draw_speed();
         break;
     case TAB_TYPES:  draw_types();  break;
+    case TAB_DISPLAY: draw_display(); break;
     case TAB_SYSTEM: draw_system(); break;
     }
     draw_buttons();
@@ -491,6 +604,8 @@ int main(void)
     }
     screen = DefaultScreen(dpy);
     x98_init(&x98, dpy, screen);
+
+    res_load();                 /* 画面タブ: いまの設定を読んでおく */
 
     /* 今の設定がどのプリセットに一番近いか探しておく */
     for (int i = 0; i < N_SCHEMES; i++)
@@ -571,6 +686,28 @@ int main(void)
                 else if (my >= dy + 50 && my < dy + 70) ft_field = 1;
                 redraw();
                 break;
+            }
+
+            if (tab == TAB_DISPLAY) {
+                if (my >= RES_Y && my < RES_Y + 13 && mx >= 32 && mx < 380) {
+                    res_sel = -1;
+                    redraw();
+                    break;
+                }
+                for (int i = 0; i < N_RES; i++) {
+                    int ry = RES_Y + (i + 1) * RES_ROW;
+                    if (my >= ry && my < ry + 13 && mx >= 32 && mx < 380) {
+                        res_sel = i;
+                        redraw();
+                        break;
+                    }
+                }
+                int by = RES_Y + (N_RES + 1) * RES_ROW + 10;
+                if (my >= by && my < by + 22 && mx >= 32 && mx < 122) {
+                    res_apply();
+                    redraw();
+                }
+                if (my < BTN_Y) break;
             }
 
             if (tab == TAB_SYSTEM) {

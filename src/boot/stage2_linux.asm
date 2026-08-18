@@ -76,6 +76,18 @@ PT_ISECT        equ 0x20
 PT_ISIZE        equ 0x24
 PT_CMDLINE      equ 0x28                ; コマンドライン (0終端)
 
+; 画面の希望。0 なら wanted_modes の既定の並びに任せる。
+; セクタの末尾を使う。コマンドラインは 0x28 から伸びるので、
+; 手前に足すと既存のイメージと互換が無くなる。
+;
+; ここに置く理由: 解像度は X からは変えられない。
+; nomodeset で DRM に触らせず、ブートローダーが VBE で決めた
+; フレームバッファをそのまま使い続ける作りなので、
+; 「次に起動するときの希望」を書いておく場所が要る。
+PT_VIDEO_W      equ 0x1F0               ; u16 幅  (0 = おまかせ)
+PT_VIDEO_H      equ 0x1F2               ; u16 高さ
+PT_VIDEO_BPP    equ 0x1F4               ; u8  色深度 (0 = おまかせ)
+
 ; --- boot_params (ゼロページ) の主なオフセット -----------------------------
 BP_ORIG_X           equ 0x000
 BP_ORIG_Y           equ 0x001
@@ -476,6 +488,15 @@ stage2_start:
         mov     byte [cur_attr], ATTR_NORMAL
         mov     si, msg_vbe
         call    puts
+        ; ペイロードテーブルに希望が書いてあれば、それを最優先で試す。
+        ; (設定アプリが書き込む。合うモードが無ければ既定の並びに落ちる)
+        mov     ax, [PTBL_OFF + PT_VIDEO_W]
+        mov     [vbe_req_w], ax
+        mov     ax, [PTBL_OFF + PT_VIDEO_H]
+        mov     [vbe_req_h], ax
+        mov     al, [PTBL_OFF + PT_VIDEO_BPP]
+        mov     [vbe_req_bpp], al
+
         call    vbe_find
         jc      .no_vbe
         mov     ah, ATTR_OK

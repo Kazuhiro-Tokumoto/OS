@@ -112,6 +112,10 @@ def main():
                      0, 0, 0)          # initramfs は使わない
     tbl[CMDLINE_OFF:CMDLINE_OFF + len(cmd)] = cmd
 
+    # 画面の希望 (0x1F0-) はゼロのまま = 「おまかせ」。
+    # bytearray は 0 埋めなので明示的には書かない。
+    # 入れたあとに設定アプリの Display タブから myos-setres が書き換える。
+
     # --- 書き込む -----------------------------------------------------------
     with open(disk, "r+b") as f:
         # Stage1。パーティションテーブルは元のものを残す。

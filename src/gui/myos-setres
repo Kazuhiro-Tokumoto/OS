@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+# ============================================================================
+# myos-setres  -  次に起動するときの画面の解像度を決める
+#
+#   myos-setres            … いまの設定を表示する
+#   myos-setres 1024 768   … 次回起動時の希望を書き込む
+#   myos-setres auto       … おまかせに戻す
+#
+# 解像度は X からは変えられない。ブートローダーが VBE で決めた
+# フレームバッファをそのまま使い続ける作り (nomodeset) だから。
+# なので「次に起動するときの希望」をディスクに書いておく。
+# 反映には再起動が要る。Windows 98 も色深度の変更に再起動が要った。
+#
+# 書き込む先は、ブートローダーが起動のたびに読むペイロードテーブル
+# (ディスクの LBA 20)。その末尾に幅・高さ・色深度の欄がある。
+# 要 root。
+# ============================================================================
+import os
+import re
+import struct
+import sys
+
+SECTOR = 512
+PTBL_LBA = 20
+MAGIC = b"MYOSPLD2"
+OFF_W, OFF_H, OFF_BPP = 0x1F0, 0x1F2, 0x1F4
+
+# 出せる見込みのあるものだけ並べる。VBE の標準的なモード。
+CHOICES = [(640, 480), (800, 600), (1024, 768), (1152, 864),
+           (1280, 720), (1280, 1024), (1440, 900), (1600, 900),
+           (1680, 1050), (1920, 1080)]
+
+
+def die(msg):
+    print(f"myos-setres: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def boot_disk():
+    """ルートが載っているディスク (パーティションではない) を返す。"""
+    src = None
+    with open("/proc/mounts") as f:
+        for line in f:
+            p = line.split()
+            if len(p) > 1 and p[1] == "/":
+                src = p[0]
+    if not src or not src.startswith("/dev/"):
+        die("ルートのデバイスが分かりません")
+
+    name = os.path.basename(src)
+    # sda2 -> sda / nvme0n1p2 -> nvme0n1 / mmcblk0p1 -> mmcblk0
+    if re.search(r"\d+p\d+$", name):
+        disk = re.sub(r"p\d+$", "", name)
+    else:
+        disk = re.sub(r"\d+$", "", name)
+    path = f"/dev/{disk}"
+    if not os.path.exists(path):
+        die(f"{path} がありません")
+    return path
+
+
+def read_table(disk):
+    with open(disk, "rb") as f:
+        f.seek(PTBL_LBA * SECTOR)
+        tbl = bytearray(f.read(SECTOR))
+    if bytes(tbl[:8]) != MAGIC:
+        die("ペイロードテーブルが見つかりません "
+            "(このディスクから起動していない可能性があります)")
+    return tbl
+
+
+def show(tbl):
+    w = struct.unpack_from("<H", tbl, OFF_W)[0]
+    h = struct.unpack_from("<H", tbl, OFF_H)[0]
+    b = tbl[OFF_BPP]
+    if w == 0:
+        print("current: auto")
+    else:
+        print(f"current: {w}x{h}" + (f" {b}bpp" if b else ""))
+
+
+def main():
+    args = sys.argv[1:]
+    disk = boot_disk()
+    tbl = read_table(disk)
+
+    if not args:
+        show(tbl)
+        print("available:", ", ".join(f"{w}x{h}" for w, h in CHOICES))
+        return
+
+    if args[0] == "auto":
+        w = h = b = 0
+    else:
+        if len(args) < 2:
+            die("usage: myos-setres <width> <height> [bpp] | auto")
+        try:
+            w, h = int(args[0]), int(args[1])
+            b = int(args[2]) if len(args) > 2 else 32
+        except ValueError:
+            die("数字で指定してください")
+        if w <= 0 or h <= 0 or w > 4096 or h > 4096:
+            die("その解像度は扱えません")
+        if b not in (24, 32):
+            die("色深度は 24 か 32 です")
+
+    struct.pack_into("<HHB", tbl, OFF_W, w, h, b)
+
+    # 書き換えるのはこのセクタだけ。カーネルの位置やコマンドラインは
+    # 同じセクタに入っているので、読んだものをそのまま書き戻す。
+    with open(disk, "r+b") as f:
+        f.seek(PTBL_LBA * SECTOR)
+        f.write(bytes(tbl))
+        f.flush()
+        os.fsync(f.fileno())
+
+    # 読み返して確かめる。次の起動で初めて分かるのでは遅い。
+    back = read_table(disk)
+    if back[OFF_W:OFF_BPP + 1] != tbl[OFF_W:OFF_BPP + 1]:
+        die("書き込みを確認できませんでした")
+
+    show(back)
+    print("takes effect after a restart.")
+
+
+if __name__ == "__main__":
+    main()

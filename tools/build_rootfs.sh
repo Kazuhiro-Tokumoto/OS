@@ -569,6 +569,12 @@ chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-open \
 chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-alert \
     /usr/local/src/myos_alert.c -lX11
 
+# 画面の解像度を決める道具。設定アプリの「Display」タブから呼ばれる。
+# X では解像度を変えられない (nomodeset + fbdev) ので、
+# 次に起動するときの希望をディスクのペイロードテーブルへ書く。
+cp "$ROOTDIR/src/gui/myos-setres" "$WORK/usr/local/bin/myos-setres"
+chmod 755 "$WORK/usr/local/bin/myos-setres"
+
 # --- インストーラ ---------------------------------------------------------
 # インストールディスクの中身は、入る中身と同じ squashfs を使う。
 # なのでインストーラもここに入れておく。
