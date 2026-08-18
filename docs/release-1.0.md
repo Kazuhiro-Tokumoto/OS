@@ -12,10 +12,14 @@ Windows 98 の見た目と操作感を目指した自作 OS の、最初の公�
 | `myos-install-1.0.iso` | 618 MiB | 起動できるインストールディスク |
 
 CD-R 1 枚（703 MiB）に 85 MiB の余裕を残して収まる。
-書き終わったら `sha256sum` を突き合わせること。
+
+書き終わったら `sha256sum` を突き合わせること。値はここには書かない。
+ISO と一緒に `myos-install-1.0.iso.sha256` を置いてあるので、そちらを使う。
+（この文書に固定で書くと、ビルドし直すたびに古い値が残って、
+　合っているのに「壊れている」と判断させることになる）
 
 ```
-4de837a7f47d6b44cc9f887c1d8edd9d06deadb1779ae8be39c5e640df52b865  myos-install-1.0.iso
+sha256sum -c myos-install-1.0.iso.sha256
 ```
 
 ## 使い方

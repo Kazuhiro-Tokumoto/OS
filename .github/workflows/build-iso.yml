@@ -176,11 +176,28 @@ jobs:
           TAG: ${{ steps.ver.outputs.tag }}
           ISO: ${{ steps.ver.outputs.iso }}
         run: |
-          # 既にあれば作り直さない。同じタグで何度も走らせられるように。
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
+          # 本文は毎回組み立て直す。実際に焼いたものの sha256 を末尾に足す。
+          # 文書に固定で書いておくと、ビルドし直したときに古い値が残る。
+          cp docs/release-1.0.md /tmp/notes.md
+          {
+            echo
+            echo "---"
+            echo
+            echo "この版の \`$ISO\` の sha256:"
+            echo
+            echo '```'
+            cat "build/$ISO.sha256"
+            echo '```'
+          } >> /tmp/notes.md
+
+          # 既にあれば作り直さず、本文だけ更新する。
+          # 同じタグで何度も走らせられるように。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file /tmp/notes.md
+          else
             gh release create "$TAG" \
               --title "myOS ${{ steps.ver.outputs.version }}" \
-              --notes-file docs/release-1.0.md \
+              --notes-file /tmp/notes.md \
               --target "$GITHUB_SHA"
           fi
           gh release upload "$TAG" \
