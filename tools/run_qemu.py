@@ -220,6 +220,21 @@ def parse_keys(spec: str):
         "space": "spc", "bs": "backspace", "backspace": "backspace",
         "tab": "tab",
     }
+    # QEMU の sendkey はキーの名前を取る。記号はそのままでは通らない。
+    punct = {
+        "-": "minus", "=": "equal", "[": "bracket_left",
+        "]": "bracket_right", ";": "semicolon", "'": "apostrophe",
+        "`": "grave_accent", "\\": "backslash", ",": "comma",
+        ".": "dot", "/": "slash",
+    }
+    # shift を押しながら出す記号
+    shifted = {
+        "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6",
+        "&": "7", "*": "8", "(": "9", ")": "0", "_": "minus",
+        "+": "equal", "{": "bracket_left", "}": "bracket_right",
+        ":": "semicolon", "\"": "apostrophe", "~": "grave_accent",
+        "|": "backslash", "<": "comma", ">": "dot", "?": "slash",
+    }
     keys = []
     for token in spec.split(","):
         token = token.strip()
@@ -234,6 +249,12 @@ def parse_keys(spec: str):
                 keys.append("spc")
             elif ch.isalnum():
                 keys.append(ch.lower())
+            elif ch in punct:
+                keys.append(punct[ch])
+            elif ch in shifted:
+                # QEMU の sendkey に「!」のようなキーは無いので、
+                # shift との組み合わせに直す。
+                keys.append("shift-" + shifted[ch])
             else:
                 keys.append(ch)
     return keys
@@ -366,12 +387,11 @@ def main() -> int:
                 elif low.startswith("key:"):
                     # マウス操作の途中でキーを送りたいことがある
                     # (窓を 2 つ開いてから Alt+Tab、など)。
-                    # 例: key:alt-tab / key:ctrl-s / key:h,i,ret
-                    for k in step[4:].split(","):
-                        k = k.strip()
-                        if k:
-                            mon.cmd(f"sendkey {k}")
-                            time.sleep(0.12)
+                    # 例: key:alt-tab / key:whoami,ret
+                    # --keys と同じ解釈にするので、記号入りの文字列も書ける。
+                    for k in parse_keys(step[4:]):
+                        mon.cmd(f"sendkey {k}")
+                        time.sleep(0.12)
                 else:
                     dx, _, dy = step.partition(":")
                     # PS/2 マウスの 1 パケットで送れる移動量は ±255 まで。
