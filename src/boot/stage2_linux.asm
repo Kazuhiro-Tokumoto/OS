@@ -245,12 +245,19 @@ stage2_start:
 .read_ptbl:
         mov     si, msg_ptbl
         call    puts
+        ; CD から起動したときは、ペイロードは ISO の中の別の場所にある。
+        ; その位置は ISO を作るときに cd_ptbl_lba へ書き込まれる。
+        ;
+        ; 見つからなければ、もう一方の置き方でもう一度試す。
+        ; CD かどうかの判定は BIOS 頼みで、外す機種がある。
+        ; 判定を間違えても起動できなくならないように、
+        ; 両方見てから諦めることにした。
+        mov     byte [ptbl_retry], 0
+.ptbl_try:
         xor     ax, ax
         mov     es, ax
         mov     bx, PTBL_OFF
         mov     eax, PTBL_LBA
-        ; CD から起動したときは、ペイロードは ISO の中の別の場所にある。
-        ; その位置は ISO を作るときに cd_ptbl_lba へ書き込まれる。
         cmp     byte [dsk_cdrom], 0
         je      .ptbl_lba_ok
         mov     eax, [cd_ptbl_lba]
@@ -258,15 +265,24 @@ stage2_start:
 .ptbl_lba_ok:
         mov     cx, 1
         call    disk_read
-        jc      .ptbl_failed
+        jc      .ptbl_next
 
         ; マジック "MYOSPLD2" の確認
         mov     si, PTBL_OFF + PT_MAGIC
         mov     di, magic_str
         mov     cx, 8
         repe    cmpsb
-        jne     .ptbl_failed
+        je      .ptbl_found
 
+.ptbl_next:
+        cmp     byte [ptbl_retry], 0
+        jne     .ptbl_failed
+        mov     byte [ptbl_retry], 1
+        ; 置き方を間違えていたのだから、セクタの大きさの見方も入れ替える。
+        xor     byte [dsk_cdrom], 1
+        jmp     .ptbl_try
+
+.ptbl_found:
         mov     ah, ATTR_OK
         mov     si, msg_ok
         call    puts_attr
@@ -748,6 +764,7 @@ msg_kernel:     db 'Booting now', 0
 align 4
 cd_ptbl_magic:  db 'CDPT'
 cd_ptbl_lba:    dd 0
+ptbl_retry:     db 0
 msg_initrd:     db 'initramfs   : loading ', 0
 msg_no_initrd:  db 'initramfs   : none', 0
 msg_vbe:        db 'VESA (VBE)  : ', 0

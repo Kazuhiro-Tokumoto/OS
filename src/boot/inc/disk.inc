@@ -339,14 +339,29 @@ disk_detect_cdrom:
 
         mov     byte [dsk_cdrom], 0
 
-        ; パケットを 0 で埋めて大きさだけ入れておく
+        ; パケットの先頭に大きさ、その次に目印を置く。
+        ;
+        ; 目印が要る理由。BIOS によっては CD から起動していなくても
+        ; この呼び出しで CF を立てず、パケットに何も書かずに戻る。
+        ; 中身を 0 のままにしていると「エミュレーション種別 0 =
+        ; ノーエミュレーション起動」と読めてしまい、ハードディスクから
+        ; 起動したのに CD だと思い込む。
+        ; 0xFF を置いておけば、BIOS が本当に書いたときだけ 0 になる。
         mov     si, etspec
         mov     byte [si], 0x13
+        mov     byte [si + 1], 0xFF
+        mov     byte [si + 2], 0xFF
 
         mov     ax, 0x4B01
         mov     dl, [dsk_drive]
         int     0x13
         jc      .not_cd
+        test    ah, ah                  ; AH=0 以外は失敗
+        jnz     .not_cd
+
+        ; パケットの大きさが返っていること。書かれていなければ CD ではない。
+        cmp     byte [etspec], 0x13
+        jb      .not_cd
 
         ; ノーエミュレーション起動のときだけ 2048 バイトセクタになる。
         ; フロッピー/HDD エミュレーションでは BIOS が 512 バイトに
@@ -361,6 +376,8 @@ disk_detect_cdrom:
         mov     al, [etspec + 2]
         test    al, al
         jz      .keep_drive
+        cmp     al, 0xFF                ; 目印のまま = BIOS が書いていない
+        je      .keep_drive
         mov     [dsk_drive], al
 .keep_drive:
 .not_cd:
