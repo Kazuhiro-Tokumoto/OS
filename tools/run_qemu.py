@@ -352,6 +352,11 @@ def main() -> int:
                         mon.cmd("mouse_button 0")
                         if i == 0:
                             time.sleep(0.08)
+                elif low in ("rclick", "right"):
+                    # QEMU のボタンビットは 1=左 / 2=右 / 4=中
+                    mon.cmd("mouse_button 2")
+                    time.sleep(0.15)
+                    mon.cmd("mouse_button 0")
                 elif low == "down":
                     mon.cmd("mouse_button 1")
                 elif low == "up":

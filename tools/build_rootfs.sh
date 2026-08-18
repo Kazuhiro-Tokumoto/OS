@@ -335,8 +335,10 @@ EOF
 cat > "$WORK/usr/local/bin/myos-prompt" <<'EOF'
 #!/bin/sh
 # MS-DOS プロンプト。xterm を Win98 風の配色と等幅フォントで出す。
-# -e に渡すシェルは絶対パスにする。xterm は PATH から探そうとして
-# 見つからないと "No absolute path found for shell" で死ぬ。
+# xterm は起動時に $SHELL を絶対パスで解決しようとする。
+# PID 1 から来る環境では $SHELL が入っていないことがあり、
+# "No absolute path found for shell" という警告が 1 行出る
+# (警告だけで動作には影響しない)。明示しておけば黙る。
 SHELL=/bin/bash
 export SHELL
 exec xterm \

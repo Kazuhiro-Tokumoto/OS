@@ -499,14 +499,24 @@ static void raise_client(Client *c)
     draw_taskbar();
 }
 
-/* Alt+Tab: 使った順で 1 つ後ろの窓を手前に出す */
-static void cycle_windows(void)
+/* Alt+Tab: 使った順で 1 つ後ろの窓を手前に出す。
+ * back = 1 (Alt+Shift+Tab) なら逆回りで、一番奥の窓を手前に出す。 */
+static void cycle_windows(int back)
 {
     if (n_z < 2) return;
-    for (int i = 1; i < n_z; i++) {
-        if (zlist[i]->used && !zlist[i]->minimized) {
-            raise_client(zlist[i]);
-            return;
+    if (back) {
+        for (int i = n_z - 1; i >= 1; i--) {
+            if (zlist[i]->used && !zlist[i]->minimized) {
+                raise_client(zlist[i]);
+                return;
+            }
+        }
+    } else {
+        for (int i = 1; i < n_z; i++) {
+            if (zlist[i]->used && !zlist[i]->minimized) {
+                raise_client(zlist[i]);
+                return;
+            }
         }
     }
     /* 全部最小化されていたら次のものを復帰させる */
@@ -641,6 +651,24 @@ static void toggle_max(Client *c)
     set_geometry(c);
 }
 
+/* Win+左 / Win+右: 画面の左半分・右半分に寄せる (Windows のスナップ)。
+ * side = -1 で左、+1 で右。 */
+static void snap_client(Client *c, int side)
+{
+    if (!c->maximized) {
+        c->old_x = c->x; c->old_y = c->y;
+        c->old_w = c->w; c->old_h = c->h;
+    }
+    c->maximized = 0;
+    c->w = scr_w / 2;
+    c->h = scr_h - TASKBAR_H;
+    c->x = (side < 0) ? 0 : scr_w - c->w;
+    c->y = 0;
+    c->cw = c->w - 2 * BORDER;
+    c->ch = c->h - BORDER - TITLE_H - BORDER;
+    set_geometry(c);
+}
+
 static void minimize(Client *c)
 {
     c->minimized = 1;
@@ -653,6 +681,35 @@ static void restore(Client *c)
     c->minimized = 0;
     XMapWindow(dpy, c->frame);
     raise_client(c);
+    draw_taskbar();
+}
+
+/* Win+D: 全部引っ込めてデスクトップを出す。もう一度押すと戻す。
+ * 「自分が引っ込めたもの」だけ覚えておいて、それだけ戻す。 */
+static int  showing_desktop = 0;
+static char hidden_by_showdesk[MAX_CLIENTS];
+
+static void toggle_show_desktop(void)
+{
+    if (!showing_desktop) {
+        int any = 0;
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            hidden_by_showdesk[i] = 0;
+            if (clients[i].used && !clients[i].minimized) {
+                hidden_by_showdesk[i] = 1;
+                minimize(&clients[i]);
+                any = 1;
+            }
+        }
+        showing_desktop = any;
+    } else {
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (hidden_by_showdesk[i] && clients[i].used)
+                restore(&clients[i]);
+            hidden_by_showdesk[i] = 0;
+        }
+        showing_desktop = 0;
+    }
     draw_taskbar();
 }
 
@@ -695,24 +752,31 @@ static void on_sigusr1(int sig)
  *   Alt+F4   … 手前の窓を閉じる
  *   Win キー … スタートメニュー
  * NumLock / CapsLock が入っていても効くよう、修飾の組み合わせ全部で掴む。 */
+static void grab_one(KeySym ks, unsigned base)
+{
+    KeyCode kc = XKeysymToKeycode(dpy, ks);
+    unsigned mods[] = { 0, LockMask, Mod2Mask, LockMask | Mod2Mask };
+    if (!kc) return;
+    for (int i = 0; i < 4; i++)
+        XGrabKey(dpy, kc, base | mods[i], root, True,
+                 GrabModeAsync, GrabModeAsync);
+}
+
 static void grab_keys(void)
 {
-    KeyCode tab  = XKeysymToKeycode(dpy, XK_Tab);
-    KeyCode f4   = XKeysymToKeycode(dpy, XK_F4);
-    KeyCode sup1 = XKeysymToKeycode(dpy, XK_Super_L);
-    KeyCode sup2 = XKeysymToKeycode(dpy, XK_Super_R);
-    unsigned mods[] = { 0, LockMask, Mod2Mask, LockMask | Mod2Mask };
+    grab_one(XK_Tab, Mod1Mask);                 /* Alt+Tab */
+    grab_one(XK_Tab, Mod1Mask | ShiftMask);     /* Alt+Shift+Tab */
+    grab_one(XK_F4,  Mod1Mask);                 /* Alt+F4 */
+    grab_one(XK_Super_L, 0);
+    grab_one(XK_Super_R, 0);
 
-    for (int i = 0; i < 4; i++) {
-        if (tab)  XGrabKey(dpy, tab, Mod1Mask | mods[i], root, True,
-                           GrabModeAsync, GrabModeAsync);
-        if (f4)   XGrabKey(dpy, f4, Mod1Mask | mods[i], root, True,
-                           GrabModeAsync, GrabModeAsync);
-        if (sup1) XGrabKey(dpy, sup1, mods[i], root, True,
-                           GrabModeAsync, GrabModeAsync);
-        if (sup2) XGrabKey(dpy, sup2, mods[i], root, True,
-                           GrabModeAsync, GrabModeAsync);
-    }
+    /* Windows キーとの組み合わせ。Mod4Mask が Windows キー。 */
+    grab_one(XK_e, Mod4Mask);                   /* エクスプローラ */
+    grab_one(XK_d, Mod4Mask);                   /* デスクトップの表示 */
+    grab_one(XK_Left,  Mod4Mask);               /* 左半分にスナップ */
+    grab_one(XK_Right, Mod4Mask);               /* 右半分にスナップ */
+    grab_one(XK_Up,    Mod4Mask);               /* 最大化 */
+    grab_one(XK_Down,  Mod4Mask);               /* 元に戻す / 最小化 */
 }
 
 static long now_ms(void)
@@ -922,12 +986,36 @@ int main(void)
 
         case KeyPress: {
             KeySym ks = XLookupKeysym(&ev.xkey, 0);
-            if ((ks == XK_Tab) && (ev.xkey.state & Mod1Mask)) {
-                cycle_windows();
-            } else if ((ks == XK_F4) && (ev.xkey.state & Mod1Mask)) {
-                if (focused && focused->used) close_client(focused);
+            unsigned st = ev.xkey.state;
+            Client *f = (focused && focused->used) ? focused : NULL;
+
+            if ((ks == XK_Tab) && (st & Mod1Mask)) {
+                cycle_windows(!!(st & ShiftMask));
+            } else if ((ks == XK_F4) && (st & Mod1Mask)) {
+                if (f) close_client(f);
             } else if (ks == XK_Super_L || ks == XK_Super_R) {
                 set_menu(!menu_open);
+            } else if (st & Mod4Mask) {
+                /* Windows キーとの組み合わせ。
+                 * Windows キー単体はもう押した時点でスタートメニューを
+                 * 開いてしまっているので、組み合わせが来たら閉じ直す。 */
+                set_menu(0);
+                switch (ks) {
+                case XK_e: case XK_E:
+                    spawn("/usr/local/bin/myos-files /root");
+                    break;
+                case XK_d: case XK_D:
+                    toggle_show_desktop();
+                    break;
+                case XK_Left:  if (f) snap_client(f, -1); break;
+                case XK_Right: if (f) snap_client(f, +1); break;
+                case XK_Up:    if (f && !f->maximized) toggle_max(f); break;
+                case XK_Down:
+                    if (f) { if (f->maximized) toggle_max(f);
+                             else minimize(f); }
+                    break;
+                default: break;
+                }
             }
             break;
         }

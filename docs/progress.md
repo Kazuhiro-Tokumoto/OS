@@ -144,7 +144,9 @@ Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...
 - [x] コピー / 切り取り / 貼り付け（`Ctrl+C` / `Ctrl+X` / `Ctrl+V`）
 - [x] 右クリックのコンテキストメニュー
 - [x] Z オーダーの明示的な管理（前面順の配列 + アクティブ / 非アクティブの描き分け）
-- [x] Windows 風のキー操作（`Alt+Tab` / `Alt+F4` / Windows キー）
+- [x] Windows 風のキー操作
+      （`Alt+Tab` / `Alt+Shift+Tab` / `Alt+F4` / Windows キー /
+      `Win+E` / `Win+D` / `Win+←→↑↓` のスナップ）
 - [x] タイトルバーのダブルクリックで最大化 / 復元
 
 詳細は `docs/gui.md` と `docs/desktop.md`。
