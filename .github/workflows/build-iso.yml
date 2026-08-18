@@ -26,6 +26,14 @@ on:
         description: "リリースに添付する"
         type: boolean
         default: true
+      cmdline:
+        description: "カーネルのコマンドライン (空なら既定)。障害の切り分け用"
+        required: false
+        default: ""
+      suffix:
+        description: "ISO 名に付ける印 (例 debug)。リリースには添付しない用"
+        required: false
+        default: ""
   push:
     tags:
       - "v*"
@@ -57,9 +65,11 @@ jobs:
           else
             v="${{ inputs.version }}"
           fi
+          sfx="${{ inputs.suffix }}"
+          [ -n "$sfx" ] && sfx="-$sfx"
           echo "version=$v"   >> "$GITHUB_OUTPUT"
           echo "tag=v$v"      >> "$GITHUB_OUTPUT"
-          echo "iso=myos-install-$v.iso" >> "$GITHUB_OUTPUT"
+          echo "iso=myos-install-$v$sfx.iso" >> "$GITHUB_OUTPUT"
 
       - name: 空きを確認して置き場を作る
         run: |
@@ -142,10 +152,19 @@ jobs:
 
       - name: ISO にまとめる
         run: |
+          # コマンドラインを指定されたときだけ差し替える。
+          # 「カーネルに入ったあと画面が真っ黒」のような、
+          # 中が見えない障害を追うために要る。
+          extra=""
+          if [ -n "${{ inputs.cmdline }}" ]; then
+            extra='--cmdline'
+            echo "cmdline を差し替え: ${{ inputs.cmdline }}"
+          fi
           sudo python3 tools/build_iso.py \
             --kernel  build/bzImage \
             --initrd  build/install-initramfs.cpio.gz \
             --payload build/myos.squashfs \
+            ${extra:+"$extra" "${{ inputs.cmdline }}"} \
             --out     "build/${{ steps.ver.outputs.iso }}"
           # build/ の中は sudo で作ったので root 所有になっている。
           # このあと一般ユーザーで書き込む (sha256 の保存、成果物の収集) ので、
