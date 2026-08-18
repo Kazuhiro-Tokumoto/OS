@@ -54,6 +54,33 @@ echo
 echo "  myOS installer"
 echo
 
+# --- 「動いている」ことを見せる -------------------------------------------
+# カーネルは loglevel を下げて黙らせてあるので、ここで何も出さないと
+# ブートローダーの画面のあと画面が真っ暗になり、
+# 動いているのか止まったのか分からない。
+# Stage2 と同じ調子で点を . -> .. -> ... -> . と回す。
+dots_n=0
+tick() {
+    if [ "$dots_n" -ge 3 ]; then
+        # 3 つ出したら、戻って空白で潰してから戻る (Stage2 と同じ)
+        printf '\b \b\b \b\b \b'
+        dots_n=0
+    else
+        printf '.'
+        dots_n=$((dots_n + 1))
+    fi
+}
+# 点を消して次の行へ。文章を出す前に呼ぶ。
+untick() {
+    while [ "$dots_n" -gt 0 ]; do
+        printf '\b \b'
+        dots_n=$((dots_n - 1))
+    done
+    echo
+}
+
+printf '  Booting now'
+
 # --- 起動メディアを探す --------------------------------------------------
 # CD とは限らない (USB に焼いた場合もある) ので、
 # 「myos.squashfs が入っているもの」を探すという条件で見る。
@@ -64,17 +91,21 @@ find_medium() {
         for dev in /dev/sr0 /dev/sr1 /dev/sda /dev/sda1 /dev/sdb /dev/sdb1 \
                    /dev/sdc /dev/sdc1 /dev/vda /dev/vdb /dev/hda; do
             [ -b "$dev" ] || continue
+            tick
             mount -t iso9660 -o ro "$dev" /mnt/medium 2>/dev/null || \
             mount -o ro "$dev" /mnt/medium 2>/dev/null || continue
             if [ -f /mnt/medium/myos.squashfs ]; then
+                untick
                 echo "  found the installation medium on $dev"
                 return 0
             fi
             umount /mnt/medium 2>/dev/null
         done
         # USB は認識されるまで少し待つことがある
+        tick
         sleep 1
     done
+    untick
     return 1
 }
 

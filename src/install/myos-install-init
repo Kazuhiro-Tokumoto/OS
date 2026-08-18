@@ -34,10 +34,33 @@ fi
 hostname myos-installer
 
 # 入力デバイスは udev が居ないと X から見えない。
+#
+# settle は最大 10 秒待つ。その間に何も出さないと画面が止まって
+# 見えるので、ここでも点を回しておく。
+# (initramfs 側と同じ調子。あちらは別のプロセスなので状態は引き継げない)
 if [ -x /lib/systemd/systemd-udevd ]; then
+    printf '  Booting now' > /dev/console
     /lib/systemd/systemd-udevd --daemon
     udevadm trigger --action=add >/dev/null 2>&1
-    udevadm settle --timeout=10 >/dev/null 2>&1
+    udevadm settle --timeout=10 >/dev/null 2>&1 &
+    settle_pid=$!
+    n=0
+    while kill -0 "$settle_pid" 2>/dev/null; do
+        if [ "$n" -ge 3 ]; then
+            printf '\b \b\b \b\b \b' > /dev/console
+            n=0
+        else
+            printf '.' > /dev/console
+            n=$((n + 1))
+        fi
+        sleep 1
+    done
+    wait "$settle_pid" 2>/dev/null
+    while [ "$n" -gt 0 ]; do
+        printf '\b \b' > /dev/console
+        n=$((n - 1))
+    done
+    echo > /dev/console
 fi
 
 # --- 前半: 青いテキスト画面 ---------------------------------------------
