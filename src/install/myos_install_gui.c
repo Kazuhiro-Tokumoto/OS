@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <limits.h>
 #include <poll.h>
 #include <sys/wait.h>
 #include <sys/statvfs.h>
@@ -206,6 +207,13 @@ static void redraw(void)
 static void tick(int pct, const char *msg)
 {
     if (pct >= 0) percent = pct;
+    /* ここで必ず 0〜100 に収める。
+     * 計算側でも丸めてはいるが、表示の直前に一度も見ていないと、
+     * どこかで桁が飛んだときにそのまま画面へ出てしまう。
+     * 実際「一瞬だけ 1000000%」が出た。
+     * 進捗の数字は嘘をつかないことより、ありえない値を出さないことが先。 */
+    if (percent < 0)   percent = 0;
+    if (percent > 100) percent = 100;
     if (msg) snprintf(status, sizeof(status), "%s", msg);
 
     /* 経過から残りを見積もる。98 も実際そんなものだった。 */
@@ -277,7 +285,17 @@ static long long fs_used(const char *path)
 {
     struct statvfs v;
     if (statvfs(path, &v) != 0) return -1;
-    return (long long)(v.f_blocks - v.f_bfree) * (long long)v.f_frsize;
+    /* f_blocks と f_bfree は符号無し。書き込みの最中に読むと
+     * 前後がずれて f_bfree のほうが大きく見えることがある。
+     * そのまま引くと 1.8e19 に回り込み、その後の掛け算で
+     * 符号付きの範囲も超えて、進捗が無茶な値になる。 */
+    if (v.f_bfree > v.f_blocks) return -1;
+    unsigned long long used = (unsigned long long)(v.f_blocks - v.f_bfree);
+    unsigned long long fr   = (unsigned long long)v.f_frsize;
+    if (fr == 0) return -1;
+    /* 掛ける前に溢れないか見る */
+    if (used > (unsigned long long)LLONG_MAX / fr) return -1;
+    return (long long)(used * fr);
 }
 
 /* 展開する。走らせている間も画面を動かし続ける。 */
@@ -330,17 +348,16 @@ static int copy_payload(void)
             }
         }
 
-        if (total > 0) {
-            long long now = fs_used(TARGET);
-            if (now > base) {
-                int v = (int)((now - base) * 100 / total);
-                if (v > 100) v = 100;
-                /* コピーは全体の 10% 〜 85% を占める扱いにする */
-                tick(10 + v * 75 / 100,
-                     "Copying myOS files to your computer...");
-            } else {
-                tick(-1, "Copying myOS files to your computer...");
-            }
+        long long now = (total > 0) ? fs_used(TARGET) : -1;
+        if (now > base) {
+            /* 割ってから掛ける。先に 100 を掛けると、
+             * 読み取りが一度でも大きく振れたときに桁が溢れる。 */
+            double frac = (double)(now - base) / (double)total;
+            if (frac < 0.0) frac = 0.0;
+            if (frac > 1.0) frac = 1.0;
+            /* コピーは全体の 10% 〜 85% を占める扱いにする */
+            tick(10 + (int)(frac * 75.0),
+                 "Copying myOS files to your computer...");
         } else {
             tick(-1, "Copying myOS files to your computer...");
         }
