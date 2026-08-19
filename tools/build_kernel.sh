@@ -166,10 +166,9 @@ if [ "${MONOLITHIC:-1}" = "1" ]; then
     ./scripts/config --enable FW_LOADER_COMPRESS
     ./scripts/config --enable FW_LOADER_COMPRESS_ZSTD
     ./scripts/config --enable FW_LOADER_COMPRESS_XZ
-    # 直読みに失敗したときユーザーヘルパーの応答を待つ設定。
-    # 起動の最中はヘルパーなど動いていないので、ファームが 1 つ無いたびに
-    # タイムアウトぶんだけ固まる。待つ意味が無いので切る。
-    ./scripts/config --disable FW_LOADER_USER_HELPER_FALLBACK
+    # (USER_HELPER_FALLBACK はこのスクリプトの末尾でまとめて切っている。
+    #  ここでも触ると、どちらが後か で結果が変わる。実際それで
+    #  1.2 では切ったつもりが効いていなかった)
     # initramfs は gzip で固める。zstd の口も開けておく。
     ./scripts/config --enable RD_GZIP
     ./scripts/config --enable RD_ZSTD
@@ -255,11 +254,29 @@ if [ "${MONOLITHIC:-1}" = "1" ]; then
         ./scripts/config --enable $o
     done
 
-    # ファームウェアの遅延読み込み。組み込みドライバがルートより先に
-    # 初期化されても、後からユーザーランド経由で読めるようにする。
+    # ファームウェアの読み込み。
+    #
+    # ここで USER_HELPER_FALLBACK を有効にしていたが、これは効かないうえに
+    # 起動を遅くするだけだった。狙いは「組み込みドライバがルートより先に
+    # 初期化されても、後からユーザーランド経由で読めるように」だったが、
+    # その受け側 (udev の firmware ヘルパ) は systemd 217 で消えている。
+    # 誰も応答しないまま loading_timeout ぶん待つことになる。
+    #
+    # QEMU で実測した regulatory.db の例:
+    #   [  2.864773] Direct firmware load for regulatory.db failed
+    #   [  2.864920] Falling back to sysfs fallback for: regulatory.db
+    #   [  3.158288] EXT4-fs (sda2): mounted filesystem      ← ルートはここ
+    #   [ 10.770457] cfg80211: failed to load regulatory.db  ← 7.9 秒後に諦め
+    #
+    # 見つからないファームウェア 1 つにつき約 8 秒。切る。
+    # ルートより先に probe が走る問題は、この仕組みではなく
+    # initramfs にファームウェアを入れて解く (myos-mkfwinit)。
+    #
+    # 上のグラフィックの節でも --disable しているが、こちらが後にあるため
+    # 打ち消していた。同じスクリプトの中で 2 回触っていたのが原因。
     ./scripts/config --enable FW_LOADER
     ./scripts/config --enable FW_LOADER_USER_HELPER
-    ./scripts/config --enable FW_LOADER_USER_HELPER_FALLBACK
+    ./scripts/config --disable FW_LOADER_USER_HELPER_FALLBACK
 fi
 
 make olddefconfig

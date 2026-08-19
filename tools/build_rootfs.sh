@@ -80,7 +80,7 @@ APPS="gtk2-engines-pixbuf libgtk-3-0 libgtk2.0-0 libcanberra-gtk3-module \
       libfuse2 fuse3 desktop-file-utils shared-mime-info xdg-utils \
       unzip zip xz-utils p7zip-full \
       dbus-x11 at-spi2-core \
-      fonts-dejavu fonts-liberation fonts-noto-cjk \
+      fonts-dejavu fonts-liberation \
       ca-certificates wget curl"
 
 # --- セキュリティ ------------------------------------------------------------
@@ -1350,9 +1350,22 @@ if [ "${SLIM:-1}" = "1" ]; then
     # 次のビルドで apt が「もう入っている」と判断して入れ直さない。
     # 結果、gcc はあるのに X11/Xlib.h が無い状態になり、
     # 作り直すたびにコンパイルが通らなくなる。
+    #
+    # fonts-noto-cjk は入れるのをやめたが、ここでも外す。
+    # このビルドは既存のルートに上書きしていくので、
+    # 一覧から消しただけでは前回入れたものが残る。
+    #
+    # 89MB (ISO で 58MB) あるのに一度も使われていなかった。
+    # x98.h のフォントの並びは
+    #   VL Gothic -> VL PGothic -> IPAGothic -> Noto Sans CJK JP -> sans
+    # で、VL Gothic (8MB) が先に当たるため Noto まで降りてこない。
+    # fonts-japanese-gothic の代替も fonts-vlgothic が提供しているので、
+    # 外しても日本語は出る。中国語と韓国語のページは豆腐になるが、
+    # その 58MB は無線のファームウェアに回したほうがよい。
     for pkg in gcc g++ cpp build-essential libc6-dev linux-libc-dev \
                gcc-12 cpp-12 g++-12 libstdc++-12-dev libgcc-12-dev \
                geany geany-common \
+               fonts-noto-cjk fonts-noto-cjk-extra \
                openjdk-17-jdk openjdk-17-jdk-headless; do
         chroot "$WORK" sh -c "apt-get purge -y $pkg >/dev/null 2>&1" || true
     done
@@ -1363,6 +1376,10 @@ if [ "${SLIM:-1}" = "1" ]; then
     # 文書。読み物であって動作には要らない。
     rm -rf "$WORK/usr/share/doc"/* "$WORK/usr/share/man"/* \
            "$WORK/usr/share/info"/* 2>/dev/null || true
+
+    # Noto CJK の実体。purge が効かなかった場合や、前回のビルドの残りが
+    # 上書きビルドで生き延びた場合に備えて、ここでも落とす。
+    rm -rf "$WORK/usr/share/fonts/opentype/noto" 2>/dev/null || true
 
     # apt のパッケージ一覧。apt-get update でいつでも作り直せる。
     rm -rf "$WORK/var/lib/apt/lists"/* 2>/dev/null || true
