@@ -106,6 +106,11 @@ NET="iproute2 isc-dhcp-client"
 # pulseaudio は Firefox とゲームがまず前提にしているので入れる。
 SOUND="alsa-utils pulseaudio libopenal1"
 
+# 日本語の字形。
+# 無いと日本語が全部豆腐になる。ファイル名もメモ帳も化けるので、
+# 見た目の話ではなく使えるかどうかの話。
+FONTS="fonts-vlgothic"
+
 SECURITY="ufw iptables nftables \
           clamav clamav-freshclam clamav-daemon \
           cron inotify-tools \
@@ -187,6 +192,9 @@ apt_install "ネットワーク" "--no-install-recommends" $NET
 
 echo "=== 音 ==="
 apt_install "音" "--no-install-recommends" $SOUND
+
+echo "=== 日本語フォント ==="
+apt_install "フォント" "--no-install-recommends" $FONTS
 
 # 証明書。これが無いと HTTPS が全部こけるので、
 # ClamAV の定義取得より先に必ず通しておく。
@@ -578,6 +586,7 @@ ROOTDIR="$(cd "$(dirname "$0")/.." && pwd)"
 need_dev=0
 [ -x "$WORK/usr/bin/gcc" ]                    || need_dev=1
 [ -f "$WORK/usr/include/X11/Xlib.h" ]         || need_dev=1
+[ -f "$WORK/usr/include/X11/Xft/Xft.h" ]      || need_dev=1
 [ -f "$WORK/usr/include/X11/X.h" ]            || need_dev=1
 [ -f "$WORK/usr/include/X11/keysym.h" ]       || need_dev=1
 [ -f "$WORK/usr/include/stdio.h" ]            || need_dev=1
@@ -589,6 +598,7 @@ if [ "$need_dev" = "1" ]; then
     chroot "$WORK" sh -c \
         'apt-get update -qq && apt-get install -y --reinstall \
          --no-install-recommends gcc libc6-dev libx11-dev x11proto-dev \
+         libxft-dev \
          >/dev/null && apt-get clean'
     umount "$WORK/proc" 2>/dev/null || true
     for h in X11/Xlib.h X11/X.h X11/keysym.h stdio.h; do
@@ -606,33 +616,33 @@ cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
    "$ROOTDIR/src/gui/myos_shutdown.c" "$ROOTDIR/src/gui/myos_poweroff.c" \
    "$ROOTDIR/src/gui/x98.h" "$ROOTDIR/src/gui/myosconf.h" \
    "$ROOTDIR/src/gui/filetypes.h" "$WORK/usr/local/src/"
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-wm \
-    /usr/local/src/myos_wm.c -lX11
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-files \
-    /usr/local/src/myos_files.c -lX11
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-settings \
-    /usr/local/src/myos_settings.c -lX11
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-notepad \
-    /usr/local/src/myos_notepad.c -lX11
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-image \
-    /usr/local/src/myos_image.c -lX11
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-runas \
-    /usr/local/src/myos_runas.c -lX11
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-setup \
-    /usr/local/src/myos_setup.c -lX11
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-wm \
+    /usr/local/src/myos_wm.c -lX11 -lXft
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-files \
+    /usr/local/src/myos_files.c -lX11 -lXft
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-settings \
+    /usr/local/src/myos_settings.c -lX11 -lXft
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-notepad \
+    /usr/local/src/myos_notepad.c -lX11 -lXft
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-image \
+    /usr/local/src/myos_image.c -lX11 -lXft
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-runas \
+    /usr/local/src/myos_runas.c -lX11 -lXft
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-setup \
+    /usr/local/src/myos_setup.c -lX11 -lXft
 # ログオン画面は /etc/shadow を crypt() で照合するので libcrypt が要る
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-login \
-    /usr/local/src/myos_login.c -lX11 -lcrypt
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-login \
+    /usr/local/src/myos_login.c -lX11 -lXft -lcrypt
 # myos-open は X に触らない。端末やスクリプトからも使う。
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-open \
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-open \
     /usr/local/src/myos_open.c
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-alert \
-    /usr/local/src/myos_alert.c -lX11
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-alert \
+    /usr/local/src/myos_alert.c -lX11 -lXft
 # 終了の画面と、実際に電源を切るほう。
 # 後者は X に触らない (X が落ちたあとも動く必要がある)。
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-shutdown \
-    /usr/local/src/myos_shutdown.c -lX11
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-poweroff \
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-shutdown \
+    /usr/local/src/myos_shutdown.c -lX11 -lXft
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-poweroff \
     /usr/local/src/myos_poweroff.c
 
 # 画面の解像度を決める道具。設定アプリの「Display」タブから呼ばれる。
@@ -647,10 +657,10 @@ chmod 755 "$WORK/usr/local/bin/myos-setres"
 mkdir -p "$WORK/usr/local/src/install"
 cp "$ROOTDIR/src/install/myos_install_text.c" \
    "$ROOTDIR/src/install/myos_install_gui.c" "$WORK/usr/local/src/install/"
-chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-install-text \
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-install-text \
     /usr/local/src/install/myos_install_text.c
-chroot "$WORK" gcc -O2 -I /usr/local/src -o /usr/local/bin/myos-install-gui \
-    /usr/local/src/install/myos_install_gui.c -lX11
+chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 -o /usr/local/bin/myos-install-gui \
+    /usr/local/src/install/myos_install_gui.c -lX11 -lXft
 
 cp "$ROOTDIR/src/install/myos-install-init"    "$WORK/myos-install-init"
 cp "$ROOTDIR/src/install/myos-install-session" "$WORK/usr/local/bin/"

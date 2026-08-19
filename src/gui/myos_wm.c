@@ -356,6 +356,7 @@ static void draw_frame(Client *c)
  *
  * 記号はよく出るものだけ ASCII に置き換え、残りは '?' にする。
  * 日本語などは字形が無いので、化けた絵より '?' のほうがまだ読める。 */
+__attribute__((unused))
 static void ascii_fold(char *dst, size_t dsz, const char *src)
 {
     size_t o = 0;
@@ -424,9 +425,9 @@ static void fetch_title(Client *c)
     }
     if (!c->title[0]) snprintf(c->title, sizeof(c->title), "(untitled)");
 
-    char folded[sizeof(c->title)];
-    ascii_fold(folded, sizeof(folded), c->title);
-    snprintf(c->title, sizeof(c->title), "%s", folded);
+    /* ascii_fold はもう掛けない。
+     * Xft と日本語フォントに移したので、タイトルはそのまま出せる。
+     * 潰すと日本語の窓が全部 "?" になってしまう。 */
 }
 
 /* --- タスクバー / スタートメニュー --------------------------------------- */

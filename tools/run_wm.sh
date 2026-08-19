@@ -23,11 +23,11 @@ DISP=:99
 mkdir -p "$(dirname "$OUT")"
 
 echo "=== ビルド ==="
-gcc -O2 -o "$ROOT/build/myos-wm"    "$ROOT/src/gui/myos_wm.c"    -lX11
-gcc -O2 -o "$ROOT/build/myos-files" "$ROOT/src/gui/myos_files.c" -lX11
-gcc -O2 -o "$ROOT/build/myos-settings" "$ROOT/src/gui/myos_settings.c" -lX11
-gcc -O2 -o "$ROOT/build/myos-notepad"  "$ROOT/src/gui/myos_notepad.c"  -lX11
-gcc -O2 -o "$ROOT/build/myos-image"    "$ROOT/src/gui/myos_image.c"    -lX11
+gcc -O2 -I /usr/include/freetype2 -o "$ROOT/build/myos-wm"    "$ROOT/src/gui/myos_wm.c"    -lX11 -lXft
+gcc -O2 -I /usr/include/freetype2 -o "$ROOT/build/myos-files" "$ROOT/src/gui/myos_files.c" -lX11 -lXft
+gcc -O2 -I /usr/include/freetype2 -o "$ROOT/build/myos-settings" "$ROOT/src/gui/myos_settings.c" -lX11 -lXft
+gcc -O2 -I /usr/include/freetype2 -o "$ROOT/build/myos-notepad"  "$ROOT/src/gui/myos_notepad.c"  -lX11 -lXft
+gcc -O2 -I /usr/include/freetype2 -o "$ROOT/build/myos-image"    "$ROOT/src/gui/myos_image.c"    -lX11 -lXft
 
 echo "=== Xvfb ==="
 Xvfb $DISP -screen 0 ${W}x${H}x24 >/dev/null 2>&1 &

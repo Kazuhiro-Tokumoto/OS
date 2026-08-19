@@ -12,6 +12,7 @@
 #define MYOS_X98_H
 
 #include <X11/Xlib.h>
+#include <X11/Xft/Xft.h>
 #include <X11/Xutil.h>
 #include <string.h>
 #include <stdio.h>
@@ -54,7 +55,15 @@ typedef struct {
     Display *dpy;
     int      screen;
     GC       gc;
-    XFontStruct *font;
+    XFontStruct *font;      /* Xft が開けなかったときの逃げ道 */
+
+    /* 文字は Xft で描く。
+     * コアフォントに XDrawString だと 1 バイト = 1 字なので、
+     * UTF-8 の日本語が必ず 3 個の別の字に化ける。
+     * ファイル名もメモ帳も化けるので、根から直す必要があった。 */
+    XftFont *xfont;
+    XftDraw *xdraw;         /* 直近の描画先ぶんだけ持っておく */
+    Drawable xdraw_for;
     int      truecolor;
     int      r_shift, g_shift, b_shift;
     int      r_bits, g_bits, b_bits;
@@ -106,10 +115,59 @@ static inline unsigned long x98_rgb24(X98 *x, unsigned int v)
 /* 描画用のフォントを開く。見つからなければ NULL のまま (文字は描かれない)。 */
 static inline void x98_open_font(X98 *x)
 {
+    x->xfont = NULL;
+    x->xdraw = NULL;
+    x->xdraw_for = 0;
+
+    /* 日本語の字形を持つものを先に挙げる。
+     * 無ければ fontconfig が代わりを出すが、その場合 CJK は豆腐になる。
+     * antialias=false は 98 の見た目に寄せるため (輪郭を滲ませない)。 */
+    static const char *cands[] = {
+        "VL Gothic:pixelsize=13:antialias=false",
+        "VL PGothic:pixelsize=13:antialias=false",
+        "IPAGothic:pixelsize=13:antialias=false",
+        "Noto Sans CJK JP:pixelsize=13:antialias=false",
+        "sans:pixelsize=13:antialias=false",
+        NULL
+    };
+    for (int i = 0; cands[i] && !x->xfont; i++)
+        x->xfont = XftFontOpenName(x->dpy, x->screen, cands[i]);
+
+    /* Xft が使えないときのために、コアフォントも開いておく。
+     * こちらでは日本語は出ないが、何も出ないよりはよい。 */
     x->font = XLoadQueryFont(x->dpy,
                              "-*-helvetica-bold-r-normal--12-*-*-*-*-*-*-*");
     if (!x->font) x->font = XLoadQueryFont(x->dpy, "9x15bold");
     if (!x->font) x->font = XLoadQueryFont(x->dpy, "fixed");
+}
+
+/* 画素の値から RGB を戻す。x98 の API は色を画素で受け渡すが、
+ * Xft は XRenderColor (16bit の RGB) を要る。 */
+static inline void x98_pixel_rgb(X98 *x, unsigned long px, XRenderColor *c)
+{
+    if (!x->truecolor) { c->red = c->green = c->blue = 0; c->alpha = 0xFFFF; return; }
+    unsigned long r = (px >> x->r_shift) & ((1UL << x->r_bits) - 1);
+    unsigned long g = (px >> x->g_shift) & ((1UL << x->g_bits) - 1);
+    unsigned long b = (px >> x->b_shift) & ((1UL << x->b_bits) - 1);
+    int rm = (1 << x->r_bits) - 1, gm = (1 << x->g_bits) - 1,
+        bm = (1 << x->b_bits) - 1;
+    c->red   = (unsigned short)(rm ? r * 65535 / rm : 0);
+    c->green = (unsigned short)(gm ? g * 65535 / gm : 0);
+    c->blue  = (unsigned short)(bm ? b * 65535 / bm : 0);
+    c->alpha = 0xFFFF;
+}
+
+/* 描画先ごとに XftDraw が要る。毎回作ると重いので直近の 1 つを持つ。
+ * 同じ窓へ続けて描くのが普通なので、これで足りる。 */
+static inline XftDraw *x98_xdraw(X98 *x, Drawable d)
+{
+    if (!x->xfont) return NULL;
+    if (x->xdraw && x->xdraw_for == d) return x->xdraw;
+    if (x->xdraw) XftDrawDestroy(x->xdraw);
+    x->xdraw = XftDrawCreate(x->dpy, d, DefaultVisual(x->dpy, x->screen),
+                             DefaultColormap(x->dpy, x->screen));
+    x->xdraw_for = d;
+    return x->xdraw;
 }
 
 /* テーマの既定値。theme.conf が無いときはこれになる。 */
@@ -250,12 +308,20 @@ static inline void x98_bevel(X98 *x, Drawable d, int px, int py, int w, int h,
 
 static inline int x98_text_w(X98 *x, const char *s)
 {
+    if (!s) return 0;
+    if (x->xfont) {
+        XGlyphInfo gi;
+        XftTextExtentsUtf8(x->dpy, x->xfont, (const FcChar8 *)s,
+                           (int)strlen(s), &gi);
+        return gi.xOff;
+    }
     if (!x->font) return (int)strlen(s) * 6;
     return XTextWidth(x->font, s, (int)strlen(s));
 }
 
 static inline int x98_text_h(X98 *x)
 {
+    if (x->xfont) return x->xfont->ascent + x->xfont->descent;
     if (!x->font) return 12;
     return x->font->ascent + x->font->descent;
 }
@@ -263,7 +329,25 @@ static inline int x98_text_h(X98 *x)
 static inline void x98_text(X98 *x, Drawable d, int px, int py, const char *s,
                      unsigned long color)
 {
-    if (!x->font || !s) return;
+    if (!s) return;
+    if (x->xfont) {
+        XftDraw *dr = x98_xdraw(x, d);
+        if (dr) {
+            XRenderColor rc;
+            XftColor xc;
+            x98_pixel_rgb(x, color, &rc);
+            if (XftColorAllocValue(x->dpy, DefaultVisual(x->dpy, x->screen),
+                                   DefaultColormap(x->dpy, x->screen),
+                                   &rc, &xc)) {
+                XftDrawStringUtf8(dr, &xc, x->xfont, px, py + x->xfont->ascent,
+                                  (const FcChar8 *)s, (int)strlen(s));
+                XftColorFree(x->dpy, DefaultVisual(x->dpy, x->screen),
+                             DefaultColormap(x->dpy, x->screen), &xc);
+            }
+            return;
+        }
+    }
+    if (!x->font) return;
     XSetForeground(x->dpy, x->gc, color);
     XSetFont(x->dpy, x->gc, x->font->fid);
     XDrawString(x->dpy, d, x->gc, px, py + x->font->ascent, s, (int)strlen(s));
