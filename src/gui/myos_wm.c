@@ -42,6 +42,12 @@
 #include <time.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <dirent.h>
 
 #include "x98.h"
 
@@ -75,6 +81,7 @@
 static Display *dpy;
 static int      screen;
 static Window   root, desktop, taskbar, startmenu;
+static Window   volwin;      /* 音量の小さい窓 */
 static int      scr_w, scr_h;
 static int      menu_open = 0;
 static X98      x98;
@@ -490,6 +497,109 @@ static void fit_label(char *dst, size_t dsz, const char *src, int maxw)
     dst[0] = 0;
 }
 
+/* --- 通知領域 ------------------------------------------------------------
+ * 時計の左に、音量とネットワークの状態を出す。
+ * 98 のタスクトレイと同じ位置。押すと中身が出る。 */
+#define TRAY_ICON 20
+#define TRAY_W    (TRAY_ICON * 2 + 12)
+
+static int  net_up   = 0;                /* 繋がっているか */
+static char net_addr[32] = "";           /* 繋がっているなら住所 */
+static int  vol_pct  = -1;               /* -1 = まだ読んでいない */
+static int  vol_mute = 0;
+static int  vol_open = 0;                /* 音量の窓を出しているか */
+
+/* 繋がっているかを /sys と getifaddrs から見る。
+ * コマンドを起動しないので、1 秒ごとに呼んでも負担にならない。 */
+static void net_poll(void)
+{
+    int up = 0;
+    char addr[32] = "";
+
+    struct ifaddrs *ifa = NULL;
+    if (getifaddrs(&ifa) == 0) {
+        for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
+            if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+            /* lo と sit0 のような擬似デバイスは繋がったうちに入らない */
+            if (!strcmp(p->ifa_name, "lo")) continue;
+            if (!strncmp(p->ifa_name, "sit", 3)) continue;
+            if (!(p->ifa_flags & IFF_UP)) continue;
+            struct sockaddr_in *sin = (struct sockaddr_in *)p->ifa_addr;
+            inet_ntop(AF_INET, &sin->sin_addr, addr, sizeof(addr));
+            up = 1;
+            break;
+        }
+        freeifaddrs(ifa);
+    }
+    net_up = up;
+    snprintf(net_addr, sizeof(net_addr), "%s", addr);
+}
+
+/* amixer から今の音量を読む。窓を開けるときだけ呼ぶ。 */
+static void vol_poll(void)
+{
+    vol_pct = -1;
+    vol_mute = 0;
+    FILE *f = popen("amixer sget Master 2>/dev/null", "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char *b = strchr(line, '[');
+        if (!b) continue;
+        int v;
+        if (sscanf(b, "[%d%%]", &v) == 1 && vol_pct < 0) vol_pct = v;
+        if (strstr(line, "[off]")) vol_mute = 1;
+    }
+    pclose(f);
+}
+
+static void vol_apply(void)
+{
+    char cmd[160];
+    snprintf(cmd, sizeof(cmd),
+             "amixer sset Master %d%% %s >/dev/null 2>&1 &",
+             vol_pct < 0 ? 50 : vol_pct, vol_mute ? "mute" : "unmute");
+    if (system(cmd) == -1) { /* 音が変わらないだけなので黙って諦める */ }
+}
+
+/* スピーカーの絵。消音なら × を重ねる。 */
+static void draw_speaker(Drawable d, int x, int y, int muted)
+{
+    unsigned long fg = x98.text;
+    XSetForeground(dpy, x98.gc, fg);
+    /* 本体 */
+    XFillRectangle(dpy, d, x98.gc, x + 2, y + 5, 3, 5);
+    XPoint horn[4] = { {(short)(x + 5), (short)(y + 5)},
+                       {(short)(x + 9), (short)(y + 1)},
+                       {(short)(x + 9), (short)(y + 14)},
+                       {(short)(x + 5), (short)(y + 10)} };
+    XFillPolygon(dpy, d, x98.gc, horn, 4, Convex, CoordModeOrigin);
+    if (muted) {
+        XSetForeground(dpy, x98.gc, x98_rgb24(&x98, 0xC00000));
+        XDrawLine(dpy, d, x98.gc, x + 11, y + 4, x + 16, y + 11);
+        XDrawLine(dpy, d, x98.gc, x + 16, y + 4, x + 11, y + 11);
+    } else {
+        /* 音が出ている印に弧を 2 本 */
+        XDrawArc(dpy, d, x98.gc, x + 8, y + 3, 8, 10, -60 * 64, 120 * 64);
+        XDrawArc(dpy, d, x98.gc, x + 10, y + 1, 10, 14, -60 * 64, 120 * 64);
+    }
+}
+
+/* 端末が 2 台。繋がっていなければ × を重ねる。 */
+static void draw_neticon(Drawable d, int x, int y, int up)
+{
+    XSetForeground(dpy, x98.gc, x98.text);
+    XFillRectangle(dpy, d, x98.gc, x + 1, y + 2, 7, 5);
+    XFillRectangle(dpy, d, x98.gc, x + 8, y + 8, 7, 5);
+    XSetForeground(dpy, x98.gc, x98.shadow);
+    XDrawLine(dpy, d, x98.gc, x + 4, y + 7, x + 11, y + 8);
+    if (!up) {
+        XSetForeground(dpy, x98.gc, x98_rgb24(&x98, 0xC00000));
+        XDrawLine(dpy, d, x98.gc, x + 2, y + 3, x + 14, y + 13);
+        XDrawLine(dpy, d, x98.gc, x + 14, y + 3, x + 2, y + 13);
+    }
+}
+
 static void draw_taskbar(void)
 {
     x98_fill(&x98, taskbar, 0, 0, scr_w, TASKBAR_H, x98.face);
@@ -517,7 +627,7 @@ static void draw_taskbar(void)
     int px = START_W + 14;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!clients[i].used) continue;
-        if (px + TASKBTN_W > scr_w - 80) break;
+        if (px + TASKBTN_W > scr_w - 80 - TRAY_W) break;
 
         /* ラベルは幅 (ピクセル) で詰める。文字数で切ると、
          * 34 文字が 300px になってボタン (160px) から溢れ、
@@ -541,10 +651,112 @@ static void draw_taskbar(void)
     char clk[16];
     clock_string(clk, sizeof(clk));
     int cw = 62, cx = scr_w - cw - 4;
+
+    /* 通知領域。時計と地続きの窪みにして 98 の見た目に寄せる。 */
+    int tx = cx - TRAY_W - 2;
+    x98_fill(&x98, taskbar, tx, 3, TRAY_W, TASKBAR_H - 6, x98.face);
+    x98_bevel(&x98, taskbar, tx, 3, TRAY_W, TASKBAR_H - 6, 0);
+    int iy = 3 + (TASKBAR_H - 6 - 16) / 2;
+    draw_neticon(taskbar, tx + 5, iy, net_up);
+    draw_speaker(taskbar, tx + 5 + TRAY_ICON, iy, vol_mute);
+
     x98_fill(&x98, taskbar, cx, 3, cw, TASKBAR_H - 6, x98.face);
     x98_bevel(&x98, taskbar, cx, 3, cw, TASKBAR_H - 6, 0);
     x98_text(&x98, taskbar, cx + (cw - x98_text_w(&x98, clk)) / 2,
              3 + (TASKBAR_H - 6 - x98_text_h(&x98)) / 2, clk, x98.text);
+}
+
+#define VOL_W 74
+#define VOL_H 172
+#define VOL_TRACK_Y 26
+#define VOL_TRACK_H 92
+
+static void draw_volwin(void)
+{
+    x98_fill(&x98, volwin, 0, 0, VOL_W, VOL_H, x98.face);
+    x98_bevel(&x98, volwin, 0, 0, VOL_W, VOL_H, 1);
+
+    x98_text(&x98, volwin, (VOL_W - x98_text_w(&x98, "Volume")) / 2, 8,
+             "Volume", x98.text);
+
+    /* 溝。98 のスライダは細い窪み。 */
+    int tx = VOL_W / 2 - 2;
+    x98_bevel(&x98, volwin, tx, VOL_TRACK_Y, 4, VOL_TRACK_H, 0);
+
+    int v = vol_pct < 0 ? 50 : vol_pct;
+    int knob = VOL_TRACK_Y + VOL_TRACK_H - 8 - (VOL_TRACK_H - 16) * v / 100;
+    x98_fill(&x98, volwin, tx - 9, knob, 22, 12, x98.face);
+    x98_bevel(&x98, volwin, tx - 9, knob, 22, 12, 1);
+
+    char pc[16];
+    snprintf(pc, sizeof(pc), "%d%%", v);
+    x98_text(&x98, volwin, (VOL_W - x98_text_w(&x98, pc)) / 2,
+             VOL_TRACK_Y + VOL_TRACK_H + 6, pc, x98.text);
+
+    /* 消音 */
+    int my = VOL_H - 26;
+    x98_bevel(&x98, volwin, 8, my, 13, 13, 0);
+    x98_fill(&x98, volwin, 10, my + 2, 9, 9, x98.white);
+    if (vol_mute) {
+        XSetForeground(dpy, x98.gc, x98.text);
+        XDrawLine(dpy, volwin, x98.gc, 11, my + 6, 14, my + 9);
+        XDrawLine(dpy, volwin, x98.gc, 14, my + 9, 18, my + 3);
+    }
+    x98_text(&x98, volwin, 26, my - 1, "Mute", x98.text);
+    XFlush(dpy);
+}
+
+static void set_volwin(int open)
+{
+    vol_open = open;
+    if (open) {
+        vol_poll();
+        int cx = scr_w - 62 - 4;
+        int tx = cx - TRAY_W - 2;
+        int wx = tx + TRAY_ICON - VOL_W / 2 + 5;
+        if (wx + VOL_W > scr_w) wx = scr_w - VOL_W - 2;
+        XMoveResizeWindow(dpy, volwin, wx,
+                          scr_h - TASKBAR_H - VOL_H, VOL_W, VOL_H);
+        XMapRaised(dpy, volwin);
+        draw_volwin();
+    } else {
+        XUnmapWindow(dpy, volwin);
+    }
+}
+
+static void volwin_click(int mx, int my)
+{
+    int mbox = VOL_H - 26;
+    if (my >= mbox - 2 && my < mbox + 15 && mx < 70) {
+        vol_mute = !vol_mute;
+        vol_apply();
+        draw_volwin();
+        draw_taskbar();
+        XFlush(dpy);
+        return;
+    }
+    if (my >= VOL_TRACK_Y && my < VOL_TRACK_Y + VOL_TRACK_H) {
+        /* 溝の中の y から決める。上が大きい。 */
+        int rel = (VOL_TRACK_Y + VOL_TRACK_H - 8) - my;
+        int v = rel * 100 / (VOL_TRACK_H - 16);
+        if (v < 0) v = 0;
+        if (v > 100) v = 100;
+        vol_pct = v;
+        if (v > 0) vol_mute = 0;
+        vol_apply();
+        draw_volwin();
+        draw_taskbar();
+        XFlush(dpy);
+    }
+}
+
+/* トレイのどれを押したか。0 = ネットワーク / 1 = 音量 / -1 = 外 */
+static int tray_hit(int mx)
+{
+    int cx = scr_w - 62 - 4;
+    int tx = cx - TRAY_W - 2;
+    if (mx < tx + 3 || mx >= tx + TRAY_W) return -1;
+    return (mx < tx + 5 + TRAY_ICON) ? 0 : 1;
 }
 
 static int taskbtn_hit(int mx)
@@ -552,7 +764,7 @@ static int taskbtn_hit(int mx)
     int px = START_W + 14;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!clients[i].used) continue;
-        if (px + TASKBTN_W > scr_w - 80) break;
+        if (px + TASKBTN_W > scr_w - 80 - TRAY_W) break;
         if (mx >= px && mx < px + TASKBTN_W) return i;
         px += TASKBTN_W + 4;
     }
@@ -943,6 +1155,11 @@ int main(void)
                               &swa);
     XSelectInput(dpy, startmenu, ExposureMask | ButtonPressMask);
 
+    volwin = XCreateWindow(dpy, root, 0, 0, VOL_W, VOL_H, 0, CopyFromParent,
+                           InputOutput, CopyFromParent,
+                           CWOverrideRedirect | CWBackPixel, &swa);
+    XSelectInput(dpy, volwin, ExposureMask | ButtonPressMask);
+
     load_icons();
     grab_keys();
 
@@ -999,9 +1216,14 @@ int main(void)
                 XFlush(dpy);
             }
 
+            /* 繋がったか切れたかを見る。変わったときだけ描き直す。
+             * getifaddrs だけなのでコマンドは起動しない。 */
+            int was_up = net_up;
+            net_poll();
+
             char clk[16];
             clock_string(clk, sizeof(clk));
-            if (strcmp(clk, last_clock)) {
+            if (strcmp(clk, last_clock) || was_up != net_up) {
                 snprintf(last_clock, sizeof(last_clock), "%s", clk);
                 draw_taskbar();
                 XFlush(dpy);
@@ -1070,6 +1292,7 @@ int main(void)
             if (ev.xexpose.window == desktop)   { draw_desktop(); break; }
             if (ev.xexpose.window == taskbar)   { draw_taskbar(); break; }
             if (ev.xexpose.window == startmenu) { draw_startmenu(); break; }
+            if (ev.xexpose.window == volwin)    { draw_volwin();   break; }
             Client *c = find_by_frame(ev.xexpose.window);
             if (c) draw_frame(c);
             break;
@@ -1139,8 +1362,28 @@ int main(void)
             }
 
             if (w == taskbar) {
+                int tr = tray_hit(ev.xbutton.x);
                 if (ev.xbutton.x < START_W + 6) {
+                    set_volwin(0);
                     set_menu(!menu_open);
+                } else if (tr == 1) {           /* 音量 */
+                    set_menu(0);
+                    set_volwin(!vol_open);
+                } else if (tr == 0) {           /* ネットワーク */
+                    set_menu(0);
+                    set_volwin(0);
+                    char msg[160];
+                    if (net_up)
+                        snprintf(msg, sizeof(msg),
+                                 "Connected.\nAddress: %s", net_addr);
+                    else
+                        snprintf(msg, sizeof(msg),
+                                 "Not connected.\n"
+                                 "No network cable or adapter was found.");
+                    char cmd[256];
+                    snprintf(cmd, sizeof(cmd),
+                             "myos-alert -info 'Network' '%s' &", msg);
+                    if (system(cmd) == -1) { /* 出せないだけなので黙る */ }
                 } else {
                     int i = taskbtn_hit(ev.xbutton.x);
                     if (i >= 0) {
@@ -1149,7 +1392,13 @@ int main(void)
                         else raise_client(c);
                     }
                     set_menu(0);
+                    set_volwin(0);
                 }
+                break;
+            }
+
+            if (w == volwin) {
+                volwin_click(ev.xbutton.x, ev.xbutton.y);
                 break;
             }
 
@@ -1161,10 +1410,11 @@ int main(void)
             }
 
             Client *c = find_by_frame(w);
-            if (!c) { set_menu(0); break; }
+            if (!c) { set_menu(0); set_volwin(0); break; }
 
             raise_client(c);
             set_menu(0);
+            set_volwin(0);
 
             int mx = ev.xbutton.x, my = ev.xbutton.y;
             int hit = -1;
