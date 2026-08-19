@@ -132,6 +132,33 @@ int main(int argc, char **argv)
         }
     }
 
+    /* 2.8 合わせた時刻を本体の時計へ書き戻す。
+     *
+     *     chronyd が網から合わせても、それは動いている間だけの話で、
+     *     電源を切れば消える。本体の時計は放っておくと月に何分もずれ、
+     *     ずれた時計は「証明書がまだ有効でない」で HTTPS が全部落ちる
+     *     という、原因の分かりにくい壊れ方をする。
+     *
+     *     --systohc は /etc/adjtime を見るので、myOS の決め (ローカル時刻)
+     *     どおりに書く。chronyd 側で rtcsync を使わないのはこのため。
+     *     あちらは必ず UTC で書くので、両方やると食い違う。
+     *
+     *     読み取り専用にし直す前にやること。あとだと書けない。 */
+    {
+        pid_t p = fork();
+        if (p == 0) {
+            int null = open("/dev/null", O_WRONLY);
+            if (null >= 0) { dup2(null, 1); dup2(null, 2); close(null); }
+            execl("/usr/sbin/hwclock", "hwclock", "--systohc", (char *)NULL);
+            execl("/sbin/hwclock", "hwclock", "--systohc", (char *)NULL);
+            _exit(127);
+        }
+        if (p > 0) {
+            int st;
+            while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
+        }
+    }
+
     /* 3. 書き込みを閉じる。
      *    sync だけでは足りない。読み取り専用にし直すところまでやると
      *    ext4 のジャーナルも畳まれ、次の起動で fsck に回らない。

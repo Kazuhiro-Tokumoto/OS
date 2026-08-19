@@ -482,8 +482,49 @@ static void fail_page(const char *what, int rc)
 
 /* パーティションを切って ext4 で初期化する。
  * ここが 98 でいう FDISK と FORMAT にあたる。 */
+/* スワップをどれだけ取るか (MB)。0 なら作らない。
+ *
+ * 入れる相手は Core 2 Duo 世代 (2006-) の実機を想定していて、
+ * メモリが 1GB や 2GB の機械が普通にある。そこで Firefox を開くと
+ * スワップが無い場合は OOM killer が走って、何の前触れもなく
+ * アプリが消える。「重い」ではなく「壊れた」に見えるので用意する。
+ *
+ * 目安はメモリと同じだけ。休止状態は作らないので倍は要らない。
+ * 4GB を超えても使い切ることはまず無いので頭を打つ。
+ * ルートに 2.5GB 残せないなら作らない (入らないほうが困る)。 */
+static long swap_mb(long long avail_bytes)
+{
+    long ram_mb = 0;
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (f) {
+        char k[64];
+        long long v;
+        while (fscanf(f, "%63s %lld %*[^\n]", k, &v) == 2)
+            if (!strcmp(k, "MemTotal:")) { ram_mb = (long)(v / 1024); break; }
+        fclose(f);
+    }
+    long long disk_mb = avail_bytes / (1024 * 1024);
+
+    long mb = ram_mb > 0 ? ram_mb : 1024;
+    if (mb > 4096) mb = 4096;           /* これ以上あっても使い切らない */
+
+    /* ディスクの 15% まで。小さいディスクでメモリが多い機械
+     * (古いノートに 4GB 載せたような構成) で、スワップが
+     * ディスクの半分を食うのを防ぐ。 */
+    long long cap = disk_mb * 15 / 100;
+    if (mb > cap) mb = (long)cap;
+
+    /* ルートに 3GB は残す。myOS 自体が 2.5GB あるので、
+     * ここを削ると入れた直後から空きが無い。 */
+    long long room_mb = disk_mb - 256 - 3072;
+    if (room_mb < mb) mb = (long)room_mb;
+
+    if (mb < 512) return 0;             /* 中途半端に取るくらいなら作らない */
+    return mb;
+}
+
 static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
-                        int *first_part)
+                        char *swapdev, size_t sn, int *first_part)
 {
     char dev[64];
     snprintf(dev, sizeof(dev), "/dev/%s", d->name);
@@ -500,53 +541,87 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
      *
      * ブートローダーは ext4 を読めないので、カーネルは生のセクタに置く。
      * 場所をパーティションとして宣言しておけば、他のものに使われない。 */
+    /* どちらの入れ方でも同じ形にする。
+     *   1 つ目 … カーネルを生で置く場所 (256MB)
+     *   2 つ目 … スワップ (取れるときだけ)
+     *   3 つ目 … ルート (ext4、残り全部)
+     *
+     * スワップをルートより前に置くのは、ルートを「残り全部」で
+     * 済ませたいから。後ろに置くと、ルートの大きさを自分で計算する
+     * ことになる。MBR の基本区画は 4 つまでなので、空き領域へ入れる
+     * ときは既存が 2 つまで、という制限も付く。そこは諦めて、
+     * スワップだけ落として続ける。 */
+    long sw = swap_mb(whole ? d->bytes : d->free_bytes);
+
     char cmd[256];
     FILE *fp;
+    int rc;
 
-    if (whole) {
-        snprintf(cmd, sizeof(cmd), "sfdisk %s >/dev/null 2>&1", dev);
-        fp = popen(cmd, "w");
-        if (!fp) return 0;
-        fprintf(fp, "label: dos\n");
-        /* 256MB。カーネル 20MB のほかに、GPU と無線のファームウェアを
-         * 詰めた initramfs (90MB 前後) が入る。128MB でも今は収まるが
-         * 余裕が 16MB しか無く、ファームが増えるたびに危うくなる。 */
-        fprintf(fp, ",256M,83,*\n");   /* 1: カーネル置き場 */
-        fprintf(fp, ",,83\n");         /* 2: ルート */
-        int rc = pclose(fp);
-        if (rc != 0) { fail_page("sfdisk", rc); return 0; }
-        *first_part = 1;
-    } else {
-        /* 空き領域に 2 つ足す。番号は既存の次から振られる。 */
-        snprintf(cmd, sizeof(cmd), "sfdisk --append %s >/dev/null 2>&1", dev);
-        fp = popen(cmd, "w");
-        if (!fp) return 0;
-        fprintf(fp, ",256M,83\n");
-        fprintf(fp, ",,83\n");
-        int rc = pclose(fp);
-        if (rc != 0) { fail_page("sfdisk --append", rc); return 0; }
-        *first_part = count_parts_before(d) + 1;
+    for (;;) {
+        if (whole) {
+            snprintf(cmd, sizeof(cmd), "sfdisk %s >/dev/null 2>&1", dev);
+            fp = popen(cmd, "w");
+            if (!fp) return 0;
+            fprintf(fp, "label: dos\n");
+            /* 256MB。カーネル 20MB のほかに、GPU と無線のファームウェアを
+             * 詰めた initramfs (90MB 前後) が入る。128MB でも今は収まるが
+             * 余裕が 16MB しか無く、ファームが増えるたびに危うくなる。 */
+            fprintf(fp, ",256M,83,*\n");
+            if (sw) fprintf(fp, ",%ldM,82\n", sw);
+            fprintf(fp, ",,83\n");
+            rc = pclose(fp);
+            *first_part = 1;
+        } else {
+            snprintf(cmd, sizeof(cmd), "sfdisk --append %s >/dev/null 2>&1",
+                     dev);
+            fp = popen(cmd, "w");
+            if (!fp) return 0;
+            fprintf(fp, ",256M,83\n");
+            if (sw) fprintf(fp, ",%ldM,82\n", sw);
+            fprintf(fp, ",,83\n");
+            rc = pclose(fp);
+            *first_part = count_parts_before(d) + 1;
+        }
+        if (rc == 0) break;
+        if (sw) { sw = 0; continue; }   /* 区画が足りない。スワップを諦める */
+        fail_page(whole ? "sfdisk" : "sfdisk --append", rc);
+        return 0;
     }
 
     /* パーティション名。nvme は p が入る。 */
     const char *sep = (strstr(d->name, "nvme") || strstr(d->name, "mmcblk"))
                       ? "p" : "";
-    snprintf(rootdev, rn, "/dev/%s%s%d", d->name, sep, *first_part + 1);
+    swapdev[0] = 0;
+    if (sw)
+        snprintf(swapdev, sn, "/dev/%s%s%d", d->name, sep, *first_part + 1);
+    snprintf(rootdev, rn, "/dev/%s%s%d", d->name, sep,
+             *first_part + (sw ? 2 : 1));
 
     /* カーネルにテーブルを読み直させる */
     char *pr[] = { "partprobe", dev, NULL };
     run(pr);
     sleep(2);
 
-    say(9, 6, "  Formatting as ext4 ...");
+    if (swapdev[0]) {
+        say(9, 6, "  Preparing swap ...");
+        fflush(stdout);
+        char *ms[] = { "mkswap", "-L", "myos-swap", swapdev, NULL };
+        /* ここで失敗しても入れるのはやめない。
+         * スワップが無くても動くし、無いことは fstab に書かなければ
+         * そのまま伝わる。 */
+        if (run(ms) != 0) swapdev[0] = 0;
+        say(10, 6, "  Formatting as ext4 ...");
+    } else {
+        say(9, 6, "  Formatting as ext4 ...");
+    }
     fflush(stdout);
 
     char *mk[] = { "mkfs.ext4", "-F", "-q", "-m", "0", "-L", "myos",
                    rootdev, NULL };
-    int rc = run(mk);
+    rc = run(mk);
     if (rc != 0) { fail_page("mkfs.ext4", rc); return 0; }
 
-    say(11, 6, "Done.");
+    say(12, 6, "Done.");
     fflush(stdout);
     return 1;
 }
@@ -591,10 +666,10 @@ int main(void)
         if (page_confirm(&disks[di], mode == 0)) break;
     }
 
-    char rootdev[64];
+    char rootdev[64], swapdev[64] = "";
     int first_part = 1;
     if (!do_partition(&disks[di], mode == 0, rootdev, sizeof(rootdev),
-                      &first_part)) {
+                      swapdev, sizeof(swapdev), &first_part)) {
         restore_mode();
         cls();
         printf(C_RESET "\n");
@@ -610,6 +685,7 @@ int main(void)
         fprintf(f, "root    = %s\n", rootdev);
         fprintf(f, "whole   = %d\n", mode == 0 ? 1 : 0);
         fprintf(f, "bootlba = %lld\n", boot_lba);
+        if (swapdev[0]) fprintf(f, "swap    = %s\n", swapdev);
         fclose(f);
     }
 

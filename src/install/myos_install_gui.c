@@ -87,6 +87,7 @@ static int    failed = 0;
 static char   copy_err[128] = "";
 
 static char   root_dev[64] = "";
+static char   swap_dev[64] = "";   /* 切れなかったときは空 */
 static char   disk_dev[64] = "";
 static char   boot_lba[32] = "2048";
 
@@ -246,6 +247,7 @@ static void load_conf(void)
         if (!strcmp(k, "root")) snprintf(root_dev, sizeof(root_dev), "%s", v);
         else if (!strcmp(k, "disk")) snprintf(disk_dev, sizeof(disk_dev), "%s", v);
         else if (!strcmp(k, "bootlba")) snprintf(boot_lba, sizeof(boot_lba), "%s", v);
+        else if (!strcmp(k, "swap")) snprintf(swap_dev, sizeof(swap_dev), "%s", v);
     }
     fclose(f);
 }
@@ -424,6 +426,10 @@ static int do_install(void)
     FILE *f = fopen(path, "w");
     if (f) {
         fprintf(f, "%-12s /      ext4  defaults  0 1\n", root_dev);
+        /* スワップ。myos-init が swapon -a でここを読む。
+         * 切れなかった機械では swap_dev が空なので、行ごと出ない。 */
+        if (swap_dev[0])
+            fprintf(f, "%-12s none   swap  sw        0 0\n", swap_dev);
         fprintf(f, "proc         /proc  proc  defaults  0 0\n");
         fprintf(f, "sysfs        /sys   sysfs defaults  0 0\n");
         fclose(f);

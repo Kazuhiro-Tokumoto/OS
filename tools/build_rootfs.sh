@@ -115,6 +115,16 @@ NET="iproute2 isc-dhcp-client $WIFI"
 # pulseaudio-utils は pactl のため。出口の選び直しに使う。
 SOUND="alsa-utils pulseaudio pulseaudio-utils libopenal1"
 
+# 時刻合わせ。
+# 本体の時計 (RTC) は放っておくと月に何分もずれる。ずれた時計は
+# 「証明書がまだ有効でない」で HTTPS が全部落ちる、という形で刺さり、
+# 原因がまるで分からない壊れ方をする。
+#
+# chrony にしたのは systemd を使っていないから。timesyncd は systemd の
+# 一部で単体では動かない。chronyd は自分で daemon になるので、
+# myos-init から 1 行呼ぶだけで済む。
+TIMESYNC="chrony"
+
 # 日本語の字形。
 # 無いと日本語が全部豆腐になる。ファイル名もメモ帳も化けるので、
 # 見た目の話ではなく使えるかどうかの話。
@@ -212,6 +222,7 @@ apt_install "ネットワーク" "--no-install-recommends" $NET
 
 echo "=== 音 ==="
 apt_install "音" "--no-install-recommends" $SOUND
+apt_install "時刻合わせ" "--no-install-recommends" $TIMESYNC
 
 echo "=== 日本語フォント ==="
 apt_install "フォント" "--no-install-recommends" $FONTS
@@ -321,6 +332,25 @@ cat > "$WORK/etc/adjtime" <<'EOF'
 LOCAL
 EOF
 
+# 時刻合わせの設定。
+#
+# rtcsync は入れない。あれは chronyd に本体の時計を書かせる仕組みで、
+# 必ず UTC で書く。myOS は RTC をローカル時刻として扱う (上の LOCAL) ので、
+# 両方を有効にすると起動のたびに 9 時間ずれる。
+# 本体の時計への書き戻しは、終了するときに myos-poweroff が
+# hwclock --systohc でやる。あちらは /etc/adjtime を見るので食い違わない。
+#
+# makestep を無制限にしてあるのは、置いてある機械の時計が
+# 何年もずれていることがあるため。既定 (最初の 3 回だけ) だと、
+# 大きくずれた時計を少しずつしか直せず、いつまでも合わない。
+mkdir -p "$WORK/etc/chrony" "$WORK/var/lib/chrony"
+cat > "$WORK/etc/chrony/chrony.conf" <<'EOF'
+pool 2.debian.pool.ntp.org iburst
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 -1
+logdir /var/log/chrony
+EOF
+
 echo "=== myOS の起動スクリプト ==="
 # systemd は使わない。カーネルに init=/myos-init を渡して、
 # 必要なものだけ自分で用意してから X を上げる。
@@ -357,6 +387,14 @@ hostname myos
 # ここが動いていないと時刻が UTC 扱いのままになり、日本だと 9 時間ずれる。
 # 黙って捨てていると、ずれているのに理由が分からない。
 hwclock --hctosys || echo "[myos-init] hwclock failed; the clock may be off"
+
+# スワップを有効にする。/etc/fstab はインストーラが書く。
+# 無い機械 (切れなかった / 手で消した) では何も起きない。
+#
+# これが無いと、メモリ 1-2GB の機械で Firefox を開いたときに
+# OOM killer が走る。前触れなくアプリが消えるので「重い」ではなく
+# 「壊れた」に見える。
+swapon -a 2>/dev/null || true
 
 # --- 起動中の画面 ---------------------------------------------------------
 # ここから先の出力は画面に出さず BOOTLOG.TXT に残す。98 と同じ考え方で、
@@ -488,6 +526,13 @@ fi
 if [ -x /usr/sbin/ufw ]; then
     /usr/sbin/ufw --force enable >/dev/null 2>&1
     echo "[myos-init] firewall: $(/usr/sbin/ufw status 2>&1 | head -1)"
+fi
+
+# 時刻合わせ。網が上がったあとに始める。
+# 繋がっていない機械では黙って諦めるだけなので、失敗しても構わない。
+# 合わせた結果は終了するときに myos-poweroff が本体の時計へ書き戻す。
+if [ -x /usr/sbin/chronyd ]; then
+    /usr/sbin/chronyd >/dev/null 2>&1 && echo "[myos-init] time: chronyd started"
 fi
 
 # cron。ClamAV の定期スキャンと定義更新がこれで動く。

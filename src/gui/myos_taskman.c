@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -93,6 +94,9 @@ static char  msg[160];
 static Display *dpy;
 static int      screen;
 static Window   win;
+/* 描画は全部この裏の紙にやって、最後に 1 回だけ窓へ写す。
+ * 1 秒ごとに描き直すので、窓へ直に描くとちらつく。 */
+static Pixmap   cv;
 static X98      x98;
 static XIC      ic;
 
@@ -346,12 +350,35 @@ static void scan_procs(void)
 
 static void refresh(void)
 {
+    /* 選んでいるものを覚えておく。
+     * プロセスは CPU の重い順に並べ替えるので、1 秒ごとに数え直すと
+     * 行の位置が動く。番号で覚えていると、選択が勝手に別のプロセスへ
+     * 移っていく (そのまま End Process を押されると事故になる)。
+     * PID と窓で覚えて、数え直したあとに探し直す。 */
+    long   keep_pid = (sel[TAB_PROCS] >= 0 && sel[TAB_PROCS] < n_procs)
+                      ? procs[sel[TAB_PROCS]].pid : -1;
+    Window keep_win = (sel[TAB_APPS] >= 0 && sel[TAB_APPS] < n_apps)
+                      ? apps[sel[TAB_APPS]].win : None;
+
     scan_apps();
     scan_procs();
+
+    if (keep_pid > 0)
+        for (int i = 0; i < n_procs; i++)
+            if (procs[i].pid == keep_pid) { sel[TAB_PROCS] = i; break; }
+    if (keep_win != None)
+        for (int i = 0; i < n_apps; i++)
+            if (apps[i].win == keep_win) { sel[TAB_APPS] = i; break; }
+
+    int vis = (LIST_H - 4) / ROW_H;
     for (int t = 0; t < N_TABS; t++) {
         int n = (t == TAB_APPS) ? n_apps : n_procs;
         if (sel[t] >= n) sel[t] = n ? n - 1 : 0;
-        if (top[t] > sel[t]) top[t] = sel[t];
+        if (sel[t] < 0) sel[t] = 0;
+        /* top は勝手に動かさない。読んでいる途中で表示が飛ぶと困る。
+         * 行が減って空白が見えるときだけ詰める。 */
+        if (top[t] > n - vis) top[t] = n - vis;
+        if (top[t] < 0) top[t] = 0;
     }
 }
 
@@ -427,15 +454,15 @@ static void draw_tabs(void)
         int w = x98_text_w(&x98, tab_name[i]) + 24;
         int y = (i == tab) ? 4 : 7;
         int h = (i == tab) ? TAB_H - 2 : TAB_H - 5;
-        x98_fill(&x98, win, x, y, w, h, x98.face);
-        x98_hline(&x98, win, x, y, w, x98.light);
-        x98_vline(&x98, win, x, y, h, x98.light);
-        x98_vline(&x98, win, x + w - 1, y, h, x98.shadow);
-        x98_text(&x98, win, x + 12, y + (h - x98_text_h(&x98)) / 2,
+        x98_fill(&x98, cv, x, y, w, h, x98.face);
+        x98_hline(&x98, cv, x, y, w, x98.light);
+        x98_vline(&x98, cv, x, y, h, x98.light);
+        x98_vline(&x98, cv, x + w - 1, y, h, x98.shadow);
+        x98_text(&x98, cv, x + 12, y + (h - x98_text_h(&x98)) / 2,
                  tab_name[i], x98.text);
         x += w + 2;
     }
-    x98_hline(&x98, win, 8, TAB_H + 4, WIN_W - 16, x98.light);
+    x98_hline(&x98, cv, 8, TAB_H + 4, WIN_W - 16, x98.light);
 }
 
 
@@ -451,7 +478,7 @@ static void sb_arrow(int px, int py, int down)
     for (int i = 0; i < 4; i++) {
         int w = 1 + i * 2;
         int y = down ? py + 5 - i : py + i;
-        x98_hline(&x98, win, px + 8 - w / 2 - 1, y, w, x98.text);
+        x98_hline(&x98, cv, px + 8 - w / 2 - 1, y, w, x98.text);
     }
 }
 
@@ -462,10 +489,10 @@ static void draw_scrollbar(int n, int vis, int topv)
     int y = LIST_Y + 2;
     int h = LIST_H - 4;
 
-    x98_fill(&x98, win, x, y, SB_W, h, x98_rgb24(&x98, 0xC0C0C0));
-    x98_button(&x98, win, x, y, SB_W, SB_W, "", 0);
+    x98_fill(&x98, cv, x, y, SB_W, h, x98_rgb24(&x98, 0xC0C0C0));
+    x98_button(&x98, cv, x, y, SB_W, SB_W, "", 0);
     sb_arrow(x + 4, y + 6, 0);
-    x98_button(&x98, win, x, y + h - SB_W, SB_W, SB_W, "", 0);
+    x98_button(&x98, cv, x, y + h - SB_W, SB_W, SB_W, "", 0);
     sb_arrow(x + 4, y + h - SB_W + 6, 1);
 
     int track = h - SB_W * 2;
@@ -474,7 +501,7 @@ static void draw_scrollbar(int n, int vis, int topv)
     if (th > track) th = track;
     int maxtop = n - vis;
     int ty = y + SB_W + (maxtop > 0 ? (track - th) * topv / maxtop : 0);
-    x98_button(&x98, win, x, ty, SB_W, th, "", 0);
+    x98_button(&x98, cv, x, ty, SB_W, th, "", 0);
 }
 
 static int sb_click(int mx, int my, int n, int vis, int *topv)
@@ -519,8 +546,8 @@ static void fit(const char *src, char *out, size_t n, int wpx)
 
 static void draw_list(void)
 {
-    x98_bevel(&x98, win, LIST_X, LIST_Y, LIST_W, LIST_H, 0);
-    x98_fill(&x98, win, LIST_X + 2, LIST_Y + 2, LIST_W - 4, LIST_H - 4,
+    x98_bevel(&x98, cv, LIST_X, LIST_Y, LIST_W, LIST_H, 0);
+    x98_fill(&x98, cv, LIST_X + 2, LIST_Y + 2, LIST_W - 4, LIST_H - 4,
              x98.white);
 
     int n   = (tab == TAB_APPS) ? n_apps : n_procs;
@@ -533,7 +560,7 @@ static void draw_list(void)
         int on = (i == sel[tab]);
         unsigned long fg = x98.text;
         if (on) {
-            x98_fill(&x98, win, LIST_X + 2, y,
+            x98_fill(&x98, cv, LIST_X + 2, y,
                      LIST_W - 4 - (n > vis ? SB_W : 0), ROW_H,
                      x98.select_bg);
             fg = x98.white;
@@ -544,24 +571,24 @@ static void draw_list(void)
         if (tab == TAB_APPS) {
             App *a = &apps[i];
             fit(a->title, cell, sizeof(cell), LIST_W - 160);
-            x98_text(&x98, win, LIST_X + 10, ty, cell, fg);
-            x98_text(&x98, win, LIST_X + LIST_W - 130, ty,
+            x98_text(&x98, cv, LIST_X + 10, ty, cell, fg);
+            x98_text(&x98, cv, LIST_X + LIST_W - 130, ty,
                      a->responding ? "Running" : "Not responding", fg);
         } else {
             Proc *p = &procs[i];
             char b[64];
             fit(p->name, cell, sizeof(cell), 172);
-            x98_text(&x98, win, LIST_X + 10, ty, cell, fg);
+            x98_text(&x98, cv, LIST_X + 10, ty, cell, fg);
             snprintf(b, sizeof(b), "%ld", p->pid);
-            x98_text(&x98, win, LIST_X + 190, ty, b, fg);
-            x98_text(&x98, win, LIST_X + 250, ty, p->user, fg);
+            x98_text(&x98, cv, LIST_X + 190, ty, b, fg);
+            x98_text(&x98, cv, LIST_X + 250, ty, p->user, fg);
             snprintf(b, sizeof(b), "%3.0f%%", p->pct);
-            x98_text(&x98, win, LIST_X + 340, ty, b, fg);
+            x98_text(&x98, cv, LIST_X + 340, ty, b, fg);
             if (p->rss_kb >= 10240)
                 snprintf(b, sizeof(b), "%ld MB", p->rss_kb / 1024);
             else
                 snprintf(b, sizeof(b), "%ld KB", p->rss_kb);
-            x98_text(&x98, win, LIST_X + 396, ty, b, fg);
+            x98_text(&x98, cv, LIST_X + 396, ty, b, fg);
         }
     }
 }
@@ -570,20 +597,20 @@ static void draw_head(void)
 {
     int y = TAB_H + 16;
     if (tab == TAB_APPS) {
-        x98_text(&x98, win, LIST_X + 10, y, "Task", x98.shadow);
-        x98_text(&x98, win, LIST_X + LIST_W - 130, y, "Status", x98.shadow);
+        x98_text(&x98, cv, LIST_X + 10, y, "Task", x98.shadow);
+        x98_text(&x98, cv, LIST_X + LIST_W - 130, y, "Status", x98.shadow);
     } else {
-        x98_text(&x98, win, LIST_X + 10,  y, "Image name", x98.shadow);
-        x98_text(&x98, win, LIST_X + 190, y, "PID",        x98.shadow);
-        x98_text(&x98, win, LIST_X + 250, y, "User",       x98.shadow);
-        x98_text(&x98, win, LIST_X + 340, y, "CPU",        x98.shadow);
-        x98_text(&x98, win, LIST_X + 396, y, "Memory",     x98.shadow);
+        x98_text(&x98, cv, LIST_X + 10,  y, "Image name", x98.shadow);
+        x98_text(&x98, cv, LIST_X + 190, y, "PID",        x98.shadow);
+        x98_text(&x98, cv, LIST_X + 250, y, "User",       x98.shadow);
+        x98_text(&x98, cv, LIST_X + 340, y, "CPU",        x98.shadow);
+        x98_text(&x98, cv, LIST_X + 396, y, "Memory",     x98.shadow);
     }
 }
 
 static void redraw(void)
 {
-    x98_fill(&x98, win, 0, 0, WIN_W, WIN_H, x98.face);
+    x98_fill(&x98, cv, 0, 0, WIN_W, WIN_H, x98.face);
     draw_tabs();
     draw_head();
     draw_list();
@@ -595,19 +622,21 @@ static void redraw(void)
     else
         snprintf(sum, sizeof(sum), "%d process%s",
                  n_procs, n_procs == 1 ? "" : "es");
-    x98_text(&x98, win, PAD, LIST_Y + LIST_H + 8, sum, x98.shadow);
+    x98_text(&x98, cv, PAD, LIST_Y + LIST_H + 8, sum, x98.shadow);
     if (msg[0])
-        x98_text(&x98, win, PAD, LIST_Y + LIST_H + 26, msg, x98.text);
+        x98_text(&x98, cv, PAD, LIST_Y + LIST_H + 26, msg, x98.text);
 
     int by = WIN_H - BTN_H - PAD;
-    x98_button(&x98, win, PAD, by, BTN_W, BTN_H,
+    x98_button(&x98, cv, PAD, by, BTN_W, BTN_H,
                tab == TAB_APPS ? "End Task" : "End Process", 0);
     if (tab == TAB_PROCS)
-        x98_button(&x98, win, PAD + BTN_W + 8, by, BTN_W, BTN_H,
+        x98_button(&x98, cv, PAD + BTN_W + 8, by, BTN_W, BTN_H,
                    "Force End", 0);
-    x98_button(&x98, win, WIN_W - 2 * BTN_W - 20, by, BTN_W, BTN_H,
+    x98_button(&x98, cv, WIN_W - 2 * BTN_W - 20, by, BTN_W, BTN_H,
                "Refresh", 0);
-    x98_button(&x98, win, WIN_W - BTN_W - PAD, by, BTN_W, BTN_H, "Close", 0);
+    x98_button(&x98, cv, WIN_W - BTN_W - PAD, by, BTN_W, BTN_H, "Close", 0);
+
+    XCopyArea(dpy, cv, win, x98.gc, 0, 0, WIN_W, WIN_H, 0, 0);
 }
 
 static void scroll_into_view(void)
@@ -644,13 +673,39 @@ int main(void)
     XSetWMProtocols(dpy, win, &del, 1);
     XMapWindow(dpy, win);
 
+    cv = XCreatePixmap(dpy, win, WIN_W, WIN_H, DefaultDepth(dpy, screen));
+
     ic = x98_ic_new(&x98, win);
     x98_ic_focus(ic);
 
     refresh();
 
+    /* 1 秒ごとに数え直す。
+     *
+     * Windows のタスクマネージャと同じで、開いている間ずっと動いていないと
+     * 用を成さない。CPU の割合は前回との差で出すので、押されるまで
+     * 止まっていると開いた直後は全部 0% になる。
+     *
+     * X の受け口を select で見張って、何も来なければ 1 秒で戻る。
+     * 別の輪を回すより素直で、キーやマウスの反応も鈍らない。 */
+    int xfd = ConnectionNumber(dpy);
+
     for (;;) {
         XEvent ev;
+
+        if (!XPending(dpy)) {
+            fd_set rd;
+            FD_ZERO(&rd);
+            FD_SET(xfd, &rd);
+            struct timeval tv = { 1, 0 };
+            int n = select(xfd + 1, &rd, NULL, NULL, &tv);
+            if (n == 0 || (n < 0 && errno == EINTR)) {
+                if (n == 0) { refresh(); redraw(); }
+                continue;
+            }
+            if (n < 0) break;
+        }
+
         XNextEvent(dpy, &ev);
         if (XFilterEvent(&ev, None)) continue;
 
@@ -751,6 +806,7 @@ int main(void)
     }
 
 done:
+    XFreePixmap(dpy, cv);
     XCloseDisplay(dpy);
     return 0;
 }
