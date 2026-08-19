@@ -3,20 +3,28 @@
 # myos-writeboot  -  インストール先のディスクに起動の仕掛けを書く
 #
 #   myos-writeboot <ディスク> <ルートのパーティション> <生領域の開始LBA>
-#   例: myos-writeboot /dev/sda /dev/sda2 2048
+#                  [ファームウェアの initramfs]
+#   例: myos-writeboot /dev/sda /dev/sda2 2048 /tmp/myos-fw.cpio.gz
 #
 # 書くもの (build_image.py が作るディスクイメージと同じ並び):
 #   LBA 0        Stage1。パーティションテーブルだけは元のまま残す
 #   LBA 1-17     Stage2
 #   LBA 20       ペイロードテーブル
-#   生領域       カーネルの setup 部と本体
+#   生領域       カーネルの setup 部と本体、そのうしろに initramfs
 #
 # 元ネタは起動メディアの中身をそのまま使う。
 #   /run/myos/boot/boot.img     Stage1 + Stage2
 #   /run/myos/boot/payload.bin  ペイロードテーブル + カーネル + initramfs
 #
-# インストール先に initramfs は要らない。ルートは ext4 の実体があるので、
-# カーネルが直接そこをマウントすればいい。
+# initramfs には GPU のファームウェアだけが入っている (myos-mkfwinit)。
+# .ko を全て =y にしてあるので PCI の probe はルートのマウントより 1.1 秒
+# 早く走る。そのときに /lib/firmware が無いと amdgpu も radeon も転ぶ。
+# initramfs は rootfs_initcall で展開されるので probe に間に合う。
+#
+# 中に /init は置かない。カーネルは /init が無ければ initramfs の中身を
+# 残したまま prepare_namespace() に進み、いつもどおり root= を
+# マウントする (init/main.c の init_eaccess 判定)。起動の道筋は
+# 今までと同じままで、ファームだけが先回りして置かれることになる。
 # ============================================================================
 import os
 import struct
@@ -55,8 +63,15 @@ def align_up(lba):
 
 def main():
     if len(sys.argv) < 4:
-        die("usage: myos-writeboot <disk> <rootdev> <boot_area_lba>")
+        die("usage: myos-writeboot <disk> <rootdev> <boot_area_lba> [initrd]")
     disk, rootdev, boot_lba = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    initrd_path = sys.argv[4] if len(sys.argv) > 4 else None
+
+    initrd = b""
+    if initrd_path:
+        if not os.path.exists(initrd_path):
+            die(f"{initrd_path} がありません")
+        initrd = open(initrd_path, "rb").read()
 
     for p in (BOOT_IMG, PAYLOAD):
         if not os.path.exists(p):
@@ -89,6 +104,27 @@ def main():
     lba = align_up(lba + ks_cnt)
     kb_lba, kb_cnt = lba, nsect(len(k_body))
     lba = align_up(lba + kb_cnt)
+    if initrd:
+        i_lba, i_cnt = lba, nsect(len(initrd))
+        lba = align_up(lba + i_cnt)
+    else:
+        i_lba, i_cnt = 0, 0
+
+    # 生領域はパーティション 1 の 128MB (myos_install_text.c の do_partition)。
+    # カーネル 20MB + ファーム 35MB でも収まるが、はみ出せば次の
+    # パーティション = ルートの中身を潰すことになる。必ず確かめる。
+    BOOT_AREA_SECTORS = 128 * 1024 * 1024 // SECTOR
+    used = lba - align_up(boot_lba)
+    if used > BOOT_AREA_SECTORS:
+        die(f"生領域 128MB に収まりません ({used * SECTOR // 1048576}MB 必要)")
+
+    # Stage2 は initramfs を 0x08000000 (128MB) へ読み込む。カーネルが
+    # 展開に使う領域 (setup ヘッダの init_size) とぶつかると、伸ばした
+    # そばから踏み潰されて起動に失敗する。
+    init_size = struct.unpack_from("<I", k_setup, 0x260)[0]
+    if initrd and 0x100000 + init_size > 0x08000000:
+        die(f"カーネルの展開領域 ({init_size // 1048576}MB) が "
+            f"initramfs の置き場 (128MB) に届いています")
 
     # nomodeset は使わない。あれは KMS を丸ごと切るので、実機に GPU が
     # あっても使われず、描画が全て CPU に落ちる (3D は実用にならない)。
@@ -112,7 +148,7 @@ def main():
     struct.pack_into("<IIIIIIII", tbl, 0x08,
                      ks_lba, ks_cnt,
                      kb_lba, kb_cnt, len(k_body),
-                     0, 0, 0)          # initramfs は使わない
+                     i_lba, i_cnt, len(initrd))
     tbl[CMDLINE_OFF:CMDLINE_OFF + len(cmd)] = cmd
 
     # 画面の希望 (0x1F0-) はゼロのまま = 「おまかせ」。
@@ -141,6 +177,10 @@ def main():
         f.seek(kb_lba * SECTOR)
         f.write(k_body)
 
+        if initrd:
+            f.seek(i_lba * SECTOR)
+            f.write(initrd)
+
         f.flush()
         os.fsync(f.fileno())
 
@@ -156,10 +196,15 @@ def main():
         f.seek(ks_lba * SECTOR + 0x202)
         if f.read(4) != b"HdrS":
             die("カーネルの書き込みを確認できません")
+        if initrd:
+            f.seek(i_lba * SECTOR)
+            if f.read(16) != initrd[:16]:
+                die("initramfs の書き込みを確認できません")
 
     subprocess.run(["sync"], check=False)
+    fw = f" initrd@{i_lba} ({len(initrd) // 1048576}MB)" if initrd else ""
     print(f"myos-writeboot: ok  stage2@{STAGE2_LBA} table@{PTBL_LBA} "
-          f"setup@{ks_lba} body@{kb_lba} root={rootdev}")
+          f"setup@{ks_lba} body@{kb_lba}{fw} root={rootdev}")
 
 
 if __name__ == "__main__":

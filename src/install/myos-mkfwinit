@@ -1,0 +1,118 @@
+#!/bin/sh
+# ============================================================================
+# myos-mkfwinit  -  GPU のファームウェアだけを詰めた initramfs を作る
+#
+#   myos-mkfwinit <ルートのディレクトリ> <出力する cpio.gz>
+#   例: myos-mkfwinit /mnt/target /tmp/myos-fw.cpio.gz
+#
+# なぜ要るか
+# ----------
+# 引き継ぎ資料の方針どおり .ko は全て =y にしてある。おかげでモジュールを
+# 入れる手間は無いが、代わりに PCI の probe がルートのマウントより前に走る。
+# 実測するとこうなる。
+#
+#   [    1.863217] calling  radeon_module_init  @ 1
+#   [    1.863637] calling  amdgpu_init         @ 1
+#   [    1.864744] calling  i915_init           @ 1
+#   [    1.866443] calling  nouveau_drm_init    @ 1
+#   [    2.993505] VFS: Cannot open root device
+#
+# 1.1 秒の差がある。この間 /lib/firmware は存在しないので、
+# ファームを要るドライバは probe の時点で必ず失敗する。しかも radeon は
+#
+#   radeon_drv.c:300  drm_aperture_remove_conflicting_pci_framebuffers()
+#   r600.c:3302       DRM_ERROR("Failed to load firmware!"); return r;
+#
+# の順で、VBE の画面を先に取り上げてから転ぶ。だから今までは
+# HD 2000〜HD 7000 を挿した機械が真っ暗になっていた。
+#
+# initramfs は rootfs_initcall で展開されるので device_initcall より前。
+# ここに /lib/firmware を置いておけば probe に間に合う。
+#
+# なぜ 1 個ずつ zstd で潰すか
+# --------------------------
+# cpio の中身は ramfs に「展開された状態」で載り、そのまま常駐する。
+# 生のまま入れると 110MB のメモリが起動中ずっと死ぬ。1 つずつ潰しておけば
+# 3 割で済み、カーネルは request_firmware() のときに name.zst を探して
+# 自分で伸ばしてくれる (CONFIG_FW_LOADER_COMPRESS_ZSTD)。
+#
+# 入れるのは GPU の 4 つだけ。無線 LAN などはルートが見えてから読まれるので
+# ここに入れる意味が無い。
+# ============================================================================
+set -e
+
+FWSET="amdgpu radeon nvidia i915"
+
+usage() { echo "usage: myos-mkfwinit <rootdir> <out.cpio.gz>" >&2; exit 2; }
+
+[ $# -eq 2 ] || usage
+SRCROOT="$1"
+OUT="$2"
+
+[ -d "$SRCROOT" ] || { echo "myos-mkfwinit: $SRCROOT がありません" >&2; exit 1; }
+command -v zstd >/dev/null 2>&1 || \
+    { echo "myos-mkfwinit: zstd がありません" >&2; exit 1; }
+command -v cpio >/dev/null 2>&1 || \
+    { echo "myos-mkfwinit: cpio がありません" >&2; exit 1; }
+
+FWSRC="$SRCROOT/lib/firmware"
+[ -d "$FWSRC" ] || FWSRC="$SRCROOT/usr/lib/firmware"
+[ -d "$FWSRC" ] || { echo "myos-mkfwinit: firmware が見つかりません" >&2; exit 1; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/lib/firmware"
+
+found=0
+for d in $FWSET; do
+    [ -d "$FWSRC/$d" ] || continue
+    # -a でシンボリックリンクはリンクのまま持ってくる。
+    cp -a "$FWSRC/$d" "$WORK/lib/firmware/$d"
+    found=1
+done
+[ "$found" = 1 ] || { echo "myos-mkfwinit: 入れるものがありません" >&2; exit 1; }
+
+# --- 先にシンボリックリンクの行き先を .zst に付け替える -------------------
+# i915/kbl_dmc_ver1.bin -> kbl_dmc_ver1_01.bin のような別名がある。
+# 実体が .zst になるので、リンクもそちらを向かせる。
+#
+# 潰すより前にやるのが肝心。あとからだと
+#   nvidia/gp104/gr/fecs_bl.bin -> ../../gp102/gr/fecs_bl.bin
+# のようにリンクがリンクを指している場合に、行き先がまだ直っていない間は
+# 「実体も .zst も無い」と見えてしまい、取りこぼす。
+# 潰す前ならディレクトリかどうかを -d で確実に判定できる。
+find "$WORK/lib/firmware" -type l | while IFS= read -r l; do
+    t="$(readlink "$l")"
+    d="$(dirname "$l")"
+    # ディレクトリを指しているもの (nvidia/ga106/gsp -> ../ga102/gsp) は
+    # 中身のファイル名を変えるわけではないので触らない。
+    [ -d "$d/$t" ] && continue
+    ln -sfn "$t.zst" "$l.zst"
+    rm -f "$l"
+done
+
+# --- 1 ファイルずつ潰す ---------------------------------------------------
+# コア数ぶん並べる。Core 2 Duo でも数十秒で終わる程度。
+NPROC="$(nproc 2>/dev/null || echo 1)"
+find "$WORK/lib/firmware" -type f -print0 |
+    xargs -0 -r -P "$NPROC" -n 8 zstd -q --rm -19 2>/dev/null || \
+find "$WORK/lib/firmware" -type f -print0 |
+    xargs -0 -r -n 1 zstd -q --rm -19
+
+# --- 取りこぼしが無いか確かめる -------------------------------------------
+# 宙に浮いたリンクが残っていると、そのファームだけ読めない。
+# 起動してから GPU が動かない理由を探すのは大変なので、ここで落とす。
+dangling="$(find "$WORK/lib/firmware" -xtype l | wc -l)"
+if [ "$dangling" -ne 0 ]; then
+    echo "myos-mkfwinit: 行き先の無いリンクが $dangling 本残っています" >&2
+    find "$WORK/lib/firmware" -xtype l >&2
+    exit 1
+fi
+
+# --- cpio に固める --------------------------------------------------------
+# 中身はもう圧縮済みなので gzip は効かない。それでも通しておくのは
+# インストーラ側の initramfs と形を揃えて、扱いを 1 つにしておくため。
+( cd "$WORK" && find . | cpio -o -H newc --quiet ) | gzip -1 > "$OUT"
+
+sz="$(wc -c < "$OUT")"
+echo "myos-mkfwinit: ok  $OUT  $((sz / 1024 / 1024)) MB"

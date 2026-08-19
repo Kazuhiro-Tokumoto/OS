@@ -90,7 +90,7 @@ APPS="gtk2-engines-pixbuf libgtk-3-0 libgtk2.0-0 libcanberra-gtk3-module \
 # これが無いとパーティションを切れず、コピーもできない。
 # (入っていなくてもインストーラは起動するので、
 #  「確認画面まで進んで急に中止される」という形で刺さる)
-INSTALLER="fdisk parted squashfs-tools dosfstools e2fsprogs"
+INSTALLER="fdisk parted squashfs-tools dosfstools e2fsprogs zstd cpio"
 
 # ネットワーク。
 # systemd も NetworkManager も使っていないので、
@@ -673,9 +673,11 @@ chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 -o /usr/local
 cp "$ROOTDIR/src/install/myos-install-init"    "$WORK/myos-install-init"
 cp "$ROOTDIR/src/install/myos-install-session" "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/install/myos-writeboot"       "$WORK/usr/local/bin/"
+cp "$ROOTDIR/src/install/myos-mkfwinit"        "$WORK/usr/local/bin/"
 chmod 755 "$WORK/myos-install-init" \
           "$WORK/usr/local/bin/myos-install-session" \
-          "$WORK/usr/local/bin/myos-writeboot"
+          "$WORK/usr/local/bin/myos-writeboot" \
+          "$WORK/usr/local/bin/myos-mkfwinit"
 chmod 755 "$WORK"/usr/local/bin/myos-*
 
 echo "=== 一般の Linux アプリを入れるための道具 ==="

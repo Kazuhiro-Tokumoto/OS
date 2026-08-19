@@ -5,6 +5,50 @@ Windows 98 の見た目と操作感を目指した自作 OS の、最初の公�
 ブートローダーは自作、カーネルは Linux（`.ko` を全て `=y` にした
 モノリシック構成）、GUI 層は Xlib で自作。
 
+## 1.2 で入れたもの
+
+**GPU のファームウェアを起動時に渡すようにした。**
+
+`.ko` を全て `=y` にしてある副作用で、PCI の probe がルートのマウントより
+先に走っていた。実測するとこうなる。
+
+```
+[    1.863217] calling  radeon_module_init  @ 1
+[    1.863637] calling  amdgpu_init         @ 1
+[    2.993505] VFS: Cannot open root device
+```
+
+1.1 秒の差がある。この間 `/lib/firmware` は存在しないので、ファームウェアを
+必要とする GPU ドライバは probe の時点で必ず失敗していた。しかも radeon は
+VBE の画面を先に取り上げてから転ぶので、**AMD の GPU を挿した機械は
+真っ暗になっていた**。
+
+インストール時に GPU のファームウェアだけを詰めた initramfs を作り、
+生領域のカーネルの後ろに置くようにした。initramfs は `rootfs_initcall` で
+展開されるので probe に間に合う。中身は 1 ファイルずつ zstd に潰してあり
+(`CONFIG_FW_LOADER_COMPRESS_ZSTD`)、110MB が 35MB に収まる。
+
+| GPU | 1.1.2 まで | 1.2 |
+| --- | --- | --- |
+| Radeon HD 2000〜HD 7000 / R9 200・300 | **真っ暗** | 表示 + 3D (`r600` / `radeonsi`) |
+| Radeon RX 400・500 / Vega / RX 5000〜7000 | **真っ暗** | 表示 + 3D + Vulkan (`radeonsi` / RADV) |
+| GeForce GTX 9xx / 10xx / 16xx / RTX 20xx | 表示のみ | 表示 + 3D (`nvc0`。クロックは上がらない) |
+| Intel | 表示 + 3D | 同じ (DMC が読めるので消費電力と表示が安定) |
+
+あわせて、ドライバが入っていなかったものを追加した。
+
+| | |
+| --- | --- |
+| `DRM_GMA500` | Poulsbo / Cedarview の Atom |
+| `DRM_VBOXVIDEO` | VirtualBox の VBoxVGA / VBoxSVGA |
+| `DRM_CIRRUS_QEMU` | QEMU の `-vga cirrus` |
+
+インストーラ自身の initramfs にも同じものを入れてある。今までは AMD の
+機械ではインストーラの画面すら出なかった。
+
+**変わらないもの**: RTX 30xx (Ampere) は Mesa 22.3 に対応するコード生成の
+ターゲットが無いため、3D は出ない (表示は出る)。NVK が入る版まで待ち。
+
 ## 1.1 で直したもの
 
 1.0 を実機 (VirtualBox) で動かして初めて見えたものが多い。

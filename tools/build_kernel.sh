@@ -138,11 +138,41 @@ if [ "${MONOLITHIC:-1}" = "1" ]; then
     for o in DRM DRM_KMS_HELPER DRM_FBDEV_EMULATION DRM_SIMPLEDRM \
              DRM_I915 DRM_AMDGPU DRM_RADEON DRM_NOUVEAU DRM_VMWGFX \
              DRM_QXL DRM_BOCHS DRM_VIRTIO_GPU DRM_AST DRM_MGAG200 \
+             DRM_GMA500 DRM_VBOXVIDEO DRM_CIRRUS_QEMU \
              FB FB_DEVICE FB_VESA FB_EFI FB_SIMPLE \
              FRAMEBUFFER_CONSOLE FRAMEBUFFER_CONSOLE_DETECT_PRIMARY \
              BACKLIGHT_CLASS_DEVICE; do
         ./scripts/config --enable $o
     done
+
+    # --- 圧縮ファームウェアの読み込み -------------------------------------
+    # GPU ドライバは組み込み (=y) なので、PCI の probe が走るのは
+    # ルートをマウントするより前になる。実測すると
+    #
+    #   [ 1.863] calling  amdgpu_init @ 1
+    #   [ 2.993] VFS: Cannot open root device
+    #
+    # と 1.1 秒も差がある。つまり probe の時点では /lib/firmware が
+    # まだこの世に無い。ファームを要るドライバは全部そこで転ぶ。
+    #
+    # 対策として initramfs に /lib/firmware を入れて渡す。initramfs は
+    # rootfs_initcall で展開されるので device_initcall より前に間に合う。
+    #
+    # ただし cpio の中身は ramfs に「展開された状態」で常駐するので、
+    # 生の 110MB をそのまま入れるとその分のメモリが起動中ずっと死ぬ。
+    # ファームを 1 つずつ zstd で潰しておけば 19MB で済み、カーネルは
+    # request_firmware() のときに name.zst を探して自分で伸ばしてくれる。
+    ./scripts/config --enable FW_LOADER
+    ./scripts/config --enable FW_LOADER_COMPRESS
+    ./scripts/config --enable FW_LOADER_COMPRESS_ZSTD
+    ./scripts/config --enable FW_LOADER_COMPRESS_XZ
+    # 直読みに失敗したときユーザーヘルパーの応答を待つ設定。
+    # 起動の最中はヘルパーなど動いていないので、ファームが 1 つ無いたびに
+    # タイムアウトぶんだけ固まる。待つ意味が無いので切る。
+    ./scripts/config --disable FW_LOADER_USER_HELPER_FALLBACK
+    # initramfs は gzip で固める。zstd の口も開けておく。
+    ./scripts/config --enable RD_GZIP
+    ./scripts/config --enable RD_ZSTD
 
     # --- 有線 LAN ---
     for o in ETHERNET NET_VENDOR_INTEL E100 E1000 E1000E IGB IGC IXGBE \

@@ -137,8 +137,12 @@ jobs:
       - name: ルートファイルシステムをビルド
         run: sudo -E sh tools/build_rootfs.sh "$ROOTFS"
 
+      # ルートを固める前にやること。GPU のファームウェアをここから拾う。
       - name: インストーラの initramfs
-        run: sudo -E sh tools/make_install_initramfs.sh build/install-initramfs.cpio.gz
+        run: |
+          sudo -E sh tools/make_install_initramfs.sh \
+            build/install-initramfs.cpio.gz "$ROOTFS"
+          ls -l build/install-initramfs.cpio.gz
 
       # ルートを掃除し終わった *あと* に固めること。
       # 先に固めると gcc やヘッダが入ったままの大きいものが出来る。

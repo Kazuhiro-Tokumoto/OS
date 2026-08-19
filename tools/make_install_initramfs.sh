@@ -12,12 +12,20 @@
 # 「インストーラが動く環境」と「インストールされる中身」が同じものになる。
 # 別々に用意すると、片方だけ古いという事故が起きる。
 #
+# GPU のファームウェアもここに入れる。組み込み (=y) のドライバは PCI の
+# probe がルートのマウントより 1.1 秒早いので、initramfs に置かないと
+# amdgpu も radeon も probe の時点で firmware を読めずに転ぶ。しかも
+# 転ぶ前に VBE の画面を取り上げるので、AMD の機械では「インストーラの
+# 画面すら出ない」ことになる。ここに入れておけば probe に間に合う。
+# switch_root で initramfs は捨てられるので、メモリも起動後には戻る。
+#
 # 使い方:
-#   sh tools/make_install_initramfs.sh [出力先]
+#   sh tools/make_install_initramfs.sh [出力先] [ルートファイルシステム]
 # ============================================================================
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/build/install-initramfs.cpio.gz}"
+FWROOT="${2:-}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -157,6 +165,42 @@ echo
 exec switch_root /mnt/root /myos-install-init
 INIT
 chmod 755 "$WORK/init"
+
+# --- GPU のファームウェア -------------------------------------------------
+# myos-mkfwinit と同じ理屈で 1 つずつ zstd に潰して置く。
+# ルートファイルシステムを渡されなかったときは、この機械の /lib/firmware
+# から拾う。どちらも無ければファーム無しで作る (今までと同じ動き)。
+FWSRC=""
+for cand in "$FWROOT/lib/firmware" "$FWROOT/usr/lib/firmware" /lib/firmware; do
+    [ -n "$cand" ] || continue
+    case "$cand" in /lib/firmware) [ -n "$FWROOT" ] && continue ;; esac
+    [ -d "$cand" ] && { FWSRC="$cand"; break; }
+done
+
+if [ -n "$FWSRC" ] && command -v zstd >/dev/null 2>&1; then
+    echo "=== GPU のファームウェアを入れる ($FWSRC) ==="
+    mkdir -p "$WORK/lib/firmware"
+    for d in amdgpu radeon nvidia i915; do
+        [ -d "$FWSRC/$d" ] || continue
+        cp -a "$FWSRC/$d" "$WORK/lib/firmware/$d"
+    done
+    # 先にリンクの行き先を直してから潰す。逆にすると、リンクがリンクを
+    # 指している場合 (nvidia/gp104 -> gp102 -> gm200) に取りこぼす。
+    find "$WORK/lib/firmware" -type l | while IFS= read -r l; do
+        t="$(readlink "$l")"
+        d="$(dirname "$l")"
+        [ -d "$d/$t" ] && continue
+        ln -sfn "$t.zst" "$l.zst"
+        rm -f "$l"
+    done
+    find "$WORK/lib/firmware" -type f -print0 |
+        xargs -0 -r -P "$(nproc 2>/dev/null || echo 1)" -n 8 zstd -q --rm -19
+    dangling="$(find "$WORK/lib/firmware" -xtype l | wc -l)"
+    [ "$dangling" -eq 0 ] || { echo "行き先の無いリンクが $dangling 本" >&2; exit 1; }
+    echo "  $(du -sh "$WORK/lib/firmware" | cut -f1)"
+else
+    echo "=== GPU のファームウェアは入れない (見つからない) ==="
+fi
 
 echo "=== cpio に固める ==="
 ( cd "$WORK" && find . | cpio -o -H newc --quiet ) | gzip -9 > "$OUT"

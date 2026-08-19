@@ -46,6 +46,7 @@
  *  メディアは読み取り専用なのでリンクを作れない) */
 #define SQUASH    "/run/myos/myos.squashfs"
 #define TARGET    "/mnt/target"
+#define FWINIT    "/tmp/myos-fw.cpio.gz"
 
 enum { ST_PREPARE = 0, ST_COLLECT, ST_COPY, ST_RESTART, ST_N };
 
@@ -436,11 +437,26 @@ static int do_install(void)
     snprintf(path, sizeof(path), "%s/etc/myos/login.conf", TARGET);
     unlink(path);
 
+    /* GPU のファームウェアを initramfs に詰める。
+     *
+     * .ko を全て =y にしてあるので、PCI の probe はルートのマウントより
+     * 1.1 秒早く走る。そのとき /lib/firmware はまだ存在しないので、
+     * ファームを要るドライバは probe の時点で必ず失敗する。radeon と
+     * amdgpu は VBE の画面を先に取り上げてから転ぶので、画面が真っ暗に
+     * なる。initramfs なら rootfs_initcall で展開されるので間に合う。
+     *
+     * 作れなくても入れたものは起動する (ファームが要らない GPU なら
+     * 何も困らない) ので、ここで失敗しても止めない。 */
+    tick(90, "Preparing graphics drivers...");
+    char *fwi[] = { "myos-mkfwinit", TARGET, FWINIT, NULL };
+    int have_fw = (run(fwi) == 0) && access(FWINIT, R_OK) == 0;
+
     /* 4. ブートローダーを書いて再起動 */
     cur_step = ST_RESTART;
     tick(92, "Installing the boot loader...");
 
-    char *bl[] = { "myos-writeboot", disk_dev, root_dev, boot_lba, NULL };
+    char *bl[] = { "myos-writeboot", disk_dev, root_dev, boot_lba,
+                   have_fw ? (char *)FWINIT : NULL, NULL };
     if (run(bl) != 0) {
         failed = 1;
         tick(-1, "Could not install the boot loader.");
