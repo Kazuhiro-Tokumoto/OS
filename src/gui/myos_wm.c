@@ -90,6 +90,12 @@ static int      menu_open = 0;
 static X98      x98;
 
 static Atom a_wm_protocols, a_wm_delete, a_net_wm_name, a_utf8;
+/* ICCCM の WM_STATE。
+ * 「この窓はウィンドウマネージャに管理されている」という目印で、
+ * 窓を枠で包み直す (reparent) 作りの場合、外から中身の窓を見つける
+ * 唯一の手掛かりになる。付けていなかったので、タスクマネージャから
+ * 開いている窓が 1 つも見えなかった。 */
+static Atom a_wm_state;
 
 /* --- デスクトップのアイコン ---------------------------------------------- */
 typedef struct {
@@ -989,6 +995,16 @@ static void raise_client(Client *c)
     draw_taskbar();
 }
 
+/* WM_STATE を書く。値は [状態, アイコン窓] の 2 語。
+ *   1 = NormalState / 3 = IconicState
+ * 消すときは property ごと外す (WithdrawnState の作法)。 */
+static void set_wm_state(Client *c, long state)
+{
+    long v[2] = { state, None };
+    XChangeProperty(dpy, c->client, a_wm_state, a_wm_state, 32,
+                    PropModeReplace, (unsigned char *)v, 2);
+}
+
 /* Alt+Tab: 使った順で 1 つ後ろの窓を手前に出す。
  * back = 1 (Alt+Shift+Tab) なら逆回りで、一番奥の窓を手前に出す。 */
 static void cycle_windows(int back)
@@ -1062,6 +1078,7 @@ static void frame_client(Window w, int adopt)
     XSelectInput(dpy, w, PropertyChangeMask);
 
     fetch_title(c);
+    set_wm_state(c, 1);                 /* NormalState */
     XMapWindow(dpy, c->frame);
     XMapWindow(dpy, w);
     raise_client(c);
@@ -1072,6 +1089,7 @@ static void frame_client(Window w, int adopt)
 static void unframe(Client *c)
 {
     XUnmapWindow(dpy, c->frame);
+    XDeleteProperty(dpy, c->client, a_wm_state);
     XReparentWindow(dpy, c->client, root, c->x, c->y);
     XRemoveFromSaveSet(dpy, c->client);
     XDestroyWindow(dpy, c->frame);
@@ -1162,6 +1180,7 @@ static void snap_client(Client *c, int side)
 static void minimize(Client *c)
 {
     c->minimized = 1;
+    set_wm_state(c, 3);                 /* IconicState */
     XUnmapWindow(dpy, c->frame);
     draw_taskbar();
 }
@@ -1169,6 +1188,7 @@ static void minimize(Client *c)
 static void restore(Client *c)
 {
     c->minimized = 0;
+    set_wm_state(c, 1);                 /* NormalState */
     XMapWindow(dpy, c->frame);
     raise_client(c);
     draw_taskbar();
@@ -1240,6 +1260,7 @@ static void on_sigusr1(int sig)
 /* Windows でおなじみの操作を拾えるようにする。
  *   Alt+Tab  … 窓の切り替え
  *   Alt+F4   … 手前の窓を閉じる
+ *   Ctrl+Alt+Del … タスクマネージャ
  *   Win キー … スタートメニュー
  * NumLock / CapsLock が入っていても効くよう、修飾の組み合わせ全部で掴む。 */
 static void grab_one(KeySym ks, unsigned base)
@@ -1257,6 +1278,11 @@ static void grab_keys(void)
     grab_one(XK_Tab, Mod1Mask);                 /* Alt+Tab */
     grab_one(XK_Tab, Mod1Mask | ShiftMask);     /* Alt+Shift+Tab */
     grab_one(XK_F4,  Mod1Mask);                 /* Alt+F4 */
+    /* Ctrl+Alt+Del。Windows と同じで、まずここが出てくる。
+     * X はこの組み合わせを特別扱いしないので、普通に掴めばよい。
+     * Delete と KP_Delete の両方を掴む (テンキーの Del も同じ顔で来る)。 */
+    grab_one(XK_Delete,    ControlMask | Mod1Mask);
+    grab_one(XK_KP_Delete, ControlMask | Mod1Mask);
     grab_one(XK_Super_L, 0);
     grab_one(XK_Super_R, 0);
 
@@ -1296,6 +1322,7 @@ int main(void)
     if (!x98.font)
         fprintf(stderr, "[myos-wm] no usable font, drawing without text\n");
 
+    a_wm_state     = XInternAtom(dpy, "WM_STATE", False);
     a_wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", False);
     a_wm_delete    = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     a_net_wm_name  = XInternAtom(dpy, "_NET_WM_NAME", False);
@@ -1499,6 +1526,10 @@ int main(void)
                 cycle_windows(!!(st & ShiftMask));
             } else if ((ks == XK_F4) && (st & Mod1Mask)) {
                 if (f) close_client(f);
+            } else if ((ks == XK_Delete || ks == XK_KP_Delete) &&
+                       (st & ControlMask) && (st & Mod1Mask)) {
+                set_menu(0);
+                spawn("/usr/local/bin/myos-taskman");
             } else if (ks == XK_Super_L || ks == XK_Super_R) {
                 set_menu(!menu_open);
             } else if (st & Mod4Mask) {

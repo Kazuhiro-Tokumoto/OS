@@ -906,7 +906,7 @@ cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
    "$ROOTDIR/src/gui/myos_login.c" "$ROOTDIR/src/gui/myos_alert.c" \
    "$ROOTDIR/src/gui/myos_shutdown.c" "$ROOTDIR/src/gui/myos_poweroff.c" \
    "$ROOTDIR/src/gui/myos_splash.c" "$ROOTDIR/src/gui/myos_net.c" \
-   "$ROOTDIR/src/gui/myos_devmgr.c" \
+   "$ROOTDIR/src/gui/myos_devmgr.c" "$ROOTDIR/src/gui/myos_taskman.c" \
    "$ROOTDIR/src/gui/x98.h" "$ROOTDIR/src/gui/myosconf.h" \
    "$ROOTDIR/src/gui/filetypes.h" "$WORK/usr/local/src/"
 # 起動画面。X はまだ無いので Xlib は使わず、freetype だけを直に叩く。
@@ -917,6 +917,9 @@ chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 \
 # デバイスマネージャー。sysfs と dmesg しか見ないので追加の依存は無い。
 chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 \
     -o /usr/local/bin/myos-devmgr /usr/local/src/myos_devmgr.c -lX11 -lXft
+# タスクマネージャ。Ctrl+Alt+Del から出てくる。
+chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 \
+    -o /usr/local/bin/myos-taskman /usr/local/src/myos_taskman.c -lX11 -lXft
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-wm \
     /usr/local/src/myos_wm.c -lX11 -lXft
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-files \
@@ -1641,6 +1644,7 @@ Documents|folder|/usr/local/bin/myos-files ~
 Settings|app|/usr/local/bin/myos-settings
 Network|globe|/usr/local/bin/myos-net
 Device Manager|computer|/usr/local/bin/myos-devmgr
+Task Manager|app|/usr/local/bin/myos-taskman
 Removable|folder|/usr/local/bin/myos-files /media
 Web|globe|/usr/bin/firefox-esr
 Notepad|file|/usr/local/bin/myos-notepad
