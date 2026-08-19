@@ -717,7 +717,14 @@ static void draw_system(void)
                  heaps[i].label, x98.text);
     }
 
-    y += 42 + N_HEAPS * 22 + 20;
+    y += 42 + N_HEAPS * 22 + 14;
+    x98_text(&x98, win, 16, y, "Hardware", x98.text);
+    x98_text(&x98, win, 16, y + 20,
+             "    What is installed, and whether a driver is loaded for it.",
+             x98.shadow);
+    x98_button(&x98, win, 32, y + 38, 140, 24, "Device Manager...", 0);
+
+    y += 78;
     x98_text(&x98, win, 16, y, "System settings", x98.text);
     x98_text(&x98, win, 16, y + 20,
              "    These settings are yours alone (~/.myos).", x98.shadow);
@@ -926,6 +933,16 @@ int main(void)
                         heap_sel = i;
                         redraw();
                         break;
+                    }
+                }
+                /* デバイスマネージャー。draw_system() の位置と揃えること。 */
+                int dy = TAB_H + 20 + 96 + 42 + N_HEAPS * 22 + 14 + 38;
+                if (my >= dy && my < dy + 24 && mx >= 32 && mx < 32 + 140) {
+                    pid_t p = fork();
+                    if (p == 0) {
+                        execl("/usr/local/bin/myos-devmgr",
+                              "myos-devmgr", (char *)NULL);
+                        _exit(127);
                     }
                 }
                 if (my < BTN_Y) break;
