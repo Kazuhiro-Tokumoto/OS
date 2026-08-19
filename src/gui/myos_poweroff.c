@@ -1,8 +1,9 @@
 /* ==========================================================================
  * myos_poweroff.c  -  電源を切る / 再起動する
  *
- *   myos-poweroff        電源を切る
- *   myos-poweroff -r     再起動する
+ *   myos-poweroff              電源を切る
+ *   myos-poweroff -r           再起動する
+ *   myos-poweroff -r -e <機器> 再起動する前に光学ドライブを開ける
  *
  * systemd を使っていないので poweroff も shutdown も入っていない。
  * (メニューには「Shut Down」があるのに /sbin/poweroff が無く、
@@ -22,6 +23,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <linux/cdrom.h>
+#include <sys/ioctl.h>
 #include <sys/reboot.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -32,7 +35,11 @@
 int main(int argc, char **argv)
 {
     int cmd = RB_POWER_OFF;
-    if (argc > 1 && !strcmp(argv[1], "-r")) cmd = RB_AUTOBOOT;
+    const char *eject_dev = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-r")) cmd = RB_AUTOBOOT;
+        else if (!strcmp(argv[i], "-e") && i + 1 < argc) eject_dev = argv[++i];
+    }
 
     /* 1. まず自分に飛んでくる合図を無視する。
      *
@@ -95,6 +102,27 @@ int main(int argc, char **argv)
      * 実測すると、描いてから reboot まで 0.5 秒しかなく、画面には
      * ほとんど映らなかった。少し置く。この間に sync も進む。 */
     sleep(2);
+
+    /* 2.7 光学ドライブを開ける。
+     *
+     *     インストールが終わったあとに使う。入れたままだと、次の起動で
+     *     また CD から立ち上がってインストーラが出てくる。
+     *
+     *     ただし確実には開かない。live の根っこは CD 上の squashfs なので、
+     *     動いている今この瞬間もその機器は使われており、カーネルは
+     *     EBUSY を返すことがある。開けば儲けもの、開かなければ画面の
+     *     案内で抜いてもらう、という扱いにする。だから失敗しても
+     *     止めないし、騒がない。 */
+    if (eject_dev) {
+        /* 先に外しておくと開く見込みが上がる。遅延で外すので、
+         * まだ使っている者が居ても呼び出しは戻ってくる。 */
+        umount2("/myos-medium", MNT_DETACH);
+        int fd = open(eject_dev, O_RDONLY | O_NONBLOCK);
+        if (fd >= 0) {
+            ioctl(fd, CDROMEJECT);
+            close(fd);
+        }
+    }
 
     /* 3. 書き込みを閉じる。
      *    sync だけでは足りない。読み取り専用にし直すところまでやると

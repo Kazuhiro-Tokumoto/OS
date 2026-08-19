@@ -78,6 +78,26 @@ fi
 
 # --- 後半: GUI のウィザード ---------------------------------------------
 echo "  Starting the graphical part of Setup..." > /dev/console
-exec /usr/bin/xinit /usr/local/bin/myos-install-session -- \
+
+# X の出力はコンソールに出さない。ここを /dev/console にしていたため、
+# ウィザードが終わったあとに Xorg のログが画面いっぱいに散らかっていた。
+# 見たくなったときのために取ってはおく。
+#
+# exec もしない。exec すると xinit が終わった時点で PID 1 が消え、
+# カーネルパニックになる。必ずこの下に戻ってくるようにする。
+/usr/bin/xinit /usr/local/bin/myos-install-session -- \
      /usr/bin/X :0 vt1 -nolisten tcp -novtswitch \
-     > /dev/console 2>&1
+     > /var/log/Xorg-install.log 2>&1
+rc=$?
+
+# 普通は myos-install-gui が myos-poweroff を呼んで再起動するので、
+# ここには来ない。来たということは、途中でやめたか再起動に失敗したか。
+printf '\033[2J\033[H'                                   > /dev/console
+echo                                                      > /dev/console
+echo "  Setup has ended (X exited with $rc)."             > /dev/console
+echo "  Remove the disc and restart the computer."        > /dev/console
+echo                                                      > /dev/console
+echo "  A shell is available here if you need to look."   > /dev/console
+echo "  The X log is in /var/log/Xorg-install.log."       > /dev/console
+echo                                                      > /dev/console
+exec /bin/sh < /dev/console > /dev/console 2>&1

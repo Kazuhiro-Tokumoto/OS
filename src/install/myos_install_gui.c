@@ -502,17 +502,40 @@ int main(void)
     int ok = do_install();
 
     if (ok) {
+        /* 起動した媒体を調べておく。再起動の前に開けるため。
+         * 入れたままだと次の起動でまたインストーラが出てくる。 */
+        char medium[64] = "";
+        FILE *mf = fopen("/proc/mounts", "r");
+        if (mf) {
+            char dev[64], mp[128];
+            while (fscanf(mf, "%63s %127s %*[^\n]", dev, mp) == 2)
+                if (!strcmp(mp, "/myos-medium")) {
+                    snprintf(medium, sizeof(medium), "%s", dev);
+                    break;
+                }
+            fclose(mf);
+        }
+
         /* 少し見せてから再起動。いきなり落ちると
-         * 終わったのか失敗したのか分からない。 */
+         * 終わったのか失敗したのか分からない。
+         * 媒体が開かなかったときのために、抜く案内も出しておく。 */
         for (int i = 10; i > 0; i--) {
-            char m[80];
+            char m[120];
             snprintf(m, sizeof(m),
-                     "Setup is complete. Restarting in %d second%s...",
+                     "Setup is complete. Remove the disc. "
+                     "Restarting in %d second%s...",
                      i, i == 1 ? "" : "s");
             tick(100, m);
             sleep(1);
         }
-        char *rb[] = { "reboot", "-f", NULL };
+
+        /* reboot コマンドは無い (systemd を使っていないので入っていない)。
+         * ここを "reboot -f" にしていたため、10 秒数えたあと何も起きず、
+         * X だけが終わって画面にログが散らかった状態で止まっていた。
+         * 電源まわりは自前の myos-poweroff に一本化してある。 */
+        char *rb[] = { "/usr/local/bin/myos-poweroff", "-r",
+                       medium[0] ? "-e" : NULL, medium[0] ? medium : NULL,
+                       NULL };
         run(rb);
     } else {
         /* 失敗したら消さずに残す。何が起きたか見えないと直せない。 */
