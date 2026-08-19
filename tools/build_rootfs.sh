@@ -417,6 +417,19 @@ fi
 /usr/bin/xinit /myos-session -- /usr/bin/X :0 vt1 -nolisten tcp -novtswitch -logverbose 6
 rc=$?
 
+# 電源を切るときも X は落ちる。myos-poweroff がその直前に置く印を見て、
+# 正常な終了と異常な終了を分ける。
+#
+# 印が無いころは、電源を切るたびに下の cat が走って Xorg のログ全文が
+# 画面に流れていた。「シャットダウンでログが滝のように出る」の正体。
+if [ -e /run/myos-shutdown ]; then
+    # 何も出さない。画面を消して、電源が落ちるのを待つだけ。
+    # このあと myos-poweroff が終了の画面を描く。
+    printf '\033[2J\033[H' >&3 2>/dev/null
+    echo "[myos-init] X exited with $rc (shutting down)"
+    while :; do sleep 5; done
+fi
+
 # ここから先は「X が落ちた」= 異常なので、画面に戻して理由を見せる。
 # rc は exec より前に取っておくこと。順番を逆にすると exec の結果になる。
 exec >&3 2>&4

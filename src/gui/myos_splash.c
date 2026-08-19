@@ -34,8 +34,9 @@
  * 文字は freetype で直接ラスタライズする。Xft と違って X を要らない。
  * フォントが無ければ図形だけで描く (文字が出ないだけで画面は出る)。
  *
- *   myos-splash          描き続ける。SIGTERM で消えて抜ける
- *   myos-splash --test   フレームバッファが使えるかだけ見て終わる
+ *   myos-splash            描き続ける。SIGTERM で消えて抜ける
+ *   myos-splash --test     フレームバッファが使えるかだけ見て終わる
+ *   myos-splash --once "文" 一枚だけ描いて終わる。終了のときに使う
  * ==========================================================================*/
 #include <errno.h>
 #include <fcntl.h>
@@ -54,6 +55,12 @@
 #include FT_FREETYPE_H
 
 #define FBDEV "/dev/fb0"
+
+/* 帯の上に出す一行。起動と終了で変える。 */
+static const char *sub_text = "Starting...";
+/* 帯を出すか。終了のときは何も進んでいないので出さない。
+ * 空の枠だけ置くと「0% で固まっている」ように見える。 */
+static int show_bar = 1;
 
 static volatile sig_atomic_t stop_now = 0;
 static void on_term(int s) { (void)s; stop_now = 1; }
@@ -302,11 +309,13 @@ static void compose_static(Canvas *c)
 
     int bx, by, bw, bh;
     bar_geom(W, H, &bx, &by, &bw, &bh);
-    cv_fill(c, bx - 1, by - 1, bw + 2, bh + 2, 0x202040);
-    cv_fill(c, bx, by, bw, bh, 0x000018);
+    if (show_bar) {
+        cv_fill(c, bx - 1, by - 1, bw + 2, bh + 2, 0x202040);
+        cv_fill(c, bx, by, bw, bh, 0x000018);
+    }
 
     int small = H / 40; if (small < 11) small = 11;
-    text_center(c, W / 2, by - small, "Starting...", small, 0xB0B0C0);
+    text_center(c, W / 2, by - small, sub_text, small, 0xB0B0C0);
 }
 
 /* 動くのは帯だけ。98 と同じで、明るい塊が左から右へ流れる。
@@ -377,6 +386,32 @@ int main(int argc, char **argv)
         fwrite(c.rgb, 1, (size_t)w * h * 3, fp);
         fclose(fp);
         cv_free(&c);
+        return 0;
+    }
+
+    /* 一枚だけ描いて抜ける。電源を切るときに使う。
+     * 動く帯は出さない。もう進んでいるものが無いので、動かすと嘘になる。 */
+    if (argc > 1 && !strcmp(argv[1], "--once")) {
+        if (argc > 2) sub_text = argv[2];
+        show_bar = 0;
+        FB f1;
+        if (fb_open(&f1) < 0) return 1;
+        struct fb_var_screeninfo av = f1.v;
+        av.activate = FB_ACTIVATE_NOW | FB_ACTIVATE_FORCE;
+        av.pixclock = 0;
+        ioctl(f1.fd, FBIOPUT_VSCREENINFO, &av);
+        poke_console();
+        font_init();
+        Canvas c = { 0, 0, NULL };
+        if (cv_alloc(&c, (int)f1.v.xres, (int)f1.v.yres) < 0) {
+            fb_close(&f1); return 1;
+        }
+        compose_static(&c);
+        uint8_t *b = NULL; size_t bl = 0;
+        cv_blit(&c, &f1, &b, &bl, 0, (int)f1.v.yres);
+        free(b);
+        cv_free(&c);
+        fb_close(&f1);
         return 0;
     }
 
