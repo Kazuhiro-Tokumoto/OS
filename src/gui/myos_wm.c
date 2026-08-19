@@ -48,6 +48,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 
 #include "x98.h"
 
@@ -188,9 +191,193 @@ static void icon_pos(int i, int *px, int *py)
     *py = ICON_TOP  + (i % rows) * ICON_CELL_H;
 }
 
+/* --- 壁紙 ----------------------------------------------------------------
+ * 画像のデコードは自前で書かない。myos-image と同じ考え方で、
+ * ImageMagick の convert に「画面の大きさの PPM」まで作ってもらい、
+ * その生データだけを受け取る。並べ方も convert 側の仕事にする。
+ *
+ * 出来たものは Pixmap に置いてデスクトップ窓の背景にする。背景にして
+ * おけば、アイコンを描き直すたびに画像を貼り直さなくてよい。
+ *
+ * 設定は desktop.conf。
+ *   wallpaper = /path/to/image      空なら単色 (今までどおり)
+ *   wallmode  = center|tile|stretch|fit
+ *
+ *     center   原寸のまま中央に置く。はみ出す分は切る (98 と同じ)
+ *     tile     原寸のまま敷き詰める
+ *     stretch  縦横比を無視して画面いっぱいに伸ばす
+ *     fit      縦横比を保ったまま収まるところまで拡大縮小して中央へ
+ *
+ * 98 には fit が無いが、いまの写真は画面より大きいのが普通なので、
+ * center だけだと真ん中を切り抜いただけの絵になる。
+ */
+#define WALL_CONF "desktop.conf"
+
+static Pixmap wall_pm = None;
+
+static void wall_free(void)
+{
+    if (wall_pm != None) { XFreePixmap(dpy, wall_pm); wall_pm = None; }
+}
+
+/* convert を走らせて PPM (P6) を受け取る。失敗したら NULL。 */
+static unsigned char *wall_render(const char *path, const char *mode,
+                                  int w, int h)
+{
+    char geo[64], bg[32];
+    snprintf(geo, sizeof(geo), "%dx%d", w, h);
+    snprintf(bg, sizeof(bg), "#%06X", x98.theme.desktop & 0xFFFFFF);
+
+    int fd[2];
+    if (pipe(fd) != 0) return NULL;
+    pid_t p = fork();
+    if (p < 0) { close(fd[0]); close(fd[1]); return NULL; }
+    if (p == 0) {
+        close(fd[0]);
+        dup2(fd[1], 1);
+        close(fd[1]);
+        int nul = open("/dev/null", O_WRONLY);
+        if (nul >= 0) { dup2(nul, 2); close(nul); }
+
+        char geo_bang[72];
+        snprintf(geo_bang, sizeof(geo_bang), "%s!", geo);
+        if (!strcmp(mode, "stretch")) {
+            /* 縦横比を無視して画面いっぱいに伸ばす */
+            execlp("convert", "convert", path, "-resize", geo_bang,
+                   "-depth", "8", "ppm:-", (char *)NULL);
+        } else if (!strcmp(mode, "tile")) {
+            /* 元の大きさのまま敷き詰める */
+            execlp("convert", "convert", path, "-write", "mpr:w", "+delete",
+                   "-size", geo, "tile:mpr:w",
+                   "-depth", "8", "ppm:-", (char *)NULL);
+        } else if (!strcmp(mode, "fit")) {
+            /* 縦横比を保って収まるまで縮め (拡大もする)、中央へ。
+             * 余白は下地の色で埋める。 */
+            execlp("convert", "convert", path, "-resize", geo,
+                   "-background", bg, "-gravity", "center",
+                   "-extent", geo, "-depth", "8", "ppm:-", (char *)NULL);
+        } else {
+            /* center: 原寸のまま中央。大きければはみ出した分を切る。
+             * 98 の「中央に表示」と同じ。 */
+            execlp("convert", "convert", path,
+                   "-background", bg, "-gravity", "center",
+                   "-extent", geo, "-depth", "8", "ppm:-", (char *)NULL);
+        }
+        _exit(127);
+    }
+    close(fd[1]);
+
+    /* P6 の頭を読む。convert の出す形は決まっているが、
+     * 念のため幅と高さは読み直して信じる。 */
+    size_t cap = 1 << 20, len = 0;
+    unsigned char *buf = malloc(cap);
+    if (buf) {
+        ssize_t r;
+        while ((r = read(fd[0], buf + len, cap - len)) > 0) {
+            len += (size_t)r;
+            if (len == cap) {
+                size_t nc = cap * 2;
+                unsigned char *nb = realloc(buf, nc);
+                if (!nb) { free(buf); buf = NULL; break; }
+                buf = nb; cap = nc;
+            }
+        }
+    }
+    char sink[4096];
+    while (read(fd[0], sink, sizeof(sink)) > 0) { }
+    close(fd[0]);
+    int st = 0;
+    while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
+    if (!buf) return NULL;
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0 || len < 16) {
+        free(buf);
+        return NULL;
+    }
+    return buf;
+}
+
+/* PPM のバイト列を Pixmap にする。頭を読み飛ばして画素だけ使う。 */
+static void wall_build(unsigned char *ppm, int w, int h)
+{
+    /* "P6
+<w> <h>
+255
+" を読み飛ばす。値の間の空白は 1 個とは限らない */
+    int fw = 0, fh = 0, maxv = 0, got = 0;
+    size_t i = 2;                       /* "P6" のぶん */
+    while (got < 3) {
+        while (ppm[i] == ' ' || ppm[i] == '\n' || ppm[i] == '\t' ||
+               ppm[i] == '\r') i++;
+        if (ppm[i] == '#') { while (ppm[i] != '\n') i++; continue; }
+        int v = 0;
+        while (ppm[i] >= '0' && ppm[i] <= '9') v = v * 10 + (ppm[i++] - '0');
+        if (got == 0) fw = v; else if (got == 1) fh = v; else maxv = v;
+        got++;
+    }
+    i++;                                /* 値の直後の空白 1 個 */
+    if (fw <= 0 || fh <= 0 || maxv != 255) return;
+
+    XImage *xi = XCreateImage(dpy, DefaultVisual(dpy, screen),
+                              DefaultDepth(dpy, screen), ZPixmap, 0,
+                              NULL, (unsigned)fw, (unsigned)fh, 32, 0);
+    if (!xi) return;
+    xi->data = malloc((size_t)xi->bytes_per_line * fh);
+    if (!xi->data) { XDestroyImage(xi); return; }
+
+    const unsigned char *px = ppm + i;
+    for (int y = 0; y < fh; y++)
+        for (int x = 0; x < fw; x++) {
+            const unsigned char *q = px + ((size_t)y * fw + x) * 3;
+            XPutPixel(xi, x, y,
+                      x98_rgb(&x98, q[0], q[1], q[2]));
+        }
+
+    wall_free();
+    wall_pm = XCreatePixmap(dpy, desktop, (unsigned)w, (unsigned)h,
+                            (unsigned)DefaultDepth(dpy, screen));
+    /* 画面と大きさが違っても左上に貼る。convert が合わせてくるので
+     * 普通は一致する。 */
+    XPutImage(dpy, wall_pm, x98.gc, xi, 0, 0, 0, 0,
+              (unsigned)(fw < w ? fw : w), (unsigned)(fh < h ? fh : h));
+    XDestroyImage(xi);
+}
+
+static void wall_load(void)
+{
+    wall_free();
+
+    char path[512], mode[32] = "center", file[512] = "";
+    myos_conf(path, sizeof(path), WALL_CONF);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        char line[600];
+        while (fgets(line, sizeof(line), f)) {
+            char *v = strchr(line, '=');
+            if (!v) continue;
+            *v++ = 0;
+            char *k = myos_trim(line);
+            v = myos_trim(v);
+            if (!strcmp(k, "wallpaper")) snprintf(file, sizeof(file), "%s", v);
+            else if (!strcmp(k, "wallmode")) snprintf(mode, sizeof(mode), "%s", v);
+        }
+        fclose(f);
+    }
+    if (!file[0]) return;
+
+    int h = scr_h - TASKBAR_H;
+    unsigned char *ppm = wall_render(file, mode, scr_w, h);
+    if (!ppm) return;
+    wall_build(ppm, scr_w, h);
+    free(ppm);
+}
+
 static void draw_desktop(void)
 {
-    x98_fill(&x98, desktop, 0, 0, scr_w, scr_h - TASKBAR_H, x98.desktop);
+    if (wall_pm != None)
+        XCopyArea(dpy, wall_pm, desktop, x98.gc, 0, 0,
+                  (unsigned)scr_w, (unsigned)(scr_h - TASKBAR_H), 0, 0);
+    else
+        x98_fill(&x98, desktop, 0, 0, scr_w, scr_h - TASKBAR_H, x98.desktop);
 
     for (int i = 0; i < n_icons; i++) {
         int px, py;
@@ -1142,6 +1329,9 @@ int main(void)
     XMapWindow(dpy, desktop);
     XLowerWindow(dpy, desktop);
 
+    /* 壁紙。窓が出来てからでないと Pixmap を作れない。 */
+    wall_load();
+
     swa.background_pixel = x98.face;
     taskbar = XCreateWindow(dpy, root, 0, scr_h - TASKBAR_H, scr_w, TASKBAR_H,
                             0, CopyFromParent, InputOutput, CopyFromParent,
@@ -1203,6 +1393,8 @@ int main(void)
                 x98_theme_defaults(&x98.theme);
                 x98_load_theme(&x98.theme, X98_THEME_CONF);
                 x98_apply(&x98);
+                /* 壁紙も設定アプリから変えられるので、一緒に読み直す。 */
+                wall_load();
                 load_icons();
                 sel_icon = -1;
                 XSetWindowBackground(dpy, root, x98.desktop);

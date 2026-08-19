@@ -14,6 +14,8 @@
 #include <X11/Xutil.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <dirent.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -144,9 +146,9 @@ static void save_theme(void)
 }
 
 /* --- タブ ---------------------------------------------------------------- */
-enum { TAB_LOOK = 0, TAB_TYPES, TAB_DISPLAY, TAB_SYSTEM, N_TABS };
+enum { TAB_LOOK = 0, TAB_BG, TAB_TYPES, TAB_DISPLAY, TAB_SYSTEM, N_TABS };
 static const char *tab_name[N_TABS] = {
-    "Appearance", "File Types", "Display", "System"
+    "Appearance", "Background", "File Types", "Display", "System"
 };
 static int tab = TAB_LOOK;
 
@@ -476,6 +478,165 @@ static void res_apply(void)
     }
 }
 
+/* --- 背景 (壁紙) ---------------------------------------------------------
+ * 98 の「画面のプロパティ」の壁紙にあたる。ファイル選択の窓は作らず、
+ * 絵の置き場を覗いて一覧にする。98 も Windows フォルダの中を並べて
+ * いただけなので、これで同じ使い勝手になる。
+ *
+ * 書き出し先は ~/.myos/desktop.conf。読むのはウィンドウマネージャで、
+ * 保存したあと SIGUSR1 を送れば描き直してくれる。 */
+#define BG_MAX   64
+#define BG_Y     (TAB_H + 44)
+#define BG_ROW   18
+#define BG_VIS   9
+
+static char bg_files[BG_MAX][256];
+static char bg_shown[BG_MAX][80];
+static int  bg_n = 0, bg_sel = 0, bg_top = 0;
+
+static const char *bg_modes[] = { "center", "tile", "stretch", "fit" };
+static const char *bg_mode_label[] = {
+    "Center", "Tile", "Stretch", "Fit to screen"
+};
+#define BG_NMODE 4
+static int bg_mode = 0;
+static char bg_msg[128] = "";
+
+static int bg_is_image(const char *n)
+{
+    const char *d = strrchr(n, '.');
+    if (!d) return 0;
+    d++;
+    static const char *ok[] = { "png","jpg","jpeg","gif","bmp","webp",
+                                "ppm","tif","tiff", NULL };
+    for (int i = 0; ok[i]; i++) {
+        size_t L = strlen(ok[i]);
+        if (strlen(d) == L) {
+            size_t j = 0;
+            for (; j < L; j++)
+                if (tolower((unsigned char)d[j]) != ok[i][j]) break;
+            if (j == L) return 1;
+        }
+    }
+    return 0;
+}
+
+static void bg_add(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) && bg_n < BG_MAX) {
+        if (e->d_name[0] == '.') continue;
+        if (!bg_is_image(e->d_name)) continue;
+        snprintf(bg_files[bg_n], sizeof(bg_files[bg_n]), "%s/%s",
+                 dir, e->d_name);
+        snprintf(bg_shown[bg_n], sizeof(bg_shown[bg_n]), "%s", e->d_name);
+        bg_n++;
+    }
+    closedir(d);
+}
+
+static void bg_load(void)
+{
+    const char *home = myos_home();
+    char p1[300];
+
+    bg_n = 0;
+    /* 先頭は「使わない」。単色に戻す道を必ず残す。 */
+    bg_files[bg_n][0] = 0;
+    snprintf(bg_shown[bg_n], sizeof(bg_shown[bg_n]), "(None)");
+    bg_n++;
+
+    bg_add("/usr/share/myos/wallpapers");
+    snprintf(p1, sizeof(p1), "%s/Pictures", home); bg_add(p1);
+    snprintf(p1, sizeof(p1), "%s/My Documents", home); bg_add(p1);
+    bg_add(home);
+
+    /* いまの設定を読んで、選択位置と並べ方に反映する。 */
+    char conf[512], cur[256] = "";
+    myos_conf(conf, sizeof(conf), "desktop.conf");
+    FILE *f = fopen(conf, "r");
+    if (f) {
+        char line[600];
+        while (fgets(line, sizeof(line), f)) {
+            char *v = strchr(line, '=');
+            if (!v) continue;
+            *v++ = 0;
+            char *k = myos_trim(line);
+            v = myos_trim(v);
+            if (!strcmp(k, "wallpaper")) snprintf(cur, sizeof(cur), "%s", v);
+            else if (!strcmp(k, "wallmode"))
+                for (int i = 0; i < BG_NMODE; i++)
+                    if (!strcmp(v, bg_modes[i])) bg_mode = i;
+        }
+        fclose(f);
+    }
+    bg_sel = 0;
+    for (int i = 0; i < bg_n; i++)
+        if (cur[0] && !strcmp(bg_files[i], cur)) { bg_sel = i; break; }
+    if (bg_sel >= bg_top + BG_VIS) bg_top = bg_sel - BG_VIS + 1;
+}
+
+static void bg_apply(void)
+{
+    char conf[512];
+    myos_user_conf(conf, sizeof(conf), "desktop.conf");
+    FILE *f = fopen(conf, "w");
+    if (!f) {
+        snprintf(bg_msg, sizeof(bg_msg), "Could not save the setting.");
+        return;
+    }
+    fprintf(f, "# myOS: デスクトップの背景\n");
+    fprintf(f, "wallpaper = %s\n", bg_files[bg_sel]);
+    fprintf(f, "wallmode = %s\n", bg_modes[bg_mode]);
+    fclose(f);
+
+    /* 描き直させる。設定を書いただけでは画面は変わらない。 */
+    void (*old_chld)(int) = signal(SIGCHLD, SIG_DFL);
+    int rc = system("pkill -USR1 -x myos-wm");
+    signal(SIGCHLD, old_chld);
+    (void)rc;
+
+    snprintf(bg_msg, sizeof(bg_msg), bg_files[bg_sel][0]
+             ? "Applied." : "The background is back to a plain colour.");
+}
+
+static void draw_bg(void)
+{
+    x98_text(&x98, win, 16, TAB_H + 20, "Wallpaper", x98.text);
+
+    int lx = 16, lw = WIN_W - 32, lh = BG_VIS * BG_ROW + 4;
+    x98_bevel(&x98, win, lx, BG_Y, lw, lh, 0);
+    x98_fill(&x98, win, lx + 2, BG_Y + 2, lw - 4, lh - 4, x98.white);
+
+    for (int i = 0; i < BG_VIS && bg_top + i < bg_n; i++) {
+        int idx = bg_top + i, y = BG_Y + 2 + i * BG_ROW;
+        int on = (idx == bg_sel);
+        if (on) x98_fill(&x98, win, lx + 2, y, lw - 4, BG_ROW, x98.select_bg);
+        x98_text(&x98, win, lx + 8, y + (BG_ROW - x98_text_h(&x98)) / 2,
+                 bg_shown[idx], on ? x98.white : x98.text);
+    }
+
+    int my = BG_Y + lh + 12;
+    x98_text(&x98, win, 16, my, "Display it", x98.text);
+    for (int i = 0; i < BG_NMODE; i++) {
+        int rx = 32 + i * 150, ry = my + 20;
+        x98_bevel(&x98, win, rx, ry, 13, 13, 0);
+        x98_fill(&x98, win, rx + 2, ry + 2, 9, 9, x98.white);
+        if (i == bg_mode) x98_fill(&x98, win, rx + 4, ry + 4, 5, 5, x98.text);
+        x98_text(&x98, win, rx + 20, ry + (13 - x98_text_h(&x98)) / 2 - 1,
+                 bg_mode_label[i], x98.text);
+    }
+
+    int by = my + 50;
+    x98_button(&x98, win, 32, by, 90, 22, "Apply", 0);
+    x98_text(&x98, win, 132, by + 5,
+             bg_msg[0] ? bg_msg
+                       : "Pictures in your home folder are listed here.",
+             x98.shadow);
+}
+
 static void draw_display(void)
 {
     char buf[160];
@@ -578,6 +739,7 @@ static void redraw(void)
         draw_speed();
         break;
     case TAB_TYPES:  draw_types();  break;
+    case TAB_BG:      draw_bg(); break;
     case TAB_DISPLAY: draw_display(); break;
     case TAB_SYSTEM: draw_system(); break;
     }
@@ -616,6 +778,7 @@ int main(void)
     x98_im_open(&x98);
 
     res_load();                 /* 画面タブ: いまの設定を読んでおく */
+    bg_load();                  /* 背景タブ: 絵の置き場を覗いておく */
 
     /* 今の設定がどのプリセットに一番近いか探しておく */
     for (int i = 0; i < N_SCHEMES; i++)
@@ -704,6 +867,33 @@ int main(void)
                 else if (my >= dy + 50 && my < dy + 70) ft_field = 1;
                 redraw();
                 break;
+            }
+
+            if (tab == TAB_BG) {
+                int lh = BG_VIS * BG_ROW + 4;
+                if (mx >= 16 && mx < WIN_W - 16 &&
+                    my >= BG_Y + 2 && my < BG_Y + lh - 2) {
+                    int i = bg_top + (my - BG_Y - 2) / BG_ROW;
+                    if (i >= 0 && i < bg_n) bg_sel = i;
+                    redraw();
+                    break;
+                }
+                int mrow = BG_Y + lh + 12 + 20;
+                if (my >= mrow && my < mrow + 13) {
+                    for (int i = 0; i < BG_NMODE; i++) {
+                        int rx = 32 + i * 150;
+                        if (mx >= rx && mx < rx + 140) { bg_mode = i; break; }
+                    }
+                    redraw();
+                    break;
+                }
+                int by = BG_Y + lh + 12 + 50;
+                if (my >= by && my < by + 22 && mx >= 32 && mx < 122) {
+                    bg_apply();
+                    redraw();
+                    break;
+                }
+                if (my < BTN_Y) break;
             }
 
             if (tab == TAB_DISPLAY) {

@@ -1322,6 +1322,9 @@ EOF
 # こちらの表は参照されない。両方から同じ所へ行くようにする。
 mkdir -p "$WORK/usr/share/applications" "$WORK/etc/xdg"
 
+# 壁紙の置き場。設定アプリはここと利用者の Pictures を覗いて一覧にする。
+mkdir -p "$WORK/usr/share/myos/wallpapers"
+
 # 受け皿の .desktop。メニューには出さない (NoDisplay)。
 # 「開く」の入り口としてだけ登録する。
 cat > "$WORK/usr/share/applications/myos-open.desktop" <<'EOF'
