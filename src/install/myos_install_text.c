@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <dirent.h>
@@ -44,8 +45,25 @@
 #define C_SEL     "\033[47;30m"     /* 白地 / 黒 … 選択中の行 */
 #define C_WARN    "\033[44;93m"     /* 青地 / 黄 */
 
-#define COLS 80
-#define ROWS 25
+/* 画面の桁数と行数。決め打ちにしていたので、1024x768 のフレーム
+ * バッファ (8x16 の字で 128x48) では左上の 80x25 しか塗られず、
+ * 残りが黒いまま残っていた。起動時に実物を測る。 */
+static int COLS = 80;
+static int ROWS = 25;
+
+static void probe_screen(void)
+{
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 &&
+        ws.ws_col >= 40 && ws.ws_row >= 10) {
+        COLS = ws.ws_col;
+        ROWS = ws.ws_row;
+    }
+    /* 上限。極端に広い画面で端から端まで塗ると、書き換えのたびに
+     * 目に見えて遅くなる。 */
+    if (COLS > 240) COLS = 240;
+    if (ROWS > 80)  ROWS = 80;
+}
 
 typedef struct {
     char name[32];       /* sda */
@@ -157,10 +175,57 @@ static void read_str(const char *path, char *out, size_t n)
     fclose(f);
 }
 
+/* 起動に使った媒体のディスク名。USB から起動したときに要る。
+ *
+ * CD (sr*) は下の一覧から外しているが、USB メモリは sd* なので普通に
+ * インストール先の候補として並んでしまう。しかも USB から起動すると
+ * その USB が sda になることが多く、既定の選択がそれになる。選んだら
+ * 動いている最中に自分自身を消すことになる。 */
+static char boot_disk[32] = "";
+static int  boot_disk_hidden = 0;   /* 一覧から外したかどうか */
+
+static void find_boot_disk(void)
+{
+    FILE *f = fopen("/proc/mounts", "r");
+    if (!f) return;
+
+    char dev[128], mp[128];
+    while (fscanf(f, "%127s %127s %*[^\n]", dev, mp) == 2) {
+        if (strcmp(mp, "/myos-medium")) continue;
+
+        const char *b = strrchr(dev, '/');
+        b = b ? b + 1 : dev;
+
+        /* パーティション (sdb1) なら親のディスク (sdb) まで遡る。
+         * /sys/class/block/sdb1 の実体は
+         *   ../../devices/.../block/sdb/sdb1
+         * なので、1 つ上の名前が親になる。nvme0n1p1 でも同じ形。 */
+        char link[256], real[512];
+        snprintf(link, sizeof(link), "/sys/class/block/%s", b);
+        ssize_t n = readlink(link, real, sizeof(real) - 1);
+        if (n > 0) {
+            real[n] = 0;
+            char *last = strrchr(real, '/');
+            if (last) {
+                *last = 0;
+                char *par = strrchr(real, '/');
+                par = par ? par + 1 : real;
+                if (strcmp(par, "block"))       /* 親が block なら本体そのもの */
+                    b = par;
+            }
+        }
+        snprintf(boot_disk, sizeof(boot_disk), "%s", b);
+        break;
+    }
+    fclose(f);
+}
+
 /* /sys/block を見て、実体のあるディスクだけ拾う。
  * loop / ram / sr は除く (sr は読み取り専用の光学ドライブ)。 */
 static void scan_disks(void)
 {
+    find_boot_disk();
+
     DIR *d = opendir("/sys/block");
     if (!d) return;
 
@@ -171,6 +236,10 @@ static void scan_disks(void)
         if (!strncmp(n, "loop", 4) || !strncmp(n, "ram", 3) ||
             !strncmp(n, "sr", 2)   || !strncmp(n, "dm-", 3) ||
             !strncmp(n, "md", 2)   || !strncmp(n, "zram", 4)) continue;
+
+        /* 起動した媒体そのものは出さない。USB から起動したときに
+         * 自分を消させないため。 */
+        if (boot_disk[0] && !strcmp(n, boot_disk)) { boot_disk_hidden = 1; continue; }
 
         char p[256];
         snprintf(p, sizeof(p), "/sys/block/%s/size", n);
@@ -251,6 +320,12 @@ static int page_select_disk(void)
         if (n_disks == 0) {
             fputs(C_WARN, stdout);
             say(8, 8, "No disks were found. Setup cannot continue.");
+            /* 起動した媒体を外したせいで空になった場合は、そう言う。
+             * 黙って「見つかりません」だけだと、ディスクを認識できて
+             * いないのだと思われる。 */
+            if (boot_disk_hidden)
+                say(10, 8, "The drive you started Setup from is not offered "
+                           "as a target.");
             fputs(C_SCREEN, stdout);
         }
         fflush(stdout);
@@ -492,6 +567,7 @@ static long long part_start(const Disk *d, int idx)
 /* --- 本体 ---------------------------------------------------------------- */
 int main(void)
 {
+    probe_screen();
     raw_mode();
     atexit(restore_mode);
 

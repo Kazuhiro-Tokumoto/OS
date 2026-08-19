@@ -119,7 +119,15 @@ int main(int argc, char **argv)
         umount2("/myos-medium", MNT_DETACH);
         int fd = open(eject_dev, O_RDONLY | O_NONBLOCK);
         if (fd >= 0) {
-            ioctl(fd, CDROMEJECT);
+            /* 光学ドライブかどうかを先に確かめる。
+             *
+             * USB から起動した場合、ここに来るのは USB メモリの機器名に
+             * なる。トレイを開ける命令を投げる相手ではないし、機種に
+             * よっては START STOP UNIT と解釈して机上から消える。
+             * CDROM_GET_CAPABILITY は光学ドライブでなければ ENOTTY を
+             * 返すので、それを門番にする (eject コマンドと同じやり方)。 */
+            if (ioctl(fd, CDROM_GET_CAPABILITY, NULL) >= 0)
+                ioctl(fd, CDROMEJECT);
             close(fd);
         }
     }

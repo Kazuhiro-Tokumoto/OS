@@ -518,13 +518,22 @@ int main(void)
 
         /* 少し見せてから再起動。いきなり落ちると
          * 終わったのか失敗したのか分からない。
-         * 媒体が開かなかったときのために、抜く案内も出しておく。 */
+         * 媒体が開かなかったときのために、抜く案内も出しておく。
+         *
+         * 言い方は媒体で変える。USB から入れた人に「ディスクを出せ」と
+         * 言っても通じない。名前で見分けるのは文言だけの話なので
+         * これで足りる (実際に開けるかどうかは myos-poweroff 側で
+         * CDROM_GET_CAPABILITY を見て決める)。 */
+        const char *what = "installation media";
+        if (!strncmp(medium, "/dev/sr", 7))      what = "disc";
+        else if (!strncmp(medium, "/dev/sd", 7)) what = "USB drive";
+
         for (int i = 10; i > 0; i--) {
-            char m[120];
+            char m[140];
             snprintf(m, sizeof(m),
-                     "Setup is complete. Remove the disc. "
+                     "Setup is complete. Remove the %s. "
                      "Restarting in %d second%s...",
-                     i, i == 1 ? "" : "s");
+                     what, i, i == 1 ? "" : "s");
             tick(100, m);
             sleep(1);
         }
