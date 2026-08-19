@@ -1315,6 +1315,73 @@ run,bin|Installer|app|myos-term myos-install %1|
 zip,gz,xz,bz2,tar,tgz,7z|Archive|file|myos-term myos-lsarchive %1|myos-term myos-install %1
 EOF
 
+# --- 他のアプリからの「開く」を myos-open に集める -------------------------
+# filetypes.conf に deb の関連付けはあるのに、Firefox で落とした deb を
+# 開こうとすると Firefox 自身の「どのアプリで開くか」が出ていた。
+# あちらは freedesktop の関連付け (MIME と .desktop) を見るので、
+# こちらの表は参照されない。両方から同じ所へ行くようにする。
+mkdir -p "$WORK/usr/share/applications" "$WORK/etc/xdg"
+
+# 受け皿の .desktop。メニューには出さない (NoDisplay)。
+# 「開く」の入り口としてだけ登録する。
+cat > "$WORK/usr/share/applications/myos-open.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=myOS
+Comment=Open with myOS
+Exec=/usr/local/bin/myos-open %f
+Terminal=false
+NoDisplay=true
+MimeType=application/vnd.debian.binary-package;application/x-deb;application/x-shellscript;application/x-executable;application/java-archive;application/x-java-archive;application/zip;application/gzip;application/x-tar;application/x-xz;application/x-bzip2;application/x-7z-compressed;application/x-compressed-tar;text/plain;text/x-python;text/x-csrc;text/x-chdr;image/png;image/jpeg;image/gif;image/bmp;image/webp;image/tiff;
+EOF
+
+# 既定の割り当て。html と pdf はここに入れない。
+# myos-open は html を firefox に渡す作りなので、Firefox からの
+# 「開く」をここへ向けると行って戻ってくることになる。
+cat > "$WORK/etc/xdg/mimeapps.list" <<'EOF'
+[Default Applications]
+application/vnd.debian.binary-package=myos-open.desktop
+application/x-deb=myos-open.desktop
+application/x-shellscript=myos-open.desktop
+application/x-executable=myos-open.desktop
+application/java-archive=myos-open.desktop
+application/x-java-archive=myos-open.desktop
+application/zip=myos-open.desktop
+application/gzip=myos-open.desktop
+application/x-tar=myos-open.desktop
+application/x-xz=myos-open.desktop
+application/x-bzip2=myos-open.desktop
+application/x-7z-compressed=myos-open.desktop
+application/x-compressed-tar=myos-open.desktop
+text/plain=myos-open.desktop
+image/png=myos-open.desktop
+image/jpeg=myos-open.desktop
+image/gif=myos-open.desktop
+image/bmp=myos-open.desktop
+image/webp=myos-open.desktop
+EOF
+
+# xdg-open そのものも myos-open に向ける。
+# /usr/local/bin は PATH で /usr/bin より前なので、こちらが使われる。
+# これで「アプリが xdg-open を呼ぶ」経路も 1 箇所に集まる。
+cat > "$WORK/usr/local/bin/xdg-open" <<'EOF'
+#!/bin/sh
+# myOS 版の xdg-open。開く先の判断は myos-open に任せる。
+#
+# ただし URL はファイルではないので、そのまま渡すと myos-open が
+# パスとして探して失敗する。scheme:// が付いていたら閲覧ソフトへ。
+case "$1" in
+    *://*|mailto:*)
+        exec firefox-esr "$1"
+        ;;
+esac
+exec /usr/local/bin/myos-open "$1"
+EOF
+chmod 755 "$WORK/usr/local/bin/xdg-open"
+
+chroot "$WORK" sh -c "update-desktop-database /usr/share/applications \
+    >/dev/null 2>&1" || true
+
 echo "=== 補助コマンド ==="
 # 端末の中で走らせて、終わっても窓を閉じない。
 # py や sh を実行したときに出力が読めるようにするため。
@@ -1322,8 +1389,12 @@ cat > "$WORK/usr/local/bin/myos-term" <<'EOF'
 #!/bin/sh
 # myos-term <コマンド> [引数...]
 # Win98 の DOS 窓の見た目で、コマンドを実行して結果を残す。
+# フォントは myos-prompt と揃える。ここは apt のインストールの出力が
+# 出る場所なので、CJK が描けないと日本語が全部豆腐になる。
 exec xterm -title "myOS - $1" \
-    -fg lightgray -bg black -cr white -fn 9x15 -geometry 80x25 \
+    -fg lightgray -bg black -cr white \
+    -fa "VL Gothic:antialias=false" -fs 12 \
+    -fn 9x15 -geometry 80x25 \
     -e /usr/local/bin/myos-term-run "$@"
 EOF
 
@@ -1434,12 +1505,16 @@ alias mem='free -h'
 alias edit='myos-notepad'
 alias exit='exit'
 
-# バナーは 9x15 のビットマップフォントで出るので ASCII だけで書く。
-# (日本語を入れると xterm 側にグリフが無く文字化けする)
+# 98 の起動時のバナーと同じ書式にしてある。名前は myOS のもの。
+#
+# ここは元は "Microsoft(R) Windows 98 / (C)Copyright Microsoft Corp" と
+# そのまま出していた。落ちが付いているので冗談ではあるが、配る物の中で
+# 他人の名前の著作権表示を出すのは、見た目を似せるのとは別の話になる。
+# スタートボタンの旗をやめたのと同じ判断で、名前だけ差し替えた。
 cat <<'BANNER'
 
-Microsoft(R) Windows 98
-   (C)Copyright Microsoft Corp 1981-1999.
+myOS(R) 98
+   (C)Copyright myOS Project 2026.
 
   ...is what it looks like.  Inside, this is Linux.
   DOS-style commands work too: dir / cls / copy / move / del / type / ver
@@ -1456,9 +1531,19 @@ cat > "$WORK/usr/local/bin/myos-prompt" <<'EOF'
 # (警告だけで動作には影響しない)。明示しておけば黙る。
 SHELL=/bin/bash
 export SHELL
+
+# 文字は Xft の VL Gothic で出す。
+# -fn 9x15 のビットマップフォントを使っていたが、あれは CJK の字を
+# 持っていないので、apt の日本語の出力が全部豆腐になっていた。
+# (画面の他の場所は 1.1.2 で Xft に直したが、端末だけ残っていた)
+#
+# antialias=false を付けて、なるべく元の当たりの硬さを残す。
+# フォントが無い機械のために -fn も残しておく。そちらに落ちても
+# 英数字は読める。
 exec xterm \
     -title "MS-DOS Prompt" \
     -fg lightgray -bg black -cr white \
+    -fa "VL Gothic:antialias=false" -fs 12 \
     -fn 9x15 \
     -geometry 80x25 \
     -e /bin/bash --rcfile /etc/myos/dosrc -i
