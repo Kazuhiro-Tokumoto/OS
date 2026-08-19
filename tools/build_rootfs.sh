@@ -319,6 +319,14 @@ for dev in /sys/class/net/*; do
     fi
 done
 
+# DHCP が DNS を教えてくれない網もある。
+# そのとき resolv.conf が空だと、繋がっているのに何も引けない。
+# 一番分かりにくい壊れ方なので、控えを入れておく。
+# (dhclient が持ってきたら、そちらで上書きされる)
+if ! grep -q '^nameserver' /etc/resolv.conf 2>/dev/null; then
+    printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' >> /etc/resolv.conf
+fi
+
 # ファイアウォール。ネットワークが上がる前に入れておく。
 # 効いているかどうかは起動ログに出す。黙って失敗していると
 # 「入れたつもりで素通し」になり、それが一番まずい。
@@ -1330,9 +1338,11 @@ fi
 # 中身は起動時に dhclient が書く。空にはせず、何が起きるのかを
 # 書き残しておく。DHCP の無い網に繋いだ人がここを見て直せるように。
 cat > "$WORK/etc/resolv.conf" <<'RESOLV'
-# このファイルは起動のたびに dhclient が書き換えます。
-# DHCP のない網では、ここに直接書いてください:
-#   nameserver 192.168.1.1
+# 起動のたびに dhclient が書き換えます。
+# 下は DHCP が DNS を教えてくれなかったときの控えです。
+# 好きなものに書き換えて構いません。
+nameserver 1.1.1.1
+nameserver 1.0.0.1
 RESOLV
 
 echo "=== 完成 ==="

@@ -206,6 +206,25 @@ if [ "${MONOLITHIC:-1}" = "1" ]; then
         ./scripts/config --enable $o
     done
 
+    # --- 仮想環境の NIC ---
+    # defconfig では「is not set」になっていて、=m ですらないので
+    # 上の =m -> =y の変換に引っかからない。明示的に足す必要がある。
+    #
+    # 実際 VirtualBox の既定 (PCnet-PCI II) でネットワークが
+    # 一切見えなかった。カードはあるのに動かせるドライバが無く、
+    # e1000 だけが登録されていて噛み合っていなかった。
+    # 「どの PC でもそのまま動く」を掲げている以上、ここは埋める。
+    #
+    #   PCNET32  VirtualBox の PCnet-PCI II / III (既定になることがある)
+    #   VMXNET3  VMware と VirtualBox の準仮想化 NIC
+    #   TULIP    DEC 21x4x。古い実機と一部の VM
+    #   NE2K_PCI NE2000 互換。QEMU の -net ne2k_pci など
+    for o in PCNET32 VMXNET3 TULIP DE2104X TULIP_MMIO NE2K_PCI \
+             NET_VENDOR_AMD NET_VENDOR_DEC NET_VENDOR_8390 \
+             HYPERV_NET VIRTIO_NET E1000 E1000E; do
+        ./scripts/config --enable $o
+    done
+
     # ファームウェアの遅延読み込み。組み込みドライバがルートより先に
     # 初期化されても、後からユーザーランド経由で読めるようにする。
     ./scripts/config --enable FW_LOADER
