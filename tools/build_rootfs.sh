@@ -584,6 +584,10 @@ cat > "$WORK/myos-session" <<'EOF'
 xset -dpms s off 2>/dev/null
 xsetroot -solid teal 2>/dev/null
 
+# キーボード配列。ログオン画面でパスワードを打つ時点でもう要る。
+kl=$(sed -n 's/^XKBLAYOUT="\(.*\)"$/\1/p' /etc/default/keyboard 2>/dev/null | head -1)
+[ -n "$kl" ] && setxkbmap -model pc105 -layout "$kl" >/dev/null 2>&1
+
 conf=/etc/myos/login.conf
 get() { sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$conf" 2>/dev/null | head -1; }
 
@@ -643,6 +647,14 @@ export QT_IM_MODULE=fcitx
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-launch >/dev/null 2>&1; then
     eval "$(dbus-launch --sh-syntax --exit-with-session 2>/dev/null)"
 fi
+
+# 配列をいまの X に入れ直す。
+# xorg.conf.d でも効くが、こちらが最後の砦。
+# fcitx5 は起動時に X から配列を読み取ってそれを自分の既定にするので、
+# fcitx5 を上げる前にやる必要がある。逆にすると fcitx5 が us を握って
+# しまい、以後 fcitx5 が配列を戻してくる。
+kl=$(sed -n 's/^XKBLAYOUT="\(.*\)"$/\1/p' /etc/default/keyboard 2>/dev/null | head -1)
+[ -n "$kl" ] && setxkbmap -model pc105 -layout "$kl" >/dev/null 2>&1
 
 if command -v fcitx5 >/dev/null 2>&1; then
     fcitx5 -d >/dev/null 2>&1
@@ -797,6 +809,50 @@ Section "Screen"
     Monitor      "myos-monitor"
     DefaultDepth 24
 EndSection
+EOF
+
+# キーボード配列。
+#
+# Debian は /etc/X11/xorg.conf.d を作らない。X の設定ディレクトリとして
+# 読まれはするが、無ければ黙って飛ばされるだけ。
+# セットアップ (myos-setup) はここへ 10-keyboard.conf を書くので、
+# 先に作っておかないと fopen が失敗して、書けていないことに誰も気付かない。
+# 実際これで「jp を選んだのに us のまま (@ を押すと [ が出る)」になっていた。
+#
+# 併せて既定を jp で置いておく。セットアップを通る前の live 環境
+# (インストーラを動かしている間) もこれで日本語配列になる。
+# us を選んだ場合はセットアップが上書きする。
+mkdir -p "$WORK/etc/X11/xorg.conf.d"
+cat > "$WORK/etc/X11/xorg.conf.d/10-keyboard.conf" <<'EOF'
+Section "InputClass"
+    Identifier "myos keyboard"
+    MatchIsKeyboard "on"
+    Option "XkbLayout" "jp"
+    Option "XkbModel" "pc105"
+EndSection
+EOF
+
+cat > "$WORK/etc/default/keyboard" <<'EOF'
+XKBMODEL="pc105"
+XKBLAYOUT="jp"
+XKBVARIANT=""
+XKBOPTIONS=""
+BACKSPACE="guess"
+EOF
+
+# fcitx5 に配列を触らせない。
+#
+# fcitx5 の xcb モジュールは、既定で「自分が持っている配列を X に
+# 押し付ける」動きをする (Allow Overriding System XKB Settings = True)。
+# しかも初回起動時の X の配列をそのまま自分の既定として憶えるので、
+# 一度でも us の状態で起動されると、以後 X 側を jp にしても
+# fcitx5 が毎回 us に戻してしまう。直したのに直らない、という形になる。
+#
+# 配列は X が持ち、fcitx5 は変換だけをやる、と決める。
+# キーの名前は fcitx5 の設定キーそのもの (説明文と同じ文字列)。
+mkdir -p "$WORK/etc/xdg/fcitx5/conf"
+cat > "$WORK/etc/xdg/fcitx5/conf/xcb.conf" <<'EOF'
+Allow Overriding System XKB Settings=False
 EOF
 
 echo "=== myOS ウィンドウマネージャをビルド ==="

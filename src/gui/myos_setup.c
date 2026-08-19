@@ -276,8 +276,25 @@ static int apply_all(void)
     FILE *f = fopen("/etc/timezone", "w");
     if (f) { fprintf(f, "%s\n", tz_name[tz]); fclose(f); }
 
-    /* キーボード配列。X はこのファイルではなく xorg.conf.d を見るので、
-     * そちらにも書いておく。 */
+    /* キーボード配列。
+     *
+     * ここは 3 つに書く。1 つでは足りないことを実際に踏んだ。
+     *
+     *   /etc/default/keyboard      設定の置き場。あとから読み直す用。
+     *                              X はこれを直接は見ない
+     *                              (見るのは console-setup で、入れていない)。
+     *   /etc/X11/xorg.conf.d/      X が次に起動したときに効く。
+     *                              このディレクトリは Debian の既定では
+     *                              存在しないので、先に作る。
+     *                              作らずに fopen していたせいで書けておらず、
+     *                              jp を選んでも us のままだった。
+     *                              (@ を押すと [ が出る、という形で出る)
+     *   setxkbmap                  いま動いている X に即座に効かせる。
+     *                              これが無いと、初回セットアップの直後の
+     *                              セッションだけ配列が古いままになる。
+     *                              fcitx5 は起動時に X の配列を引き継ぐので、
+     *                              fcitx5 より先にここで正しておく必要もある。
+     */
     f = fopen("/etc/default/keyboard", "w");
     if (f) {
         fprintf(f, "XKBMODEL=\"pc105\"\nXKBLAYOUT=\"%s\"\n"
@@ -285,6 +302,10 @@ static int apply_all(void)
                 kbd_code[kbd]);
         fclose(f);
     }
+
+    char *mkd[] = { "mkdir", "-p", "/etc/X11/xorg.conf.d", NULL };
+    run(mkd);
+
     f = fopen("/etc/X11/xorg.conf.d/10-keyboard.conf", "w");
     if (f) {
         fprintf(f,
@@ -292,9 +313,19 @@ static int apply_all(void)
             "    Identifier \"myos keyboard\"\n"
             "    MatchIsKeyboard \"on\"\n"
             "    Option \"XkbLayout\" \"%s\"\n"
+            "    Option \"XkbModel\" \"pc105\"\n"
             "EndSection\n", kbd_code[kbd]);
         fclose(f);
+    } else {
+        snprintf(err, sizeof(err),
+                 "Could not write the keyboard layout "
+                 "(/etc/X11/xorg.conf.d/10-keyboard.conf).");
+        return 0;
     }
+
+    char *skm[] = { "setxkbmap", "-model", "pc105",
+                    "-layout", (char *)kbd_code[kbd], NULL };
+    run(skm);
 
     /* 誰でログインするか / 自動ログインするか。
      * myos-init がこれを読んでセッションを起こす。 */
