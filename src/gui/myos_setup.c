@@ -61,7 +61,81 @@ static char     err[128];
 static X98Edit  ed_user;
 static X98Edit  ed_pw1;
 static X98Edit  ed_pw2;
-static int      field = 0;          /* そのページの何番目の入力欄か */
+
+/* --- キーボードだけで最後まで進めるようにする ----------------------------
+ * インストール直後の初回起動は、マウスがまだ効かない機械がある
+ * (PS/2 しか無い、USB の初期化が間に合っていない、等)。
+ * そこで「自動ログインするか」を選べないと、パスワードを毎回聞かれる
+ * 設定に変えられないまま先へ進むことになる。
+ *
+ * Windows のウィザードと同じ形にする。Tab で送り、Space で選び、
+ * 矢印で値を変え、Enter は既定のボタン (Next) を押す。
+ * 今どこに居るかは点線の枠で示す。 */
+enum {
+    W_USER = 0, W_PW1, W_PW2,
+    W_AUTOLOGIN, W_KBD, W_TZ,
+    W_BACK, W_NEXT, W_CANCEL
+};
+
+static const int f_welcome[]  = { W_NEXT, W_CANCEL };
+static const int f_user[]     = { W_USER, W_BACK, W_NEXT, W_CANCEL };
+static const int f_password[] = { W_PW1, W_PW2, W_BACK, W_NEXT, W_CANCEL };
+static const int f_options[]  = { W_AUTOLOGIN, W_KBD, W_TZ,
+                                  W_BACK, W_NEXT, W_CANCEL };
+static const int f_finish[]   = { W_BACK, W_NEXT, W_CANCEL };
+
+static int focus_ix = 0;
+
+static const int *focus_list(int st, int *n)
+{
+    switch (st) {
+    case ST_USER:     *n = 4; return f_user;
+    case ST_PASSWORD: *n = 5; return f_password;
+    case ST_OPTIONS:  *n = 6; return f_options;
+    case ST_FINISH:   *n = 3; return f_finish;
+    default:          *n = 2; return f_welcome;
+    }
+}
+
+static int cur_focus(void)
+{
+    int n;
+    const int *l = focus_list(step, &n);
+    if (focus_ix < 0) focus_ix = 0;
+    if (focus_ix >= n) focus_ix = n - 1;
+    return l[focus_ix];
+}
+
+/* そのページに入ったときに、最初に触りたいところへ置く。 */
+static void focus_reset(void)
+{
+    int n;
+    const int *l = focus_list(step, &n);
+    focus_ix = 0;
+    for (int i = 0; i < n; i++)
+        if (l[i] != W_BACK && l[i] != W_NEXT && l[i] != W_CANCEL) {
+            focus_ix = i;
+            return;
+        }
+    /* 入力するものが無いページ (Welcome / Finish) は Next に置く。 */
+    for (int i = 0; i < n; i++)
+        if (l[i] == W_NEXT) { focus_ix = i; return; }
+}
+
+static void focus_move(int d)
+{
+    int n;
+    focus_list(step, &n);
+    focus_ix = (focus_ix + d % n + n) % n;
+}
+
+static void focus_set(int widget)
+{
+    int n;
+    const int *l = focus_list(step, &n);
+    for (int i = 0; i < n; i++)
+        if (l[i] == widget) { focus_ix = i; return; }
+}
 
 static int      autologin = 1;
 static int      kbd = 0;            /* 0 = jp, 1 = us */
@@ -80,6 +154,16 @@ static const char *tz_name[] = {
 /* --- 画面の位置 ---------------------------------------------------------- */
 static int px(void) { return (scr_w - PANEL_W) / 2; }
 static int py(void) { return (scr_h - PANEL_H) / 2; }
+
+/* ボタンの位置。描くときと押されたか調べるときで別々に計算していたので、
+ * 片方だけ直すとずれる。1 か所にまとめる。 */
+static void btn_geom(int which, int *x, int *y)
+{
+    static const int slot[3] = { 3, 2, 1 };     /* Back, Next, Cancel */
+    static const int pad[3]  = { 30, 22, 14 };
+    *x = px() + PANEL_W - slot[which] * BTN_W - pad[which];
+    *y = py() + PANEL_H - BTN_H - 14;
+}
 
 /* --- 外部コマンド -------------------------------------------------------- */
 /* シェルを通さずに実行して終わるまで待つ。戻り値は終了ステータス。
@@ -253,7 +337,21 @@ static void edit_box(int x, int y, int w, X98Edit *e, int focus, int mask)
                   x98.text);
 }
 
-static void checkbox(int x, int y, int on, const char *text)
+/* 98 の「今ここ」の点線。1 画素おきに点を打つだけ。 */
+static void focus_rect(int x, int y, int w, int h)
+{
+    XSetForeground(dpy, x98.gc, x98.text);
+    for (int i = 0; i < w; i += 2) {
+        XDrawPoint(dpy, win, x98.gc, x + i, y);
+        XDrawPoint(dpy, win, x98.gc, x + i, y + h - 1);
+    }
+    for (int i = 0; i < h; i += 2) {
+        XDrawPoint(dpy, win, x98.gc, x, y + i);
+        XDrawPoint(dpy, win, x98.gc, x + w - 1, y + i);
+    }
+}
+
+static void checkbox(int x, int y, int on, const char *text, int focused)
 {
     int bx = px() + x, by = py() + y;
     x98_bevel(&x98, win, bx, by, 13, 13, 0);
@@ -266,9 +364,11 @@ static void checkbox(int x, int y, int on, const char *text)
     }
     x98_text(&x98, win, bx + 20, by + (13 - x98_text_h(&x98)) / 2 - 1,
              text, x98.text);
+    if (focused)
+        focus_rect(bx + 17, by - 2, x98_text_w(&x98, text) + 6, 17);
 }
 
-static void radio(int x, int y, int on, const char *text)
+static void radio(int x, int y, int on, const char *text, int focused)
 {
     int bx = px() + x, by = py() + y;
     x98_bevel(&x98, win, bx, by, 13, 13, 0);
@@ -276,6 +376,8 @@ static void radio(int x, int y, int on, const char *text)
     if (on) x98_fill(&x98, win, bx + 4, by + 4, 5, 5, x98.text);
     x98_text(&x98, win, bx + 20, by + (13 - x98_text_h(&x98)) / 2 - 1,
              text, x98.text);
+    if (focused)
+        focus_rect(bx + 17, by - 2, x98_text_w(&x98, text) + 6, 17);
 }
 
 static void draw_page(void)
@@ -289,6 +391,9 @@ static void draw_page(void)
         label(24, 162, "  - a password");
         label(24, 180, "  - your keyboard layout and time zone");
         label(24, 220, "Press Next to continue.");
+        label(24, 250, "Mouse not working? Tab moves, Space selects,");
+        label(24, 268, "Enter is Next. The whole setup works from the");
+        label(24, 286, "keyboard alone.");
         break;
 
     case ST_USER:
@@ -296,7 +401,7 @@ static void draw_page(void)
         label(24, 78, "This account can install software and change");
         label(24, 96, "system settings.");
         label(24, 134, "User name:");
-        edit_box(120, 130, 260, &ed_user, 1, 0);
+        edit_box(120, 130, 260, &ed_user, cur_focus() == W_USER, 0);
         label(24, 162, "Lower-case letters, digits, - and _ only.");
         break;
 
@@ -305,31 +410,39 @@ static void draw_page(void)
         label(24, 74, "You will be asked for it whenever something needs");
         label(24, 92, "administrator privileges.");
         label(24, 130, "Password:");
-        edit_box(140, 126, 240, &ed_pw1, field == 0, 1);
+        edit_box(140, 126, 240, &ed_pw1, cur_focus() == W_PW1, 1);
         label(24, 160, "Confirm:");
-        edit_box(140, 156, 240, &ed_pw2, field == 1, 1);
-        label(24, 190, "Tab switches between the two boxes.");
+        edit_box(140, 156, 240, &ed_pw2, cur_focus() == W_PW2, 1);
+        label(24, 190, "Tab moves between the boxes and the buttons.");
         break;
 
-    case ST_OPTIONS:
+    case ST_OPTIONS: {
+        int f = cur_focus();
+
         label(24, 46, "Logon");
-        checkbox(36, 68, autologin, "Log on automatically at startup");
+        checkbox(36, 68, autologin, "Log on automatically at startup",
+                 f == W_AUTOLOGIN);
         label(36, 90, "(off = ask for the password every time)");
 
         label(24, 122, "Keyboard layout");
-        radio(36, 144, kbd == 0, kbd_name[0]);
-        radio(36, 164, kbd == 1, kbd_name[1]);
+        radio(36, 144, kbd == 0, kbd_name[0], f == W_KBD && kbd == 0);
+        radio(36, 164, kbd == 1, kbd_name[1], f == W_KBD && kbd == 1);
 
-        label(24, 196, "Time zone   (up / down keys)");
+        label(24, 196, "Time zone");
         {
             int bx = px() + 36, by = py() + 216;
             x98_bevel(&x98, win, bx, by, 260, 20, 0);
             x98_fill(&x98, win, bx + 2, by + 2, 256, 16, x98.white);
             x98_text(&x98, win, bx + 6,
                      by + (20 - x98_text_h(&x98)) / 2, tz_name[tz], x98.text);
+            if (f == W_TZ) focus_rect(bx + 2, by + 2, 256, 16);
         }
-        label(24, 250, "The clock is read from this computer's hardware.");
+        /* マウスが効かない機械があるので、操作を必ず画面に出す。
+         * 「選べない」と思われるのが一番まずい。 */
+        label(24, 250, "Tab = move   Space = select   Up/Down = change value");
+        label(24, 268, "Enter = Next     The clock comes from the hardware.");
         break;
+    }
 
     case ST_FINISH: {
         char buf[160];
@@ -368,14 +481,21 @@ static void redraw(void)
     draw_page();
 
     /* ボタン。Windows のウィザードと同じ並び。 */
+    int f = cur_focus();
     int byy = by + PANEL_H - BTN_H - 14;
-    if (step > ST_WELCOME)
-        x98_button(&x98, win, bx + PANEL_W - 3 * BTN_W - 30, byy,
-                   BTN_W, BTN_H, "< Back", 0);
-    x98_button(&x98, win, bx + PANEL_W - 2 * BTN_W - 22, byy, BTN_W, BTN_H,
+    int gx, gy;
+    if (step > ST_WELCOME) {
+        btn_geom(0, &gx, &gy);
+        x98_button(&x98, win, gx, gy, BTN_W, BTN_H, "< Back", 0);
+        if (f == W_BACK) focus_rect(gx + 4, gy + 4, BTN_W - 8, BTN_H - 8);
+    }
+    btn_geom(1, &gx, &gy);
+    x98_button(&x98, win, gx, gy, BTN_W, BTN_H,
                step == ST_FINISH ? "Finish" : "Next >", 0);
-    x98_button(&x98, win, bx + PANEL_W - BTN_W - 14, byy, BTN_W, BTN_H,
-               "Cancel", 0);
+    if (f == W_NEXT) focus_rect(gx + 4, gy + 4, BTN_W - 8, BTN_H - 8);
+    btn_geom(2, &gx, &gy);
+    x98_button(&x98, win, gx, gy, BTN_W, BTN_H, "Cancel", 0);
+    if (f == W_CANCEL) focus_rect(gx + 4, gy + 4, BTN_W - 8, BTN_H - 8);
 
     /* ページ番号。長さの見当が付くだけで気分が違う。 */
     char pg[32];
@@ -424,8 +544,17 @@ static int do_next(void)
         return 0;
     }
     step++;
-    field = 0;
+    focus_reset();
     return 0;
+}
+
+/* 戻る。ページの内容は残したまま。 */
+static void do_back(void)
+{
+    if (step <= ST_WELCOME) return;
+    step--;
+    err[0] = 0;
+    focus_reset();
 }
 
 int main(void)
@@ -454,6 +583,7 @@ int main(void)
     x98_edit_set(&ed_user, "");
     x98_edit_set(&ed_pw1, "");
     x98_edit_set(&ed_pw2, "");
+    focus_reset();
 
     for (;;) {
         XEvent ev;
@@ -469,22 +599,50 @@ int main(void)
             char buf[32];
             KeySym ks;
             int n = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &ks, NULL);
+            int f = cur_focus();
+            int shift = (ev.xkey.state & ShiftMask) != 0;
             X98Edit *e = NULL;
 
-            if (step == ST_USER) e = &ed_user;
-            else if (step == ST_PASSWORD) e = field ? &ed_pw2 : &ed_pw1;
-
-            if (ks == XK_Return || ks == XK_KP_Enter) {
-                if (do_next()) goto done;
-            } else if (ks == XK_Tab) {
-                if (step == ST_PASSWORD) field ^= 1;
+            if (f == W_USER)     e = &ed_user;
+            else if (f == W_PW1) e = &ed_pw1;
+            else if (f == W_PW2) e = &ed_pw2;
+            if (ks == XK_Tab) {
+                focus_move(shift ? -1 : 1);
+            } else if (ks == XK_Escape) {
+                goto done;                      /* Cancel と同じ */
+            } else if (ks == XK_Return || ks == XK_KP_Enter) {
+                /* Enter は既定のボタン。ただしフォーカスが Back や Cancel に
+                 * 乗っているときは、そちらを押したことにする。 */
+                if (f == W_BACK)        do_back();
+                else if (f == W_CANCEL) goto done;
+                else if (do_next())     goto done;
+            } else if (ks == XK_space) {
+                /* Space は「今いるところ」を操作する。ただし入力欄では
+                 * ただの空白なので、そちらを優先する。 */
+                if (f == W_AUTOLOGIN)   autologin = !autologin;
+                else if (f == W_KBD)    kbd ^= 1;
+                else if (f == W_BACK)   do_back();
+                else if (f == W_CANCEL) goto done;
+                else if (f == W_NEXT) { if (do_next()) goto done; }
+                else if (e) x98_edit_insert(e, " ", 1);
+            } else if (ks == XK_Up || ks == XK_Down ||
+                       ks == XK_Left || ks == XK_Right) {
+                int back = (ks == XK_Up || ks == XK_Left);
+                if (f == W_KBD) {
+                    kbd = back ? 0 : 1;
+                } else if (f == W_TZ) {
+                    if (back) { if (tz > 0) tz--; }
+                    else      { if (tz < TZ_N - 1) tz++; }
+                } else if (f == W_AUTOLOGIN) {
+                    /* チェック 1 個だけなので、上下でも入れ替えてよい。 */
+                    autologin = !autologin;
+                } else {
+                    /* 値を持たないところでは、上下をページ送りに使う。
+                     * ボタンの上で左右を押したときも移動でよい。 */
+                    focus_move(back ? -1 : 1);
+                }
             } else if (ks == XK_BackSpace) {
                 if (e) x98_edit_backspace(e);
-            } else if (step == ST_OPTIONS) {
-                if (ks == XK_Up)        { if (tz > 0) tz--; }
-                else if (ks == XK_Down) { if (tz < TZ_N - 1) tz++; }
-                else if (ks == XK_space) autologin = !autologin;
-                else if (ks == XK_Left || ks == XK_Right) kbd ^= 1;
             } else if (e && n > 0 && (unsigned char)buf[0] >= 0x20) {
                 buf[n] = 0;
                 x98_edit_insert(e, buf, n);
@@ -496,20 +654,23 @@ int main(void)
         case ButtonPress: {
             int mx = ev.xbutton.x, my = ev.xbutton.y;
             int bx = px(), by = py();
-            int byy = by + PANEL_H - BTN_H - 14;
+            int gx, gy;
 
-            if (my >= byy && my < byy + BTN_H) {
-                if (step > ST_WELCOME &&
-                    mx >= bx + PANEL_W - 3 * BTN_W - 30 &&
-                    mx <  bx + PANEL_W - 3 * BTN_W - 30 + BTN_W) {
-                    step--;
-                    field = 0;
-                    err[0] = 0;
-                } else if (mx >= bx + PANEL_W - 2 * BTN_W - 22 &&
-                           mx <  bx + PANEL_W - 2 * BTN_W - 22 + BTN_W) {
+            btn_geom(1, &gx, &gy);
+            if (my >= gy && my < gy + BTN_H) {
+                int hit = -1;
+                for (int i = 0; i < 3; i++) {
+                    int tx, ty;
+                    btn_geom(i, &tx, &ty);
+                    if (mx >= tx && mx < tx + BTN_W) { hit = i; break; }
+                }
+                if (hit == 0 && step > ST_WELCOME) {
+                    focus_set(W_BACK);
+                    do_back();
+                } else if (hit == 1) {
+                    focus_set(W_NEXT);
                     if (do_next()) goto done;
-                } else if (mx >= bx + PANEL_W - BTN_W - 14 &&
-                           mx <  bx + PANEL_W - 14) {
+                } else if (hit == 2) {
                     /* Cancel。設定を書かずに抜ける。
                      * setup-done を置かないので、次の起動でまた出る。 */
                     goto done;
@@ -517,14 +678,20 @@ int main(void)
             } else if (step == ST_OPTIONS) {
                 int rx = mx - bx, ry = my - by;
                 if (rx >= 36 && rx < 300) {
-                    if (ry >= 68 && ry < 84)        autologin = !autologin;
-                    else if (ry >= 144 && ry < 160) kbd = 0;
-                    else if (ry >= 164 && ry < 180) kbd = 1;
+                    if (ry >= 68 && ry < 84) {
+                        autologin = !autologin; focus_set(W_AUTOLOGIN);
+                    } else if (ry >= 144 && ry < 160) {
+                        kbd = 0; focus_set(W_KBD);
+                    } else if (ry >= 164 && ry < 180) {
+                        kbd = 1; focus_set(W_KBD);
+                    } else if (ry >= 216 && ry < 236) {
+                        focus_set(W_TZ);
+                    }
                 }
             } else if (step == ST_PASSWORD) {
                 int ry = my - by;
-                if (ry >= 126 && ry < 146)      field = 0;
-                else if (ry >= 156 && ry < 176) field = 1;
+                if (ry >= 126 && ry < 146)      focus_set(W_PW1);
+                else if (ry >= 156 && ry < 176) focus_set(W_PW2);
             }
             redraw();
             break;
