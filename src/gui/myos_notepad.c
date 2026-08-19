@@ -26,6 +26,9 @@
 
 #include "x98.h"
 
+/* 日本語入力の入力文脈。IME が上がっていなければ NULL のまま。 */
+static XIC ic;
+
 #define WIN_W      680
 #define WIN_H      480
 #define MENU_H     22
@@ -37,7 +40,6 @@ static Display *dpy;
 static int      screen;
 static Window   win;
 static X98      x98;
-static XFontStruct *mono;
 static Atom     a_wm_delete;
 
 static char  *lines[MAX_LINES];
@@ -147,14 +149,49 @@ static void join_prev(void)
     cur_c = plen;
 }
 
-/* --- 描画 ---------------------------------------------------------------- */
-static int char_w(void)  { return mono ? mono->max_bounds.width : 8; }
-static int line_h(void)  { return mono ? mono->ascent + mono->descent : 14; }
+/* --- 描画 ----------------------------------------------------------------
+ * 本文はコアフォント + XDrawString で描いていた。あれは 1 バイトを 1 字と
+ * 見なすので、日本語を打つと必ず化ける (1.1.2 で他の画面は Xft に直したが、
+ * ここだけ桁の計算が楽という理由で残っていた)。
+ * 日本語が入るようになった以上、ここも Xft にする必要がある。
+ *
+ * そのぶん「1 文字 = 何ピクセル」が使えなくなるので、横位置は全て
+ * 実測に変えた。左端 (left_c) は桁ではなくバイト位置で持つ。 */
+static int line_h(void)  { return x98_text_h(&x98) + 2; }
 
 static int text_x(void) { return PAD + 2; }
 static int text_y(void) { return MENU_H + PAD + 2; }
 static int rows_vis(void) { return (win_h - text_y() - PAD - 2) / line_h(); }
-static int cols_vis(void) { return (win_w - text_x() - PAD - 2) / char_w(); }
+static int text_w(void) { return win_w - text_x() - PAD - 2; }
+
+/* s の [from, to) の幅。x98_text_w は 0 終端しか測れないので写して測る。 */
+static int seg_w(const char *s, int from, int to)
+{
+    char tmp[1024];
+    int n = to - from;
+    if (n <= 0) return 0;
+    if (n > (int)sizeof(tmp) - 1) n = (int)sizeof(tmp) - 1;
+    memcpy(tmp, s + from, (size_t)n);
+    tmp[n] = 0;
+    return x98_text_w(&x98, tmp);
+}
+
+/* 幅 w に入るところまでを out に写す。文字の途中では切らない。 */
+static void fit_seg(const char *s, int from, int w, char *out, int outsz)
+{
+    int len = (int)strlen(s);
+    int i = from, last = from;
+    out[0] = 0;
+    while (i < len) {
+        int nx = x98_u8_next(s, i, len);
+        if (nx - from >= outsz - 1) break;
+        memcpy(out, s + from, (size_t)(nx - from));
+        out[nx - from] = 0;
+        if (x98_text_w(&x98, out) > w) { out[last - from] = 0; return; }
+        last = nx;
+        i = nx;
+    }
+}
 
 static void draw_menu(void)
 {
@@ -183,26 +220,20 @@ static void draw_text(void)
     x98_bevel(&x98, win, tx - 2, ty - 2, tw + 4, th + 4, 0);
     x98_fill(&x98, win, tx, ty, tw, th, x98.white);
 
-    if (!mono) return;
-    XSetForeground(dpy, x98.gc, x98.text);
-    XSetFont(dpy, x98.gc, mono->fid);
-
-    int rows = rows_vis(), cw = char_w(), lh = line_h();
+    int rows = rows_vis(), lh = line_h();
+    char buf[1024];
     for (int r = 0; r < rows; r++) {
         int l = top_l + r;
         if (l >= n_lines) break;
         const char *s = lines[l];
-        int len = (int)strlen(s);
-        if (left_c >= len) continue;
-        int n = len - left_c;
-        if (n > cols_vis()) n = cols_vis();
-        XDrawString(dpy, win, x98.gc, tx, ty + r * lh + mono->ascent,
-                    s + left_c, n);
+        if (left_c >= (int)strlen(s)) continue;
+        fit_seg(s, left_c, tw, buf, (int)sizeof(buf));
+        if (buf[0]) x98_text(&x98, win, tx, ty + r * lh, buf, x98.text);
     }
 
     /* カーソル */
     if (cur_l >= top_l && cur_l < top_l + rows) {
-        int cx = tx + (cur_c - left_c) * cw;
+        int cx = tx + seg_w(lines[cur_l], left_c, cur_c);
         int cy = ty + (cur_l - top_l) * lh;
         if (cx >= tx && cx < tx + tw)
             x98_vline(&x98, win, cx, cy, lh, x98.text);
@@ -219,25 +250,38 @@ static void redraw(void)
 /* カーソルが見えるように表示範囲を寄せる */
 static void scroll_to_cursor(void)
 {
-    int rows = rows_vis(), cols = cols_vis();
+    int rows = rows_vis();
     if (cur_l < top_l) top_l = cur_l;
     if (cur_l >= top_l + rows) top_l = cur_l - rows + 1;
-    if (cur_c < left_c) left_c = cur_c;
-    if (cur_c >= left_c + cols) left_c = cur_c - cols + 1;
     if (top_l < 0) top_l = 0;
+
+    /* 横は桁で数えられない (全角と半角で幅が違う)。
+     * カーソルが右端からはみ出している間、左端を 1 文字ずつ送る。 */
+    if (cur_c < left_c) left_c = cur_c;
     if (left_c < 0) left_c = 0;
+    int ln = (int)strlen(lines[cur_l]);
+    while (left_c < cur_c && seg_w(lines[cur_l], left_c, cur_c) > text_w())
+        left_c = x98_u8_next(lines[cur_l], left_c, ln);
 }
 
 static int clampc(void)
 {
     int len = (int)strlen(lines[cur_l]);
     if (cur_c > len) cur_c = len;
+    /* 上下に動くと、行の長さが違うぶん文字の途中に着地することがある。
+     * 継続バイトの上に居たら手前の境目まで下げる。 */
+    while (cur_c > 0 && ((unsigned char)lines[cur_l][cur_c] & 0xC0) == 0x80)
+        cur_c--;
     return len;
 }
 
 /* --- 本体 ---------------------------------------------------------------- */
 int main(int argc, char **argv)
 {
+    /* 日本語入力より前にロケールを立てる。X を開いたあとだと
+     * Xlib が古いロケールのまま動いてしまう。 */
+    x98_im_setup_locale();
+
     dpy = XOpenDisplay(NULL);
     if (!dpy) {
         fprintf(stderr, "[myos-notepad] cannot open display\n");
@@ -245,11 +289,8 @@ int main(int argc, char **argv)
     }
     screen = DefaultScreen(dpy);
     x98_init(&x98, dpy, screen);
+    x98_im_open(&x98);
 
-    /* 本文は等幅で出す。メモ帳らしさもあるし、桁の計算が楽になる。 */
-    mono = XLoadQueryFont(dpy, "9x15");
-    if (!mono) mono = XLoadQueryFont(dpy, "fixed");
-    if (!mono) mono = x98.font;
 
     win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 0, 0,
                               WIN_W, WIN_H, 0, 0, x98.face);
@@ -259,6 +300,11 @@ int main(int argc, char **argv)
     XSetWMProtocols(dpy, win, &a_wm_delete, 1);
     XMapWindow(dpy, win);
 
+    /* 窓が出てから入力文脈を作る。窓より先に作ると
+     * XNClientWindow に渡すものが無い。 */
+    ic = x98_ic_new(&x98, win);
+    x98_ic_focus(ic);
+
     lines[0] = line_new("");
     if (argc > 1) doc_load(argv[1]);
     else set_title();
@@ -266,6 +312,9 @@ int main(int argc, char **argv)
     for (;;) {
         XEvent ev;
         XNextEvent(dpy, &ev);
+        /* IME が使う鍵はここで吸われる。忘れると
+         * かなも漢字も一生入ってこない。 */
+        if (XFilterEvent(&ev, None)) continue;
 
         switch (ev.type) {
         case Expose:
@@ -320,11 +369,27 @@ int main(int argc, char **argv)
             }
             {
                 int r = (my - text_y()) / line_h();
-                int c = (mx - text_x() + char_w() / 2) / char_w();
                 cur_l = top_l + r;
                 if (cur_l < 0) cur_l = 0;
                 if (cur_l >= n_lines) cur_l = n_lines - 1;
-                cur_c = left_c + c;
+
+                /* 桁で割り出せないので、左端から 1 文字ずつ足して
+                 * 押された位置を跨ぐところを探す。行の長さは高が知れて
+                 * いるので、これで十分速い。 */
+                {
+                    const char *s = lines[cur_l];
+                    int ln = (int)strlen(s), want = mx - text_x();
+                    int i = left_c;
+                    cur_c = left_c;
+                    while (i < ln) {
+                        int nx = x98_u8_next(s, i, ln);
+                        int wa = seg_w(s, left_c, i);
+                        int wb = seg_w(s, left_c, nx);
+                        if (want < (wa + wb) / 2) break;
+                        cur_c = nx;
+                        i = nx;
+                    }
+                }
                 clampc();
                 scroll_to_cursor();
                 redraw();
@@ -335,7 +400,7 @@ int main(int argc, char **argv)
         case KeyPress: {
             char buf[32];
             KeySym ks;
-            int n = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &ks, NULL);
+            int n = x98_lookup(ic, &ev.xkey, buf, sizeof(buf), &ks);
             int ctrl = (ev.xkey.state & ControlMask) != 0;
 
             if (ctrl) {
@@ -354,31 +419,40 @@ int main(int argc, char **argv)
             switch (ks) {
             case XK_Return: case XK_KP_Enter:
                 split_line(); modified = 1; break;
+            /* 消す / 動かすのは 1 バイトではなく 1 文字ぶん。
+             * 日本語は 3 バイトなので、バイト単位だと文字の途中で切れて
+             * 壊れた列が残る (Xft では豆腐になる)。 */
             case XK_BackSpace:
                 if (cur_c > 0) {
-                    memmove(lines[cur_l] + cur_c - 1, lines[cur_l] + cur_c,
+                    int p = x98_u8_prev(lines[cur_l], cur_c);
+                    memmove(lines[cur_l] + p, lines[cur_l] + cur_c,
                             strlen(lines[cur_l]) - cur_c + 1);
-                    cur_c--;
+                    cur_c = p;
                 } else join_prev();
                 modified = 1;
                 break;
             case XK_Delete: {
                 int len = (int)strlen(lines[cur_l]);
                 if (cur_c < len) {
-                    memmove(lines[cur_l] + cur_c, lines[cur_l] + cur_c + 1,
-                            len - cur_c);
+                    int q = x98_u8_next(lines[cur_l], cur_c, len);
+                    memmove(lines[cur_l] + cur_c, lines[cur_l] + q,
+                            len - q + 1);
                 } else if (cur_l < n_lines - 1) {
                     cur_l++; cur_c = 0; join_prev();
                 }
                 modified = 1;
                 break;
             }
-            case XK_Left:  if (cur_c > 0) cur_c--;
-                           else if (cur_l > 0) { cur_l--; cur_c = (int)strlen(lines[cur_l]); }
-                           break;
-            case XK_Right: if (cur_c < (int)strlen(lines[cur_l])) cur_c++;
-                           else if (cur_l < n_lines - 1) { cur_l++; cur_c = 0; }
-                           break;
+            case XK_Left:
+                if (cur_c > 0) cur_c = x98_u8_prev(lines[cur_l], cur_c);
+                else if (cur_l > 0) { cur_l--; cur_c = (int)strlen(lines[cur_l]); }
+                break;
+            case XK_Right: {
+                int ln = (int)strlen(lines[cur_l]);
+                if (cur_c < ln) cur_c = x98_u8_next(lines[cur_l], cur_c, ln);
+                else if (cur_l < n_lines - 1) { cur_l++; cur_c = 0; }
+                break;
+            }
             case XK_Up:    if (cur_l > 0) { cur_l--; clampc(); } break;
             case XK_Down:  if (cur_l < n_lines - 1) { cur_l++; clampc(); } break;
             case XK_Home:  cur_c = 0; break;

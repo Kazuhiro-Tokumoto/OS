@@ -39,6 +39,9 @@
 #include <sys/wait.h>
 
 #include "x98.h"
+
+/* 日本語入力の入力文脈。IME が上がっていなければ NULL のまま。 */
+static XIC ic;
 #include "filetypes.h"
 
 #define WIN_W       700
@@ -582,6 +585,10 @@ int main(int argc, char **argv)
 {
     signal(SIGCHLD, SIG_IGN);
 
+    /* 日本語入力より前にロケールを立てる。X を開いたあとだと
+     * Xlib が古いロケールのまま動いてしまう。 */
+    x98_im_setup_locale();
+
     dpy = XOpenDisplay(NULL);
     if (!dpy) {
         fprintf(stderr, "[myos-files] cannot open display\n");
@@ -589,6 +596,7 @@ int main(int argc, char **argv)
     }
     screen = DefaultScreen(dpy);
     x98_init(&x98, dpy, screen);
+    x98_im_open(&x98);
     n_ftypes = ft_load(ftypes, FT_MAX);
 
     win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 0, 0,
@@ -600,6 +608,11 @@ int main(int argc, char **argv)
     XStoreName(dpy, win, "myOS Files");
     XMapWindow(dpy, win);
 
+    /* 窓が出てから入力文脈を作る。窓より先に作ると
+     * XNClientWindow に渡すものが無い。 */
+    ic = x98_ic_new(&x98, win);
+    x98_ic_focus(ic);
+
     go_to(argc > 1 ? argv[1] : "/");
 
     long last_click_ms = 0;
@@ -608,6 +621,9 @@ int main(int argc, char **argv)
     for (;;) {
         XEvent ev;
         XNextEvent(dpy, &ev);
+        /* IME が使う鍵はここで吸われる。忘れると
+         * かなも漢字も一生入ってこない。 */
+        if (XFilterEvent(&ev, None)) continue;
 
         switch (ev.type) {
 
@@ -632,7 +648,7 @@ int main(int argc, char **argv)
         case KeyPress: {
             char kb[32];
             KeySym ks;
-            int kn = XLookupString(&ev.xkey, kb, sizeof(kb) - 1, &ks, NULL);
+            int kn = x98_lookup(ic, &ev.xkey, kb, sizeof(kb), &ks);
             int ctrl = (ev.xkey.state & ControlMask) != 0;
 
             /* 名前の変更中はそちらが入力を全部取る */
@@ -641,9 +657,13 @@ int main(int argc, char **argv)
                 else if (ks == XK_Escape) renaming = 0;
                 else if (ks == XK_BackSpace) x98_edit_backspace(&rename_edit);
                 else if (ks == XK_Delete) x98_edit_delete(&rename_edit);
-                else if (ks == XK_Left && rename_edit.cur > 0) rename_edit.cur--;
+                else if (ks == XK_Left && rename_edit.cur > 0)
+                    rename_edit.cur = x98_u8_prev(rename_edit.buf,
+                                                  rename_edit.cur);
                 else if (ks == XK_Right && rename_edit.cur < rename_edit.len)
-                    rename_edit.cur++;
+                    rename_edit.cur = x98_u8_next(rename_edit.buf,
+                                                  rename_edit.cur,
+                                                  rename_edit.len);
                 else if (ks == XK_Home) rename_edit.cur = 0;
                 else if (ks == XK_End)  rename_edit.cur = rename_edit.len;
                 else if (kn > 0 && (unsigned char)kb[0] >= 0x20)

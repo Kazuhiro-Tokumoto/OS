@@ -19,6 +19,9 @@
 #include <signal.h>
 
 #include "x98.h"
+
+/* 日本語入力の入力文脈。IME が上がっていなければ NULL のまま。 */
+static XIC ic;
 #include "filetypes.h"
 #include <X11/keysym.h>
 
@@ -151,7 +154,9 @@ static int tab = TAB_LOOK;
 #define FT_LIST_X 12
 #define FT_LIST_Y (TAB_H + 26)   /* タブの帯と「〜の一覧」の見出しのぶん空ける */
 #define FT_LIST_W 380
-#define FT_LIST_H 240
+/* FT_LIST_H は freetype の <freetype/ftlist.h> を指す名前と衝突する。
+ * 再定義の警告が出て、本物の警告が埋もれる。名前を変える。 */
+#define FT_LIST_HEIGHT 240
 #define FT_ROW_H  18
 
 static FileType ftypes[FT_MAX];
@@ -366,11 +371,11 @@ static void draw_types(void)
     x98_text(&x98, win, FT_LIST_X, FT_LIST_Y - 16,
              "Registered file types:", x98.text);
 
-    x98_bevel(&x98, win, FT_LIST_X, FT_LIST_Y, FT_LIST_W, FT_LIST_H, 0);
+    x98_bevel(&x98, win, FT_LIST_X, FT_LIST_Y, FT_LIST_W, FT_LIST_HEIGHT, 0);
     x98_fill(&x98, win, FT_LIST_X + 2, FT_LIST_Y + 2,
-             FT_LIST_W - 4, FT_LIST_H - 4, x98.white);
+             FT_LIST_W - 4, FT_LIST_HEIGHT - 4, x98.white);
 
-    int vis = (FT_LIST_H - 4) / FT_ROW_H;
+    int vis = (FT_LIST_HEIGHT - 4) / FT_ROW_H;
     for (int r = 0; r < vis; r++) {
         int i = ft_top + r;
         if (i >= n_ftypes) break;
@@ -386,7 +391,7 @@ static void draw_types(void)
     }
 
     /* 選んでいる種類の中身 */
-    int dy = FT_LIST_Y + FT_LIST_H + 16;
+    int dy = FT_LIST_Y + FT_LIST_HEIGHT + 16;
     if (ft_sel >= 0 && ft_sel < n_ftypes) {
         char buf[256];
         snprintf(buf, sizeof(buf), "Extensions:  %s", ftypes[ft_sel].exts);
@@ -597,6 +602,10 @@ int main(void)
 {
     signal(SIGCHLD, SIG_IGN);
 
+    /* 日本語入力より前にロケールを立てる。X を開いたあとだと
+     * Xlib が古いロケールのまま動いてしまう。 */
+    x98_im_setup_locale();
+
     dpy = XOpenDisplay(NULL);
     if (!dpy) {
         fprintf(stderr, "[myos-settings] cannot open display\n");
@@ -604,6 +613,7 @@ int main(void)
     }
     screen = DefaultScreen(dpy);
     x98_init(&x98, dpy, screen);
+    x98_im_open(&x98);
 
     res_load();                 /* 画面タブ: いまの設定を読んでおく */
 
@@ -633,9 +643,17 @@ int main(void)
 
     XMapWindow(dpy, win);
 
+    /* 窓が出てから入力文脈を作る。窓より先に作ると
+     * XNClientWindow に渡すものが無い。 */
+    ic = x98_ic_new(&x98, win);
+    x98_ic_focus(ic);
+
     for (;;) {
         XEvent ev;
         XNextEvent(dpy, &ev);
+        /* IME が使う鍵はここで吸われる。忘れると
+         * かなも漢字も一生入ってこない。 */
+        if (XFilterEvent(&ev, None)) continue;
 
         switch (ev.type) {
         case Expose:
@@ -664,7 +682,7 @@ int main(void)
             if (tab == TAB_TYPES) {
                 /* 種類の一覧 */
                 if (mx >= FT_LIST_X && mx < FT_LIST_X + FT_LIST_W &&
-                    my >= FT_LIST_Y + 2 && my < FT_LIST_Y + FT_LIST_H - 2) {
+                    my >= FT_LIST_Y + 2 && my < FT_LIST_Y + FT_LIST_HEIGHT - 2) {
                     ft_commit();
                     int i = ft_top + (my - FT_LIST_Y - 2) / FT_ROW_H;
                     if (i >= 0 && i < n_ftypes) ft_pick(i);
@@ -673,7 +691,7 @@ int main(void)
                 }
                 /* ホイールで送る */
                 if (ev.xbutton.button == 4 || ev.xbutton.button == 5) {
-                    int vis = (FT_LIST_H - 4) / FT_ROW_H;
+                    int vis = (FT_LIST_HEIGHT - 4) / FT_ROW_H;
                     ft_top += (ev.xbutton.button == 4) ? -3 : 3;
                     if (ft_top > n_ftypes - vis) ft_top = n_ftypes - vis;
                     if (ft_top < 0) ft_top = 0;
@@ -681,7 +699,7 @@ int main(void)
                     break;
                 }
                 /* 入力欄の行 */
-                int dy = FT_LIST_Y + FT_LIST_H + 16;
+                int dy = FT_LIST_Y + FT_LIST_HEIGHT + 16;
                 if (my >= dy + 22 && my < dy + 42)      ft_field = 0;
                 else if (my >= dy + 50 && my < dy + 70) ft_field = 1;
                 redraw();
@@ -789,7 +807,7 @@ int main(void)
             if (tab != TAB_TYPES) break;
             char buf[32];
             KeySym ks;
-            int n = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &ks, NULL);
+            int n = x98_lookup(ic, &ev.xkey, buf, sizeof(buf), &ks);
             X98Edit *e = ft_field ? &ed_run : &ed_open;
 
             if (ks == XK_Tab)              ft_field ^= 1;
@@ -810,7 +828,7 @@ int main(void)
                 ft_dirty = 1;
             }
             /* 選んだ行が見えるように送る */
-            int vis = (FT_LIST_H - 4) / FT_ROW_H;
+            int vis = (FT_LIST_HEIGHT - 4) / FT_ROW_H;
             if (ft_sel < ft_top) ft_top = ft_sel;
             if (ft_sel >= ft_top + vis) ft_top = ft_sel - vis + 1;
             redraw();

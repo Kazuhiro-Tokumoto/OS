@@ -119,6 +119,16 @@ SOUND="alsa-utils pulseaudio libopenal1"
 # 見た目の話ではなく使えるかどうかの話。
 FONTS="fonts-vlgothic"
 
+# 日本語入力。
+# これまで IME が 1 つも入っておらず、かなも漢字も一切打てなかった。
+#   fcitx5        本体。XIM のサーバも兼ねるので、自作の Xlib アプリからも使える
+#   fcitx5-mozc   変換エンジン。ibus-anthy 経路 (38MB) より小さく質も上
+#   設定 GUI (fcitx5-config-qt) は入れない。Qt を丸ごと引いてくるうえ、
+#   既定のままで使えるので割に合わない
+#   locales       XIM は UTF-8 のロケールでないと動かない
+# 合計 21MB ほど。
+IME="fcitx5 fcitx5-mozc fcitx5-frontend-gtk3 locales"
+
 SECURITY="ufw iptables nftables \
           clamav clamav-freshclam clamav-daemon \
           cron inotify-tools \
@@ -203,6 +213,19 @@ apt_install "音" "--no-install-recommends" $SOUND
 
 echo "=== 日本語フォント ==="
 apt_install "フォント" "--no-install-recommends" $FONTS
+
+echo "=== 日本語入力 ==="
+apt_install "日本語入力" "--no-install-recommends" $IME
+
+# XIM は UTF-8 のロケールでないと動かない。Debian の最小構成には C しか
+# 無いので、ja_JP.UTF-8 を作る。作らずに setlocale すると XSupportsLocale が
+# 偽を返し、日本語入力が黙って死ぬ。
+if [ -f "$WORK/etc/locale.gen" ] || chroot "$WORK" sh -c "command -v locale-gen" >/dev/null 2>&1; then
+    printf 'ja_JP.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\n' > "$WORK/etc/locale.gen"
+    chroot "$WORK" sh -c "locale-gen >/dev/null 2>&1" || true
+    printf 'LANG=ja_JP.UTF-8\n' > "$WORK/etc/default/locale"
+    echo "  ja_JP.UTF-8 / en_US.UTF-8"
+fi
 
 # 証明書。これが無いと HTTPS が全部こけるので、
 # ClamAV の定義取得より先に必ず通しておく。
@@ -540,6 +563,27 @@ EOF
 cat > "$WORK/usr/local/bin/myos-desktop" <<'EOF'
 #!/bin/sh
 # デスクトップ本体。一般ユーザーで動く。
+
+# --- 日本語入力 ---------------------------------------------------------
+# fcitx5 は XIM のサーバも兼ねる。自作の Xlib アプリは XMODIFIERS を見て
+# そこへ繋ぐ (x98.h の x98_im_setup_locale)。GTK の Firefox は
+# GTK_IM_MODULE を見る。両方立てておく。
+#
+# LANG も要る。XIM は UTF-8 のロケールでないと動かない。
+export LANG="${LANG:-ja_JP.UTF-8}"
+export XMODIFIERS="@im=fcitx"
+export GTK_IM_MODULE=fcitx
+export QT_IM_MODULE=fcitx
+
+# fcitx5 は dbus を使う。systemd を使っていないので誰も立てていない。
+# ここでセッションバスを起こす。無いと fcitx5 が黙って死ぬ。
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-launch >/dev/null 2>&1; then
+    eval "$(dbus-launch --sh-syntax --exit-with-session 2>/dev/null)"
+fi
+
+if command -v fcitx5 >/dev/null 2>&1; then
+    fcitx5 -d >/dev/null 2>&1
+fi
 
 # 音。pulseaudio はユーザーごとに 1 つ動く作りなのでここで上げる。
 # Firefox もゲームもまずこれを探す。

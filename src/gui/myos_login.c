@@ -31,6 +31,9 @@
 #include <shadow.h>
 
 #include "x98.h"
+
+/* 日本語入力の入力文脈。IME が上がっていなければ NULL のまま。 */
+static XIC ic;
 #include "myosconf.h"
 
 #define PANEL_W 400
@@ -162,12 +165,17 @@ static void try_login(void)
 
 int main(void)
 {
+    /* 日本語入力より前にロケールを立てる。X を開いたあとだと
+     * Xlib が古いロケールのまま動いてしまう。 */
+    x98_im_setup_locale();
+
     dpy = XOpenDisplay(NULL);
     if (!dpy) { fprintf(stderr, "myos-login: no display\n"); return 1; }
     screen = DefaultScreen(dpy);
     scr_w = DisplayWidth(dpy, screen);
     scr_h = DisplayHeight(dpy, screen);
     x98_init(&x98, dpy, screen);
+    x98_im_open(&x98);
 
     XSetWindowAttributes swa;
     swa.override_redirect = True;
@@ -178,6 +186,11 @@ int main(void)
                         CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
     XStoreName(dpy, win, "myOS Logon");
     XMapRaised(dpy, win);
+
+    /* 窓が出てから入力文脈を作る。窓より先に作ると
+     * XNClientWindow に渡すものが無い。 */
+    ic = x98_ic_new(&x98, win);
+    x98_ic_focus(ic);
     XSetInputFocus(dpy, win, RevertToPointerRoot, CurrentTime);
 
     char du[64];
@@ -189,6 +202,9 @@ int main(void)
     for (;;) {
         XEvent ev;
         XNextEvent(dpy, &ev);
+        /* IME が使う鍵はここで吸われる。忘れると
+         * かなも漢字も一生入ってこない。 */
+        if (XFilterEvent(&ev, None)) continue;
 
         switch (ev.type) {
         case Expose:
@@ -199,7 +215,7 @@ int main(void)
         case KeyPress: {
             char buf[32];
             KeySym ks;
-            int n = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &ks, NULL);
+            int n = x98_lookup(ic, &ev.xkey, buf, sizeof(buf), &ks);
             X98Edit *e = field ? &ed_pw : &ed_user;
 
             if (ks == XK_Return || ks == XK_KP_Enter) {

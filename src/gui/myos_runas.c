@@ -30,6 +30,9 @@
 
 #include "x98.h"
 
+/* 日本語入力の入力文脈。IME が上がっていなければ NULL のまま。 */
+static XIC ic;
+
 #define WIN_W 420
 #define WIN_H 190
 
@@ -162,10 +165,15 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc && sn < 62; i++) sargv[sn++] = argv[i];
     sargv[sn] = NULL;
 
+    /* 日本語入力より前にロケールを立てる。X を開いたあとだと
+     * Xlib が古いロケールのまま動いてしまう。 */
+    x98_im_setup_locale();
+
     dpy = XOpenDisplay(NULL);
     if (!dpy) { fprintf(stderr, "myos-runas: no display\n"); return 1; }
     screen = DefaultScreen(dpy);
     x98_init(&x98, dpy, screen);
+    x98_im_open(&x98);
 
     win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 0, 0,
                               WIN_W, WIN_H, 0, x98.shadow, x98.face);
@@ -183,11 +191,19 @@ int main(int argc, char **argv)
 
     XMapRaised(dpy, win);
 
+    /* 窓が出てから入力文脈を作る。窓より先に作ると
+     * XNClientWindow に渡すものが無い。 */
+    ic = x98_ic_new(&x98, win);
+    x98_ic_focus(ic);
+
     x98_edit_set(&pw, "");
 
     for (;;) {
         XEvent ev;
         XNextEvent(dpy, &ev);
+        /* IME が使う鍵はここで吸われる。忘れると
+         * かなも漢字も一生入ってこない。 */
+        if (XFilterEvent(&ev, None)) continue;
 
         switch (ev.type) {
         case Expose:
@@ -201,7 +217,7 @@ int main(int argc, char **argv)
         case KeyPress: {
             char buf[32];
             KeySym ks;
-            int n = XLookupString(&ev.xkey, buf, sizeof(buf) - 1, &ks, NULL);
+            int n = x98_lookup(ic, &ev.xkey, buf, sizeof(buf), &ks);
 
             if (ks == XK_Return || ks == XK_KP_Enter) {
                 if (try_run(sargv)) goto out;

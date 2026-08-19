@@ -14,6 +14,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xft/Xft.h>
 #include <X11/Xutil.h>
+#include <locale.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +65,12 @@ typedef struct {
     XftFont *xfont;
     XftDraw *xdraw;         /* 直近の描画先ぶんだけ持っておく */
     Drawable xdraw_for;
+
+    /* 日本語入力。fcitx が XIM のサーバになる。
+     * XLookupString は ASCII しか返さないので、これを通さないと
+     * かなも漢字も一生入らない。開けなければ NULL のままで、
+     * 従来どおり ASCII だけが入る。 */
+    XIM      xim;
     int      truecolor;
     int      r_shift, g_shift, b_shift;
     int      r_bits, g_bits, b_bits;
@@ -238,6 +245,81 @@ static inline void x98_apply(X98 *x)
                              fb + 90 > 255 ? 255 : fb + 90);
     x->shadow   = x98_rgb(x, fr / 2, fg / 2, fb / 2);
     x->dkshadow = x98_rgb24(x, 0x000000);
+}
+
+/* --- 日本語入力 (XIM) ---------------------------------------------------
+ *
+ * 自作アプリは XLookupString でキーを読んでいた。あれは 1 バイトの文字しか
+ * 返さないので、IME を入れてもかなや漢字は一切入ってこない。
+ * XIM を通す必要がある。使う側の手順は 4 つ。
+ *
+ *   1. main の頭で x98_im_setup_locale()   (X を開くより前)
+ *   2. x98_init のあとで x98_im_open()
+ *   3. 窓ごとに x98_ic_new() で入力文脈を作り、x98_ic_focus()
+ *   4. 取り出しの輪で
+ *        if (XFilterEvent(&ev, None)) continue;      ← これが要
+ *        n = x98_lookup(ic, &ev.xkey, buf, sizeof buf, &ks);
+ *
+ * XFilterEvent を忘れると、押した鍵が IME に渡らず変換窓すら出ない。
+ * 一番はまりやすいところ。
+ *
+ * 変換窓は fcitx が自分で描く (PreeditNothing / StatusNothing)。
+ * こちらで下線付きの未確定文字列を描く必要が無く、作りが単純になる。
+ * ========================================================================= */
+
+/* ロケールを立てる。UTF-8 でないと XIM は動かない。
+ * X を開く前に呼ぶこと。後だと Xlib が古いロケールのまま動く。 */
+static inline void x98_im_setup_locale(void)
+{
+    if (!setlocale(LC_ALL, "")) setlocale(LC_ALL, "C.UTF-8");
+    /* 使う入力方式は環境変数 XMODIFIERS で決まる (@im=fcitx)。
+     * 空文字を渡すとそれを見に行く。 */
+    if (!XSupportsLocale()) {
+        setlocale(LC_ALL, "C.UTF-8");
+    }
+    XSetLocaleModifiers("");
+}
+
+static inline void x98_im_open(X98 *x)
+{
+    x->xim = XOpenIM(x->dpy, NULL, NULL, NULL);
+    /* 開けなくても続ける。IME が上がっていないだけで、
+     * ASCII は従来どおり入る。ここで止めるほうが困る。 */
+}
+
+static inline XIC x98_ic_new(X98 *x, Window w)
+{
+    if (!x->xim) return NULL;
+    return XCreateIC(x->xim,
+                     XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+                     XNClientWindow, w,
+                     XNFocusWindow, w,
+                     NULL);
+}
+
+static inline void x98_ic_focus(XIC ic)
+{
+    if (ic) XSetICFocus(ic);
+}
+
+/* XLookupString の置き換え。IC があれば UTF-8 で取り出す。
+ * buf は必ず 0 終端して返す。 */
+static inline int x98_lookup(XIC ic, XKeyEvent *ev, char *buf, int n,
+                             KeySym *ks)
+{
+    int got;
+    if (ic) {
+        Status st = 0;
+        got = Xutf8LookupString(ic, ev, buf, n - 1, ks, &st);
+        if (st == XBufferOverflow) got = n - 1;
+        /* 変換の途中など、鍵記号を返さない場合がある */
+        if (st != XLookupKeySym && st != XLookupBoth) *ks = NoSymbol;
+    } else {
+        got = XLookupString(ev, buf, n - 1, ks, NULL);
+    }
+    if (got < 0) got = 0;
+    buf[got] = 0;
+    return got;
 }
 
 static inline void x98_init(X98 *x, Display *dpy, int screen)
@@ -442,6 +524,26 @@ static inline void x98_edit_set(X98Edit *e, const char *s)
 }
 
 /* 文字を挿す / 消す。戻り値は内容が変わったか。 */
+/* --- UTF-8 の境目 -------------------------------------------------------
+ * 日本語を入れられるようになったので、1 バイトずつ消していると
+ * 3 バイトの文字の途中で切れて壊れる。継続バイト (10xxxxxx) を
+ * またいで動く。 */
+static inline int x98_u8_prev(const char *s, int i)
+{
+    if (i <= 0) return 0;
+    i--;
+    while (i > 0 && ((unsigned char)s[i] & 0xC0) == 0x80) i--;
+    return i;
+}
+
+static inline int x98_u8_next(const char *s, int i, int len)
+{
+    if (i >= len) return len;
+    i++;
+    while (i < len && ((unsigned char)s[i] & 0xC0) == 0x80) i++;
+    return i;
+}
+
 static inline int x98_edit_insert(X98Edit *e, const char *s, int n)
 {
     if (n <= 0) return 0;
@@ -457,9 +559,11 @@ static inline int x98_edit_insert(X98Edit *e, const char *s, int n)
 static inline int x98_edit_backspace(X98Edit *e)
 {
     if (e->cur <= 0) return 0;
-    memmove(e->buf + e->cur - 1, e->buf + e->cur, e->len - e->cur);
-    e->len--;
-    e->cur--;
+    int p = x98_u8_prev(e->buf, e->cur);
+    int n = e->cur - p;
+    memmove(e->buf + p, e->buf + e->cur, e->len - e->cur);
+    e->len -= n;
+    e->cur = p;
     e->buf[e->len] = 0;
     return 1;
 }
@@ -467,8 +571,10 @@ static inline int x98_edit_backspace(X98Edit *e)
 static inline int x98_edit_delete(X98Edit *e)
 {
     if (e->cur >= e->len) return 0;
-    memmove(e->buf + e->cur, e->buf + e->cur + 1, e->len - e->cur - 1);
-    e->len--;
+    int q = x98_u8_next(e->buf, e->cur, e->len);
+    int n = q - e->cur;
+    memmove(e->buf + e->cur, e->buf + q, e->len - q);
+    e->len -= n;
     e->buf[e->len] = 0;
     return 1;
 }
