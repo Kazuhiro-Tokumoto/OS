@@ -276,6 +276,18 @@ static int apply_all(void)
     FILE *f = fopen("/etc/timezone", "w");
     if (f) { fprintf(f, "%s\n", tz_name[tz]); fclose(f); }
 
+    /* 時計を読み直す。
+     *
+     * myos-init は起動の早い段階で hwclock --hctosys を呼ぶが、
+     * 初回起動のときはまだ /etc/localtime が無い。無いと libc は UTC と
+     * みなすので、本体の時計に入っているローカル時刻を UTC として
+     * 読んでしまい、日本だと 9 時間進んだ時刻になる。
+     * (次の起動では直るが、初回だけずれたままになる)
+     *
+     * タイムゾーンが決まったこの場で読み直せば、その場で合う。 */
+    char *hc[] = { "hwclock", "--hctosys", NULL };
+    run(hc);
+
     /* キーボード配列。
      *
      * ここは 3 つに書く。1 つでは足りないことを実際に踏んだ。
