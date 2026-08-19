@@ -112,7 +112,8 @@ NET="iproute2 isc-dhcp-client $WIFI"
 # ALSA は初期状態でミュートになっている機械が多く、
 # 「音が出ない = 壊れている」と誤解される。
 # pulseaudio は Firefox とゲームがまず前提にしているので入れる。
-SOUND="alsa-utils pulseaudio libopenal1"
+# pulseaudio-utils は pactl のため。出口の選び直しに使う。
+SOUND="alsa-utils pulseaudio pulseaudio-utils libopenal1"
 
 # 日本語の字形。
 # 無いと日本語が全部豆腐になる。ファイル名もメモ帳も化けるので、
@@ -140,7 +141,8 @@ SECURITY="ufw iptables nftables \
 # Debian では non-free-firmware コンポーネントに入っている。
 FIRMWARE="firmware-linux-free firmware-misc-nonfree firmware-realtek \
           firmware-iwlwifi firmware-atheros firmware-brcm80211 \
-          firmware-amd-graphics firmware-intel-sound"
+          firmware-amd-graphics firmware-intel-sound \
+          firmware-sof-signed"
 
 echo "=== 要らなくなったものを外す ==="
 # ビルドは既存のルートに上書きしていくので、
@@ -369,7 +371,7 @@ if [ -x /lib/systemd/systemd-udevd ]; then
 fi
 say .
 
-# --- 無線ドライバを繋ぎ直す -----------------------------------------------
+# --- ファームウェアが要るドライバを繋ぎ直す -------------------------------
 # .ko を全て =y にしてある副作用で、PCI の probe はルートのマウントより
 # 先に走る。実測で 0.3 秒ほど早い。
 #
@@ -381,14 +383,21 @@ say .
 # 無線はここで bind し直すだけで済む。もうルートが見えているので
 # /lib/firmware から普通に読める。initramfs に積むと 36MB が 92MB になり、
 # ブートローダーが読む時間だけで 14 秒延びたので、こちらを採る。
-rebind_wifi() {
+#
+# SOF (最近のノートの音源) も同じ事情なので一緒に扱う。あちらは
+# intel/sof/*.ri と音の配線図 (topology) を probe で読む。
+rebind_late() {
     for bus in pci usb; do
         for drv in /sys/bus/$bus/drivers/*; do
             [ -d "$drv" ] || continue
             case "${drv##*/}" in
                 iwlwifi|ath9k|ath9k_htc|ath10k_pci|ath11k_pci|\
                 rtw_8822be|rtw_8822ce|rtw88_pci|rtw89_pci|rtl8xxxu|\
-                brcmfmac|b43|mt7601u|mt7921e|rt2800pci|rt2800usb|rt73usb) ;;
+                brcmfmac|b43|mt7601u|mt7921e|rt2800pci|rt2800usb|rt73usb|\
+                sof-audio-pci-intel-tgl|sof-audio-pci-intel-cnl|\
+                sof-audio-pci-intel-apl|sof-audio-pci-intel-icl|\
+                sof-audio-pci-intel-mtl|snd_sof_amd_renoir|\
+                snd_sof_amd_rembrandt) ;;
                 *) continue ;;
             esac
             for dev in "$drv"/*:*; do
@@ -401,7 +410,7 @@ rebind_wifi() {
         done
     done
 }
-rebind_wifi
+rebind_late
 say .
 
 # --- ネットワーク -------------------------------------------------------
@@ -475,10 +484,19 @@ if [ -x /usr/sbin/alsactl ]; then
 fi
 if [ -x /usr/bin/amixer ] && [ -r /proc/asound/cards ]; then
     for c in $(sed -n 's/^ *\([0-9]\+\) .*/\1/p' /proc/asound/cards); do
-        for ctl in Master PCM Speaker Headphone Front; do
-            amixer -c "$c" sset "$ctl" unmute >/dev/null 2>&1
+        # 音量も一緒に上げる。ミュートを外しただけで 0% のままだと、
+        # 「鳴らない」という同じ結果になる。AC97 は PCM が別系統なので
+        # Master だけ上げても出ない。
+        for ctl in Master PCM Speaker Headphone Front "Master Mono" \
+                   "Line Out" "Digital" "Speaker+LO" "PCM Out"; do
+            amixer -c "$c" sset "$ctl" unmute  >/dev/null 2>&1
+            amixer -c "$c" sset "$ctl" 80%     >/dev/null 2>&1
         done
-        amixer -c "$c" sset Master 80% >/dev/null 2>&1
+        # ノートによっては、挿していないヘッドホンを検出したことにして
+        # スピーカーを黙らせる設定が既定で入っている。
+        amixer -c "$c" sset "Auto-Mute Mode" Disabled >/dev/null 2>&1
+        # AC97 の外部アンプ。切れていると何をしても出ない。
+        amixer -c "$c" sset "External Amplifier" unmute >/dev/null 2>&1
     done
 fi
 
@@ -611,6 +629,21 @@ fi
 # 落ちたあと再生しようとしたアプリが黙って無音になるのを防ぐ。
 if command -v pulseaudio >/dev/null 2>&1; then
     pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1
+
+    # 画面と音の出口が別々にあると、pulseaudio が HDMI のほうを既定に
+    # することがある。挿していないケーブルへ流れるので、本体の
+    # スピーカーからは何も聞こえない。実機でよくある「音が出ない」の
+    # 正体がこれ。HDMI 以外の出口があれば、そちらへ寄せる。
+    if command -v pactl >/dev/null 2>&1; then
+        cur=$(pactl get-default-sink 2>/dev/null)
+        case "$cur" in
+            *hdmi*|*HDMI*)
+                alt=$(pactl list short sinks 2>/dev/null |
+                      awk '$2 !~ /hdmi|HDMI/ { print $2; exit }')
+                [ -n "$alt" ] && pactl set-default-sink "$alt" >/dev/null 2>&1
+                ;;
+        esac
+    fi
 fi
 
 # 落としてきたファイルをその場で検査する常駐。

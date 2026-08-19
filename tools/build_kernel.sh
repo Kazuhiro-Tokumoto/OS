@@ -209,11 +209,62 @@ if [ "${MONOLITHIC:-1}" = "1" ]; then
         ./scripts/config --enable $o
     done
 
-    # --- サウンド ---
-    for o in SOUND SND SND_PCM SND_HDA_INTEL SND_HDA_GENERIC \
+    # --- サウンド -----------------------------------------------------------
+    # 音まわりは大きく 3 つの世代に分かれていて、どれか 1 つでも欠けると
+    # その世代の機械で「音が出ない」ことになる。HD Audio しか入れて
+    # いなかったため、VirtualBox (ICH AC97) でも最近のノート (SOF) でも
+    # 鳴らなかった。
+    #
+    #   1. AC97 と各社の PCI 音源 (1998-2006)
+    #      Core 2 Duo 世代の実機。VirtualBox の既定もここ (ICH AC97)。
+    #   2. HD Audio (2004-)
+    #      いま普通の PC。VirtualBox の "Intel HD Audio" もここ。
+    #   3. SOF / ASoC (2018-)
+    #      最近のノート。音源が I2S の codec で HDA が無い機種。
+    #      別途 firmware-sof-signed が要る。
+
+    # 芯
+    for o in SOUND SND SND_PCM SND_TIMER SND_HRTIMER SND_PCI SND_DRIVERS \
+             SND_SEQUENCER SND_SEQ_DUMMY SND_USB_AUDIO SND_INTEL_DSP_CONFIG \
+             SND_VIRTIO SND_DUMMY; do
+        ./scripts/config --enable $o
+    done
+
+    # 1. AC97 と PCI 音源
+    #    SND_INTEL8X0 が VirtualBox の ICH AC97。これが無かったのが
+    #    「音が出ない」の直接の原因。
+    for o in SND_INTEL8X0 SND_INTEL8X0M SND_ENS1370 SND_ENS1371 \
+             SND_VIA82XX SND_VIA82XX_MODEM SND_ATIIXP SND_ATIIXP_MODEM \
+             SND_CMIPCI SND_EMU10K1 SND_EMU10K1X SND_ALS4000 SND_YMFPCI \
+             SND_ES1938 SND_ES1968 SND_MAESTRO3 SND_FM801 SND_TRIDENT \
+             SND_ALI5451 SND_NM256 SND_AZT3328 SND_SONICVIBES \
+             SND_AU8810 SND_AU8820 SND_AU8830 SND_RIPTIDE \
+             SND_OXYGEN SND_VIRTUOSO SND_BT87X SND_CS4281 SND_CS46XX; do
+        ./scripts/config --enable $o
+    done
+
+    # 2. HD Audio
+    for o in SND_HDA SND_HDA_INTEL SND_HDA_GENERIC SND_HDA_HWDEP \
+             SND_HDA_RECONFIG SND_HDA_PATCH_LOADER \
              SND_HDA_CODEC_REALTEK SND_HDA_CODEC_ANALOG SND_HDA_CODEC_HDMI \
              SND_HDA_CODEC_VIA SND_HDA_CODEC_CONEXANT SND_HDA_CODEC_CIRRUS \
-             SND_HDA_CODEC_SIGMATEL SND_USB_AUDIO SND_INTEL_DSP_CONFIG; do
+             SND_HDA_CODEC_SIGMATEL SND_HDA_CODEC_CA0132 \
+             SND_HDA_CODEC_CMEDIA SND_HDA_CODEC_SI3054; do
+        ./scripts/config --enable $o
+    done
+
+    # 3. SOF / ASoC
+    for o in SND_SOC SND_SOC_SOF_TOPLEVEL SND_SOC_SOF_PCI SND_SOC_SOF_ACPI \
+             SND_SOC_SOF_INTEL_TOPLEVEL SND_SOC_SOF_HDA_LINK \
+             SND_SOC_SOF_HDA_AUDIO_CODEC \
+             SND_SOC_SOF_APOLLOLAKE SND_SOC_SOF_CANNONLAKE \
+             SND_SOC_SOF_COMETLAKE SND_SOC_SOF_ICELAKE \
+             SND_SOC_SOF_TIGERLAKE SND_SOC_SOF_ALDERLAKE \
+             SND_SOC_SOF_METEORLAKE \
+             SND_SOC_INTEL_MACH SND_SOC_INTEL_SKL_HDA_DSP_GENERIC_MACH \
+             SND_SOC_INTEL_SOUNDWIRE_SOF_MACH \
+             SND_SOC_AMD_ACP SND_SOC_AMD_ACP3x SND_SOC_AMD_RENOIR_MACH \
+             SND_SOC_AMD_ACP6x; do
         ./scripts/config --enable $o
     done
 
