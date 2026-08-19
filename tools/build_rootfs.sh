@@ -304,6 +304,23 @@ cat > "$WORK/etc/sudoers.d/myos" <<'EOF'
 EOF
 chmod 440 "$WORK/etc/sudoers.d/myos"
 
+# --- 時計 -------------------------------------------------------------------
+# 本体の時計 (RTC) に何が入っているかは OS ごとの取り決めで、
+#   Windows  ローカル時刻
+#   Linux    UTC
+# と割れている。myOS は 98 の顔をしているので、載っている機械の RTC は
+# ほぼ間違いなく Windows が書いたローカル時刻になっている。VirtualBox も
+# 既定でホストのローカル時刻を渡してくる。
+#
+# 何も書かないと Linux 側の既定 (UTC) で読むので、日本だと 9 時間ずれる。
+# 実際 VirtualBox で 21:46 が 06:46 と出ていた。
+mkdir -p "$WORK/etc"
+cat > "$WORK/etc/adjtime" <<'EOF'
+0.0 0 0.0
+0
+LOCAL
+EOF
+
 echo "=== myOS の起動スクリプト ==="
 # systemd は使わない。カーネルに init=/myos-init を渡して、
 # 必要なものだけ自分で用意してから X を上げる。
@@ -329,6 +346,14 @@ mount -t tmpfs    tmpfs    /tmp
 mount -o remount,rw /
 
 hostname myos
+
+# 本体の時計を読む。/etc/adjtime の LOCAL を見て、ローカル時刻として
+# 解釈してくれる。systemd を使っていないので、これを呼ばないと誰も
+# やらない。カーネルが起動時に入れた値は UTC 扱いのままで、日本だと
+# 9 時間進んだ時刻になる。
+#
+# 記録の時刻がずれると追いかけるのが面倒なので、ログを書き始める前にやる。
+hwclock --hctosys 2>/dev/null || true
 
 # --- 起動中の画面 ---------------------------------------------------------
 # ここから先の出力は画面に出さず BOOTLOG.TXT に残す。98 と同じ考え方で、
