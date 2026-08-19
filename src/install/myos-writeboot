@@ -61,6 +61,26 @@ def align_up(lba):
     return (lba + ALIGN - 1) // ALIGN * ALIGN
 
 
+def boot_area_sectors(disk, boot_lba):
+    """生領域として使うパーティションのセクタ数を MBR から読む。
+    見つからなければ 0 を返す (その場合は検査しない)。"""
+    try:
+        with open(disk, "rb") as f:
+            mbr = f.read(SECTOR)
+    except OSError:
+        return 0
+    if len(mbr) < SECTOR or mbr[510:512] != b"\x55\xAA":
+        return 0
+    for i in range(4):
+        e = mbr[PART_TABLE_OFF + i * 16:PART_TABLE_OFF + (i + 1) * 16]
+        if not e[4]:
+            continue
+        start, count = struct.unpack_from("<II", e, 8)
+        if start == boot_lba:
+            return count
+    return 0
+
+
 def main():
     if len(sys.argv) < 4:
         die("usage: myos-writeboot <disk> <rootdev> <boot_area_lba> [initrd]")
@@ -110,13 +130,14 @@ def main():
     else:
         i_lba, i_cnt = 0, 0
 
-    # 生領域はパーティション 1 の 128MB (myos_install_text.c の do_partition)。
-    # カーネル 20MB + ファーム 35MB でも収まるが、はみ出せば次の
-    # パーティション = ルートの中身を潰すことになる。必ず確かめる。
-    BOOT_AREA_SECTORS = 128 * 1024 * 1024 // SECTOR
+    # 生領域の大きさは決め打ちにせず、パーティションテーブルから読む。
+    # 決め打ちにすると、あとで容量を変えたときに片方だけ直して食い違う。
+    # (古い 128MB の入れ方に上書きする場合もあるので、実物を見るのが確実)
+    area = boot_area_sectors(disk, boot_lba)
     used = lba - align_up(boot_lba)
-    if used > BOOT_AREA_SECTORS:
-        die(f"生領域 128MB に収まりません ({used * SECTOR // 1048576}MB 必要)")
+    if area and used > area:
+        die(f"生領域 {area * SECTOR // 1048576}MB に収まりません "
+            f"({used * SECTOR // 1048576}MB 必要)")
 
     # Stage2 は initramfs を 0x08000000 (128MB) へ読み込む。カーネルが
     # 展開に使う領域 (setup ヘッダの init_size) とぶつかると、伸ばした

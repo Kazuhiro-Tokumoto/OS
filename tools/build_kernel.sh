@@ -186,13 +186,26 @@ if [ "${MONOLITHIC:-1}" = "1" ]; then
         ./scripts/config --enable $o
     done
 
-    # --- 無線 LAN (ファームウェアが別途要る点に注意) ---
+    # --- 無線 LAN ---
+    # ファームウェアは別途要る。しかも組み込み (=y) なので probe が
+    # ルートのマウントより先に走る。initramfs に入れないと読めない
+    # (myos-mkfwinit)。
+    #
+    # WiFi6 世代を足した。2020 年以降のノートはほぼこのどれかで、
+    # 入っていないと「無線が一切見えない」ことになる。
+    #   ATH11K      Qualcomm WCN685x / QCA6390 など
+    #   MT7921E     MediaTek。AMD のノートに多い
+    #   RTW89       Realtek 8852 系
+    #   BRCMFMAC_PCIE  Broadcom の PCIe 接続 (Mac 系)
     for o in WLAN CFG80211 MAC80211 WLAN_VENDOR_INTEL IWLWIFI IWLMVM IWLDVM \
-             WLAN_VENDOR_ATH ATH9K ATH9K_PCI ATH10K ATH10K_PCI \
+             WLAN_VENDOR_ATH ATH9K ATH9K_PCI ATH9K_HTC ATH10K ATH10K_PCI \
+             ATH11K ATH11K_PCI \
              WLAN_VENDOR_REALTEK RTW88 RTW88_8822BE RTW88_8822CE RTL8XXXU \
+             RTW89 RTW89_8852AE RTW89_8852BE RTW89_8852CE \
              WLAN_VENDOR_BROADCOM B43 BRCMSMAC BRCMFMAC \
-             WLAN_VENDOR_RALINK RT2800PCI RT2800USB \
-             WLAN_VENDOR_MEDIATEK MT7601U; do
+             BRCMFMAC_PCIE BRCMFMAC_USB \
+             WLAN_VENDOR_RALINK RT2800PCI RT2800USB RT73USB \
+             WLAN_VENDOR_MEDIATEK MT7601U MT7921E MT7921S MT7921U; do
         ./scripts/config --enable $o
     done
 

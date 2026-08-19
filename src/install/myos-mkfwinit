@@ -41,7 +41,26 @@
 # ============================================================================
 set -e
 
-FWSET="amdgpu radeon nvidia i915"
+# 入れるもの。ディレクトリ名か、firmware の直下に置くファイルの glob。
+#
+# GPU だけを入れる。ドライバは組み込み (=y) なので probe がルートの
+# マウントより先に走り、ここに無いとファームを読めない。実測:
+#
+#   [    1.863217] calling  radeon_module_init  @ 1
+#   [    2.993505] VFS: Cannot open root device
+#
+# 無線は入れない。同じ問題を抱えているが、こちらは起動後に
+# sysfs で bind し直せば済む (myos-init の rebind_wifi)。画面と違って
+# やり直しても誰も困らないので、90MB を initramfs に積む必要が無い。
+# 実際に積んでみたら 36MB -> 92MB になり、ブートローダーが INT13h で
+# 読む時間だけで 14 秒延びた。
+#
+# regulatory.db だけは例外で入れる。これは cfg80211 が自分の初期化で
+# 一度だけ要求するもので、デバイスに紐づいていないため bind し直せない。
+# 数 KB しかないので入れても増えない。署名付き
+# (CFG80211_REQUIRE_SIGNED_REGDB=y) なので .p7s も一緒に。
+FWSET="amdgpu radeon nvidia i915
+       regulatory.db regulatory.db.p7s"
 
 usage() { echo "usage: myos-mkfwinit <rootdir> <out.cpio.gz>" >&2; exit 2; }
 
@@ -64,11 +83,20 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/lib/firmware"
 
 found=0
-for d in $FWSET; do
-    [ -d "$FWSRC/$d" ] || continue
-    # -a でシンボリックリンクはリンクのまま持ってくる。
-    cp -a "$FWSRC/$d" "$WORK/lib/firmware/$d"
-    found=1
+for pat in $FWSET; do
+    # ディレクトリなら丸ごと、そうでなければ glob として展開する。
+    # iwlwifi は firmware の直下に 55 個のファイルとして置かれていて、
+    # ディレクトリになっていない。
+    if [ -d "$FWSRC/$pat" ]; then
+        cp -a "$FWSRC/$pat" "$WORK/lib/firmware/$pat"
+        found=1
+        continue
+    fi
+    for f in $FWSRC/$pat; do
+        [ -e "$f" ] || continue         # 展開できなければ glob のまま来る
+        cp -a "$f" "$WORK/lib/firmware/"
+        found=1
+    done
 done
 [ "$found" = 1 ] || { echo "myos-mkfwinit: 入れるものがありません" >&2; exit 1; }
 

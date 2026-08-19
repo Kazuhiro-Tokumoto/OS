@@ -97,7 +97,15 @@ INSTALLER="fdisk parted squashfs-tools dosfstools e2fsprogs zstd cpio"
 # リンクを上げる道具 (ip) と DHCP クライアントは自前で持つ必要がある。
 # これが無いと「デスクトップは出るのに Firefox が何も開けない」という、
 # 原因の分かりにくい状態になる。実際そうなった。
-NET="iproute2 isc-dhcp-client"
+# 無線は別立てにする。
+#   wpasupplicant  暗号化された AP に繋ぐのに要る。これが無いと
+#                  ドライバが動いていても一切繋がらない
+#   iw             AP を探す (scan) / 状態を見る
+#   wireless-regdb regulatory.db。CFG80211_REQUIRE_SIGNED_REGDB=y なので
+#                  これが無いとチャンネルが world ロックのままになる
+WIFI="wpasupplicant iw wireless-regdb rfkill"
+
+NET="iproute2 isc-dhcp-client $WIFI"
 
 # 音。
 # alsa-utils が要るのは再生のためだけでなく、ミュートを外すため。
@@ -329,6 +337,41 @@ if [ -x /lib/systemd/systemd-udevd ]; then
     udevadm trigger --action=add >/dev/null 2>&1
     udevadm settle --timeout=10 >/dev/null 2>&1
 fi
+say .
+
+# --- 無線ドライバを繋ぎ直す -----------------------------------------------
+# .ko を全て =y にしてある副作用で、PCI の probe はルートのマウントより
+# 先に走る。実測で 0.3 秒ほど早い。
+#
+#   [  2.864773] Direct firmware load for regulatory.db failed
+#   [  3.158288] EXT4-fs (sda2): mounted filesystem      ← ルートはここ
+#
+# そのため無線のファームウェアが読めず、カードが上がってこない。
+# GPU は画面を持っているので initramfs にファームを入れて解いたが、
+# 無線はここで bind し直すだけで済む。もうルートが見えているので
+# /lib/firmware から普通に読める。initramfs に積むと 36MB が 92MB になり、
+# ブートローダーが読む時間だけで 14 秒延びたので、こちらを採る。
+rebind_wifi() {
+    for bus in pci usb; do
+        for drv in /sys/bus/$bus/drivers/*; do
+            [ -d "$drv" ] || continue
+            case "${drv##*/}" in
+                iwlwifi|ath9k|ath9k_htc|ath10k_pci|ath11k_pci|\
+                rtw_8822be|rtw_8822ce|rtw88_pci|rtw89_pci|rtl8xxxu|\
+                brcmfmac|b43|mt7601u|mt7921e|rt2800pci|rt2800usb|rt73usb) ;;
+                *) continue ;;
+            esac
+            for dev in "$drv"/*:*; do
+                [ -e "$dev" ] || continue
+                id="${dev##*/}"
+                echo "$id" > "$drv/unbind" 2>/dev/null || continue
+                echo "$id" > "$drv/bind"   2>/dev/null
+                echo "[myos-init] rebound $id (${drv##*/})"
+            done
+        done
+    done
+}
+rebind_wifi
 say .
 
 # --- ネットワーク -------------------------------------------------------

@@ -420,7 +420,7 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
     fflush(stdout);
 
     /* どちらの入れ方でも同じ形にする。
-     *   1 つ目 … カーネルを生で置く場所 (128MB)。ファイルシステムは作らない
+     *   1 つ目 … カーネルを生で置く場所 (256MB)。ファイルシステムは作らない
      *   2 つ目 … ルート (ext4)
      *
      * ブートローダーは ext4 を読めないので、カーネルは生のセクタに置く。
@@ -433,7 +433,10 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
         fp = popen(cmd, "w");
         if (!fp) return 0;
         fprintf(fp, "label: dos\n");
-        fprintf(fp, ",128M,83,*\n");   /* 1: カーネル置き場 */
+        /* 256MB。カーネル 20MB のほかに、GPU と無線のファームウェアを
+         * 詰めた initramfs (90MB 前後) が入る。128MB でも今は収まるが
+         * 余裕が 16MB しか無く、ファームが増えるたびに危うくなる。 */
+        fprintf(fp, ",256M,83,*\n");   /* 1: カーネル置き場 */
         fprintf(fp, ",,83\n");         /* 2: ルート */
         int rc = pclose(fp);
         if (rc != 0) { fail_page("sfdisk", rc); return 0; }
@@ -443,7 +446,7 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
         snprintf(cmd, sizeof(cmd), "sfdisk --append %s >/dev/null 2>&1", dev);
         fp = popen(cmd, "w");
         if (!fp) return 0;
-        fprintf(fp, ",128M,83\n");
+        fprintf(fp, ",256M,83\n");
         fprintf(fp, ",,83\n");
         int rc = pclose(fp);
         if (rc != 0) { fail_page("sfdisk --append", rc); return 0; }
