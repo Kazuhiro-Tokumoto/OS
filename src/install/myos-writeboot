@@ -135,7 +135,15 @@ def main():
     #
     #   実機        i915 / amdgpu / nouveau が動き GPU 支援が効く
     #   VirtualBox  vmwgfx が出てこないので simpledrm が画面を持つ
-    cmdline = (f"console=tty0 initcall_blacklist=vmw_pci_driver_init "
+    # quiet と loglevel=3 を必ず付ける。既定の CONSOLE_LOGLEVEL_DEFAULT は
+    # 7 なので、これが無いとカーネルのログが起動中ずっと流れ続ける。
+    # 98 の起動画面に文字が滝のように出てくるのはおかしい。
+    # 消えたログは dmesg で見られるし、init 側は BOOTLOG.TXT に残す。
+    #
+    # vt.global_cursor_default=0 はカーソルの点滅を止める。
+    # X が上がるまでの数秒、左上でカーソルが点滅しているのが見えてしまう。
+    cmdline = (f"console=tty0 quiet loglevel=3 vt.global_cursor_default=0 "
+               f"initcall_blacklist=vmw_pci_driver_init "
                f"root={rootdev} rootfstype=ext4 rw "
                f"init=/myos-init")
     cmd = cmdline.encode("ascii", "replace")

@@ -290,6 +290,26 @@ mount -o remount,rw /
 
 hostname myos
 
+# --- 起動中の画面 ---------------------------------------------------------
+# ここから先の出力は画面に出さず BOOTLOG.TXT に残す。98 と同じ考え方で、
+# 普段は静かに上げて、おかしいときだけ後からログを読む。
+# カーネル側は cmdline の quiet loglevel=3 で黙らせてある。
+#
+# fd 3 と 4 に元のコンソールを取っておく。X が落ちたときだけ、
+# ここへ戻して理由を画面に出す。黙って真っ黒のまま止まるのが一番困る。
+BOOTLOG=/var/log/bootlog.txt
+mkdir -p /var/log
+exec 3>&1 4>&2
+: > "$BOOTLOG"
+exec >>"$BOOTLOG" 2>&1
+
+# 画面には点だけ出す。ブートローダーと installer の initramfs が
+# 同じ調子で点を回しているので、そこから続いているように見せる。
+say() { printf '%s' "$1" >&3; }
+
+say '
+  Starting myOS '
+
 # udev を上げる。これが無いと X が入力デバイスを見つけられず、
 # マウスもキーボードも効かない画面になる (症状が地味なので注意)。
 # systemd は使わないが、udevd 単体なら普通に動く。
@@ -298,6 +318,7 @@ if [ -x /lib/systemd/systemd-udevd ]; then
     udevadm trigger --action=add >/dev/null 2>&1
     udevadm settle --timeout=10 >/dev/null 2>&1
 fi
+say .
 
 # --- ネットワーク -------------------------------------------------------
 # systemd も NetworkManager も使っていないので、ここで自分で上げる。
@@ -366,15 +387,24 @@ fi
 
 # USB メモリなどを自動でマウントする常駐を上げる
 /usr/local/bin/myos-automount &
+say .
 
 echo "[myos-init] input devices:"
 ls /dev/input 2>&1
 echo "[myos-init] framebuffer:"
 ls -l /dev/fb* 2>&1
 echo "[myos-init] starting X on the framebuffer set up by our bootloader"
+say .
 /usr/bin/xinit /myos-session -- /usr/bin/X :0 vt1 -nolisten tcp -novtswitch -logverbose 6
-echo "[myos-init] X exited with $?. Xorg log follows:"
+rc=$?
+
+# ここから先は「X が落ちた」= 異常なので、画面に戻して理由を見せる。
+# rc は exec より前に取っておくこと。順番を逆にすると exec の結果になる。
+exec >&3 2>&4
+echo
+echo "[myos-init] X exited with $rc. Xorg log follows:"
 cat /var/log/Xorg.0.log 2>&1
+echo "[myos-init] boot log is in $BOOTLOG"
 
 # PID 1 は絶対に終了してはいけない (終了するとカーネルパニックになる)。
 # 失敗しても shell を出して調べられるようにしておく。
