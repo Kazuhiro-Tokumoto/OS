@@ -38,12 +38,12 @@
 #include "x98.h"
 
 #define WIN_W   560
-#define WIN_H   430
+#define WIN_H   478
 #define PAD     12
 #define LIST_X  PAD
 #define LIST_Y  46
 #define LIST_W  (WIN_W - PAD * 2)
-#define LIST_H  296
+#define LIST_H  344
 #define ROW_H   18
 #define BTN_W   92
 #define BTN_H   24
@@ -376,21 +376,62 @@ static int dev_for_path(const char *real)
     return best_at < 0 ? -1 : best;
 }
 
-static void tag_class(const char *dir, const char *skip_prefix)
+/* 名前が「cardN」ちょうどか。
+ * /sys/class/drm には card0 の他に、つなぎ口ごとの card0-Unknown-1 や
+ * card0-HDMI-A-1、それに renderD128 も並んでいる。どれも device が
+ * 同じ機器を指すので、除けないと画面に card0-Unknown-1 と出てしまう。
+ * (実際に VirtualBox でそう出た) */
+static int is_drm_card(const char *name)
+{
+    if (strncmp(name, "card", 4)) return 0;
+    for (const char *s = name + 4; *s; s++)
+        if (*s < '0' || *s > '9') return 0;
+    return name[4] != 0;
+}
+
+static void tag_class(const char *dir, int only_drm_card)
 {
     DIR *d = opendir(dir);
     if (!d) return;
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
-        if (skip_prefix && !strncmp(e->d_name, skip_prefix, strlen(skip_prefix)))
-            continue;
+        if (only_drm_card && !is_drm_card(e->d_name)) continue;
         char p[512], real[PATH_MAX];
         snprintf(p, sizeof(p), "%s/%s/device", dir, e->d_name);
         if (!realpath(p, real)) continue;
         int i = dev_for_path(real);
         if (i >= 0 && !devs[i].node[0])
             snprintf(devs[i].node, sizeof(devs[i].node), "%s", e->d_name);
+    }
+    closedir(d);
+}
+
+/* 起動時の画面を持っているもの (simpledrm など)。
+ *
+ * myOS は VirtualBox で画面が真っ黒になるのを避けるため vmwgfx を
+ * 止めてある。すると VGA の機器にはドライバが当たらず、代わりに
+ * simpledrm がブートローダーの用意した画面をそのまま使い続ける。
+ * これを知らないと「画面は映っているのにドライバが無い」と出て、
+ * 壊れているように見える。Properties でそう言えるように控えておく。 */
+static char boot_fb[48];
+
+static void find_boot_fb(void)
+{
+    boot_fb[0] = 0;
+    DIR *d = opendir("/sys/class/drm");
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!is_drm_card(e->d_name)) continue;
+        char p[512], drv[48], real[PATH_MAX];
+        snprintf(p, sizeof(p), "/sys/class/drm/%s/device/driver", e->d_name);
+        if (!link_base(p, drv, sizeof(drv))) continue;
+        /* PCI の機器に当たっているものは本物のドライバ。ここでは要らない */
+        snprintf(p, sizeof(p), "/sys/class/drm/%s/device", e->d_name);
+        if (realpath(p, real) && dev_for_path(real) >= 0) continue;
+        snprintf(boot_fb, sizeof(boot_fb), "%s", drv);
+        break;
     }
     closedir(d);
 }
@@ -504,7 +545,11 @@ static void scan_usb(void)
         if (sd) {
             struct dirent *se;
             while ((se = readdir(sd))) {
-                if (strncmp(se->d_name, e->d_name, strlen(e->d_name))) continue;
+                /* 機器のディレクトリの下にあって ':' を含むものが
+                 * インターフェース。名前で前方一致は取らない。
+                 * 根元のハブ (usb1) のインターフェースは "1-0:1.0" で、
+                 * 機器名で始まらないため、前方一致で見ていたときは
+                 * ドライバが見つからず「!」が付いていた。 */
                 if (!strchr(se->d_name, ':')) continue;
                 snprintf(p, sizeof(p), "%s/%s/bInterfaceClass",
                          idir, se->d_name);
@@ -519,7 +564,12 @@ static void scan_usb(void)
         }
         v->cat = usb_cat(icls);
 
-        if (prod[0] && manu[0])
+        /* 根元のハブ (usb1, usb2 ...) は自分の名前として
+         * "Linux 6.12.9 ehci_hcd EHCI Host Controller" のような
+         * 長いものを名乗る。Windows と同じ呼び方に直す。 */
+        if (!strncmp(e->d_name, "usb", 3))
+            snprintf(v->name, sizeof(v->name), "USB Root Hub");
+        else if (prod[0] && manu[0])
             snprintf(v->name, sizeof(v->name), "%s %s", manu, prod);
         else if (prod[0])
             snprintf(v->name, sizeof(v->name), "%s", prod);
@@ -558,8 +608,9 @@ static void rescan(void)
     scan_dmesg();
     scan_pci();
     scan_usb();
-    tag_class("/sys/class/net", NULL);
-    tag_class("/sys/class/drm", "renderD");
+    tag_class("/sys/class/net", 0);
+    tag_class("/sys/class/drm", 1);
+    find_boot_fb();
     tag_sound_names();
     for (int i = 0; i < n_devs; i++)
         devs[i].fw_missing = fw_looks_missing(devs[i].driver);
@@ -567,6 +618,71 @@ static void rescan(void)
 }
 
 /* --- 描画 ----------------------------------------------------------------- */
+
+
+/* --- 縦スクロールバー (Windows 98 のあれ) -------------------------------
+ * 一覧に入り切らないぶんがあることを見せるために要る。
+ * 選択を動かせば勝手にずれるが、それだと「まだ下にある」ことが分からない。
+ * つまみを引っ張るのは作らない。矢印と、つまみの上下を突いての 1 画面送り、
+ * それとホイールがあれば足りる。 */
+#define SB_W 16
+
+static void sb_arrow(int px, int py, int down)
+{
+    for (int i = 0; i < 4; i++) {
+        int w = 1 + i * 2;
+        int y = down ? py + 5 - i : py + i;
+        x98_hline(&x98, win, px + 8 - w / 2 - 1, y, w, x98.text);
+    }
+}
+
+static void draw_scrollbar(int n, int vis, int topv)
+{
+    if (n <= vis) return;
+    int x = LIST_X + LIST_W - 2 - SB_W;
+    int y = LIST_Y + 2;
+    int h = LIST_H - 4;
+
+    x98_fill(&x98, win, x, y, SB_W, h, x98_rgb24(&x98, 0xC0C0C0));
+    x98_button(&x98, win, x, y, SB_W, SB_W, "", 0);
+    sb_arrow(x + 4, y + 6, 0);
+    x98_button(&x98, win, x, y + h - SB_W, SB_W, SB_W, "", 0);
+    sb_arrow(x + 4, y + h - SB_W + 6, 1);
+
+    int track = h - SB_W * 2;
+    int th = track * vis / n;
+    if (th < 12) th = 12;
+    if (th > track) th = track;
+    int maxtop = n - vis;
+    int ty = y + SB_W + (maxtop > 0 ? (track - th) * topv / maxtop : 0);
+    x98_button(&x98, win, x, ty, SB_W, th, "", 0);
+}
+
+/* スクロールバーが突かれたか。突かれていれば top を動かして 1 を返す。 */
+static int sb_click(int mx, int my, int n, int vis, int *topv)
+{
+    if (n <= vis) return 0;
+    int x = LIST_X + LIST_W - 2 - SB_W;
+    if (mx < x || mx >= x + SB_W) return 0;
+    int y = LIST_Y + 2, h = LIST_H - 4;
+    if (my < y || my >= y + h) return 0;
+
+    int track = h - SB_W * 2;
+    int th = track * vis / n;
+    if (th < 12) th = 12;
+    if (th > track) th = track;
+    int maxtop = n - vis;
+    int ty = y + SB_W + (maxtop > 0 ? (track - th) * (*topv) / maxtop : 0);
+
+    if (my < y + SB_W)            (*topv)--;
+    else if (my >= y + h - SB_W)  (*topv)++;
+    else if (my < ty)             (*topv) -= vis;
+    else if (my >= ty + th)       (*topv) += vis;
+
+    if (*topv > maxtop) *topv = maxtop;
+    if (*topv < 0) *topv = 0;
+    return 1;
+}
 
 /* ツリーの ± 箱。Windows 98 のあの小さいやつ。 */
 static void draw_pm(int px, int py, int open)
@@ -611,13 +727,16 @@ static void draw_list(void)
              x98.white);
 
     int vis = (LIST_H - 4) / ROW_H;
+    draw_scrollbar(n_rows, vis, top);
     for (int r = 0; r < vis && top + r < n_rows; r++) {
         Row *w = &rows[top + r];
         int y = LIST_Y + 2 + r * ROW_H;
         int on = (top + r == sel);
         unsigned long fg = x98.text;
         if (on) {
-            x98_fill(&x98, win, LIST_X + 2, y, LIST_W - 4, ROW_H, x98.select_bg);
+            x98_fill(&x98, win, LIST_X + 2, y,
+                     LIST_W - 4 - (n_rows > vis ? SB_W : 0), ROW_H,
+                     x98.select_bg);
             fg = x98.white;
         }
         int ty = y + (ROW_H - x98_text_h(&x98)) / 2;
@@ -654,8 +773,12 @@ static void props_lines(const Dev *v, char out[][96], int *n)
 
 static const char *dev_status(const Dev *v)
 {
-    if (!v->driver[0])
+    if (!v->driver[0]) {
+        if (v->cat == CAT_DISPLAY && boot_fb[0])
+            return "No driver is loaded, but the screen is being drawn "
+                   "by the boot framebuffer.";
         return "No driver is loaded for this device.";
+    }
     if (v->fw_missing)
         return "The driver is loaded but its firmware is missing.";
     return "This device is working properly.";
@@ -699,8 +822,8 @@ static void redraw(void)
     for (int i = 0; i < n_devs; i++)
         if (!devs[i].driver[0] || devs[i].fw_missing) bad++;
     snprintf(sum, sizeof(sum),
-             "%d device%s found, %d need%s attention",
-             n_devs, n_devs == 1 ? "" : "s", bad, bad == 1 ? "s" : "");
+             "%d device%s found, %d without a driver",
+             n_devs, n_devs == 1 ? "" : "s", bad);
     x98_text(&x98, win, PAD, 28, sum, x98.shadow);
 
     draw_list();
@@ -843,6 +966,14 @@ int main(void)
                 } else if (mx >= WIN_W - BTN_W - 12) {
                     goto done;
                 }
+            } else if (ev.xbutton.button == 4 || ev.xbutton.button == 5) {
+                /* ホイール。3 行ずつ。 */
+                int vis = (LIST_H - 4) / ROW_H;
+                top += (ev.xbutton.button == 4) ? -3 : 3;
+                if (top > n_rows - vis) top = n_rows - vis;
+                if (top < 0) top = 0;
+            } else if (sb_click(mx, my, n_rows, (LIST_H - 4) / ROW_H, &top)) {
+                /* スクロールバー */
             } else if (mx >= LIST_X && mx < LIST_X + LIST_W &&
                        my >= LIST_Y + 2 && my < LIST_Y + LIST_H - 2) {
                 int i = top + (my - LIST_Y - 2) / ROW_H;

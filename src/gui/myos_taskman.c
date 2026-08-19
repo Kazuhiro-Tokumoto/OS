@@ -438,6 +438,70 @@ static void draw_tabs(void)
     x98_hline(&x98, win, 8, TAB_H + 4, WIN_W - 16, x98.light);
 }
 
+
+/* --- 縦スクロールバー (Windows 98 のあれ) -------------------------------
+ * プロセスは 70 も 80 もあるので、入り切らないぶんがあることを
+ * 見せないと「これで全部」に見えてしまう。
+ * つまみを引っ張るのは作らない。矢印と、つまみの上下を突いての
+ * 1 画面送り、それとホイールで足りる。 */
+#define SB_W 16
+
+static void sb_arrow(int px, int py, int down)
+{
+    for (int i = 0; i < 4; i++) {
+        int w = 1 + i * 2;
+        int y = down ? py + 5 - i : py + i;
+        x98_hline(&x98, win, px + 8 - w / 2 - 1, y, w, x98.text);
+    }
+}
+
+static void draw_scrollbar(int n, int vis, int topv)
+{
+    if (n <= vis) return;
+    int x = LIST_X + LIST_W - 2 - SB_W;
+    int y = LIST_Y + 2;
+    int h = LIST_H - 4;
+
+    x98_fill(&x98, win, x, y, SB_W, h, x98_rgb24(&x98, 0xC0C0C0));
+    x98_button(&x98, win, x, y, SB_W, SB_W, "", 0);
+    sb_arrow(x + 4, y + 6, 0);
+    x98_button(&x98, win, x, y + h - SB_W, SB_W, SB_W, "", 0);
+    sb_arrow(x + 4, y + h - SB_W + 6, 1);
+
+    int track = h - SB_W * 2;
+    int th = track * vis / n;
+    if (th < 12) th = 12;
+    if (th > track) th = track;
+    int maxtop = n - vis;
+    int ty = y + SB_W + (maxtop > 0 ? (track - th) * topv / maxtop : 0);
+    x98_button(&x98, win, x, ty, SB_W, th, "", 0);
+}
+
+static int sb_click(int mx, int my, int n, int vis, int *topv)
+{
+    if (n <= vis) return 0;
+    int x = LIST_X + LIST_W - 2 - SB_W;
+    if (mx < x || mx >= x + SB_W) return 0;
+    int y = LIST_Y + 2, h = LIST_H - 4;
+    if (my < y || my >= y + h) return 0;
+
+    int track = h - SB_W * 2;
+    int th = track * vis / n;
+    if (th < 12) th = 12;
+    if (th > track) th = track;
+    int maxtop = n - vis;
+    int ty = y + SB_W + (maxtop > 0 ? (track - th) * (*topv) / maxtop : 0);
+
+    if (my < y + SB_W)            (*topv)--;
+    else if (my >= y + h - SB_W)  (*topv)++;
+    else if (my < ty)             (*topv) -= vis;
+    else if (my >= ty + th)       (*topv) += vis;
+
+    if (*topv > maxtop) *topv = maxtop;
+    if (*topv < 0) *topv = 0;
+    return 1;
+}
+
 /* 幅に収まるように末尾を "..." で詰める。
  * プロセス名は長いものがあり (kworker/u16:4-events_unbound など)、
  * そのままだと隣の欄に食い込む。 */
@@ -461,6 +525,7 @@ static void draw_list(void)
 
     int n   = (tab == TAB_APPS) ? n_apps : n_procs;
     int vis = (LIST_H - 4) / ROW_H;
+    draw_scrollbar(n, vis, top[tab]);
 
     for (int r = 0; r < vis && top[tab] + r < n; r++) {
         int i = top[tab] + r;
@@ -468,7 +533,8 @@ static void draw_list(void)
         int on = (i == sel[tab]);
         unsigned long fg = x98.text;
         if (on) {
-            x98_fill(&x98, win, LIST_X + 2, y, LIST_W - 4, ROW_H,
+            x98_fill(&x98, win, LIST_X + 2, y,
+                     LIST_W - 4 - (n > vis ? SB_W : 0), ROW_H,
                      x98.select_bg);
             fg = x98.white;
         }
@@ -661,6 +727,17 @@ int main(void)
                 } else if (mx >= WIN_W - BTN_W - PAD) {
                     goto done;
                 }
+            } else if (ev.xbutton.button == 4 || ev.xbutton.button == 5) {
+                /* ホイール。3 行ずつ。 */
+                int cnt = (tab == TAB_APPS) ? n_apps : n_procs;
+                int vis = (LIST_H - 4) / ROW_H;
+                top[tab] += (ev.xbutton.button == 4) ? -3 : 3;
+                if (top[tab] > cnt - vis) top[tab] = cnt - vis;
+                if (top[tab] < 0) top[tab] = 0;
+            } else if (sb_click(mx, my,
+                                (tab == TAB_APPS) ? n_apps : n_procs,
+                                (LIST_H - 4) / ROW_H, &top[tab])) {
+                /* スクロールバー */
             } else if (mx >= LIST_X && mx < LIST_X + LIST_W &&
                        my >= LIST_Y + 2 && my < LIST_Y + LIST_H - 2) {
                 int i = top[tab] + (my - LIST_Y - 2) / ROW_H;
