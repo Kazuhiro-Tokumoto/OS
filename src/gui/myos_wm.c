@@ -611,14 +611,13 @@ static void draw_taskbar(void)
     x98_fill(&x98, taskbar, 3, 3, START_W, sb_h, x98.face);
     x98_bevel(&x98, taskbar, 3, 3, START_W, sb_h, !menu_open);
     int off = menu_open ? 1 : 0;
-    static const unsigned int flag[4] = {
-        0xE04040, 0x40C040, 0x4060E0, 0xE0E040
-    };
-    for (int i = 0; i < 4; i++) {
-        int dx = (i & 1) * 6, dy = (i >> 1) * 6;
-        x98_fill(&x98, taskbar, 9 + off + dx, 8 + off + dy, 5, 5,
-                 x98_rgb24(&x98, flag[i]));
-    }
+
+    /* ボタンの記章。
+     * 最初は 4 色の四角を 2x2 に並べていたが、あれは Windows の旗そのもの
+     * なので、配るものには載せない。代わりに myOS の頭文字を置く。 */
+    x98_text(&x98, taskbar, 9 + off,
+             3 + off + (sb_h - x98_text_h(&x98)) / 2, "m",
+             x98_rgb24(&x98, 0x000080));
     x98_text(&x98, taskbar, 24 + off, 3 + off + (sb_h - x98_text_h(&x98)) / 2,
              "Start", x98.text);
 

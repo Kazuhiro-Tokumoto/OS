@@ -307,8 +307,19 @@ exec >>"$BOOTLOG" 2>&1
 # 同じ調子で点を回しているので、そこから続いているように見せる。
 say() { printf '%s' "$1" >&3; }
 
-say '
+# 起動画面を出す。/dev/fb0 に直接描くので X は要らない。
+# 使えるときは点の代わりにこちらを出す。両方出すと、5 回/秒 描き直す
+# 起動画面が点を消してしまい、ちらついて見えるだけになる。
+SPLASH=""
+if [ -x /usr/local/bin/myos-splash ] && \
+   /usr/local/bin/myos-splash --test 2>/dev/null; then
+    /usr/local/bin/myos-splash >/dev/null 2>&1 &
+    SPLASH=$!
+    say() { :; }
+else
+    say '
   Starting myOS '
+fi
 
 # udev を上げる。これが無いと X が入力デバイスを見つけられず、
 # マウスもキーボードも効かない画面になる (症状が地味なので注意)。
@@ -395,6 +406,14 @@ echo "[myos-init] framebuffer:"
 ls -l /dev/fb* 2>&1
 echo "[myos-init] starting X on the framebuffer set up by our bootloader"
 say .
+
+# X に画面を渡す前に起動画面を止める。残しておくと 5 回/秒 で
+# デスクトップの上に描き続けることになる。
+if [ -n "$SPLASH" ]; then
+    kill "$SPLASH" 2>/dev/null
+    wait "$SPLASH" 2>/dev/null
+fi
+
 /usr/bin/xinit /myos-session -- /usr/bin/X :0 vt1 -nolisten tcp -novtswitch -logverbose 6
 rc=$?
 
@@ -652,8 +671,12 @@ cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
    "$ROOTDIR/src/gui/myos_runas.c" "$ROOTDIR/src/gui/myos_setup.c" \
    "$ROOTDIR/src/gui/myos_login.c" "$ROOTDIR/src/gui/myos_alert.c" \
    "$ROOTDIR/src/gui/myos_shutdown.c" "$ROOTDIR/src/gui/myos_poweroff.c" \
+   "$ROOTDIR/src/gui/myos_splash.c" \
    "$ROOTDIR/src/gui/x98.h" "$ROOTDIR/src/gui/myosconf.h" \
    "$ROOTDIR/src/gui/filetypes.h" "$WORK/usr/local/src/"
+# 起動画面。X はまだ無いので Xlib は使わず、freetype だけを直に叩く。
+chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-splash \
+    /usr/local/src/myos_splash.c -lfreetype -lm
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-wm \
     /usr/local/src/myos_wm.c -lX11 -lXft
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-files \
