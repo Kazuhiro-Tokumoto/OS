@@ -249,7 +249,10 @@ cat > "$WORK/etc/sudoers.d/myos" <<'EOF'
 # 電源を切る / 再起動するのだけはパスワード無しで通す。
 # 目の前の機械の電源を落とすのに認証を求めても意味が無く、
 # 出来ることも「切る」だけなので、ここは開けておく。
-%sudo ALL=(ALL) NOPASSWD: /sbin/poweroff, /sbin/reboot, /sbin/halt
+# (systemd を使っていないので poweroff コマンドは無い。自前の
+#  myos-poweroff が reboot(2) を呼ぶ。ここを /sbin/poweroff の
+#  ままにしていたため、メニューの Shut Down が無反応だった)
+%sudo ALL=(ALL) NOPASSWD: /usr/local/bin/myos-poweroff
 EOF
 chmod 440 "$WORK/etc/sudoers.d/myos"
 
@@ -600,6 +603,7 @@ cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
    "$ROOTDIR/src/gui/myos_image.c" "$ROOTDIR/src/gui/myos_open.c" \
    "$ROOTDIR/src/gui/myos_runas.c" "$ROOTDIR/src/gui/myos_setup.c" \
    "$ROOTDIR/src/gui/myos_login.c" "$ROOTDIR/src/gui/myos_alert.c" \
+   "$ROOTDIR/src/gui/myos_shutdown.c" "$ROOTDIR/src/gui/myos_poweroff.c" \
    "$ROOTDIR/src/gui/x98.h" "$ROOTDIR/src/gui/myosconf.h" \
    "$ROOTDIR/src/gui/filetypes.h" "$WORK/usr/local/src/"
 chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-wm \
@@ -624,6 +628,12 @@ chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-open \
     /usr/local/src/myos_open.c
 chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-alert \
     /usr/local/src/myos_alert.c -lX11
+# 終了の画面と、実際に電源を切るほう。
+# 後者は X に触らない (X が落ちたあとも動く必要がある)。
+chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-shutdown \
+    /usr/local/src/myos_shutdown.c -lX11
+chroot "$WORK" gcc -O2 -o /usr/local/bin/myos-poweroff \
+    /usr/local/src/myos_poweroff.c
 
 # 画面の解像度を決める道具。設定アプリの「Display」タブから呼ばれる。
 # X では解像度を変えられない (nomodeset + fbdev) ので、
@@ -1230,7 +1240,7 @@ Web|globe|/usr/bin/firefox-esr
 Notepad|file|/usr/local/bin/myos-notepad
 Virus Scan|app|/usr/local/bin/myos-term /usr/local/bin/myos-scan
 MS-DOS Prompt|app|/usr/local/bin/myos-prompt
-Shut Down|app|sudo /sbin/poweroff
+Shut Down|app|/usr/local/bin/myos-shutdown
 EOF
 
 echo "=== Java のデモアプリを配置 ==="

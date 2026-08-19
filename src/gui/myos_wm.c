@@ -151,7 +151,9 @@ static const char *default_menu[] = {
     "Files|folder|/usr/local/bin/myos-files /",
     "Web|globe|/usr/bin/firefox-esr",
     "MS-DOS Prompt|app|/usr/bin/xterm -bg black -fg lightgray",
-    "Shut Down|app|/sbin/poweroff",
+    /* systemd を使っていないので /sbin/poweroff は無い。
+     * 終了の画面を出して、そこから自前の myos-poweroff を呼ぶ。 */
+    "Shut Down|app|/usr/local/bin/myos-shutdown",
     NULL
 };
 
