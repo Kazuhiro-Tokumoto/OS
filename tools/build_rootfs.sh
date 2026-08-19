@@ -205,6 +205,19 @@ umount "$WORK/proc" 2>/dev/null || true
 
 echo "=== 基本設定 ==="
 echo "myos" > "$WORK/etc/hostname"
+
+# 自分の名前を引けるようにしておく。
+# 無いと sudo が毎回 "unable to resolve host myos" を出し、
+# しかも名前解決の待ちが入るので体感で分かるほど遅くなる。
+# 127.0.1.1 は Debian の作法 (127.0.0.1 は localhost 専用にしておく)。
+cat > "$WORK/etc/hosts" <<'HOSTS'
+127.0.0.1	localhost
+127.0.1.1	myos
+
+::1		localhost ip6-localhost ip6-loopback
+ff02::1		ip6-allnodes
+ff02::2		ip6-allrouters
+HOSTS
 cat > "$WORK/etc/fstab" <<'EOF'
 /dev/sda2  /      ext4  defaults  0 1
 proc       /proc  proc  defaults  0 0
@@ -1285,6 +1298,22 @@ if [ "${SLIM:-1}" = "1" ]; then
 
     echo "  掃除後: $(du -sh "$WORK" | cut -f1)"
 fi
+
+# --- ビルド中に使った DNS の設定を捨てる ------------------------------------
+# chroot の中で apt を動かすために、ビルドマシンの
+# /etc/resolv.conf をコピーしてある。そのまま出荷すると
+# 「そのマシンでしか届かない DNS」がイメージに焼き込まれ、
+# 動かした先では名前解決が全部失敗する。
+# (GitHub のランナーで焼くと Azure の内部リゾルバが入り、
+#  実機では deb.debian.org すら引けなくなる。実際そうなった)
+#
+# 中身は起動時に dhclient が書く。空にはせず、何が起きるのかを
+# 書き残しておく。DHCP の無い網に繋いだ人がここを見て直せるように。
+cat > "$WORK/etc/resolv.conf" <<'RESOLV'
+# このファイルは起動のたびに dhclient が書き換えます。
+# DHCP のない網では、ここに直接書いてください:
+#   nameserver 192.168.1.1
+RESOLV
 
 echo "=== 完成 ==="
 du -sh "$WORK"
