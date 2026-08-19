@@ -88,6 +88,21 @@ PT_VIDEO_W      equ 0x1F0               ; u16 幅  (0 = おまかせ)
 PT_VIDEO_H      equ 0x1F2               ; u16 高さ
 PT_VIDEO_BPP    equ 0x1F4               ; u8  色深度 (0 = おまかせ)
 
+; この媒体が何なのか。0x1F8 も同じくセクタ末尾の空きを使う。
+;   bit0 = インストール用の媒体 (CD / USB メモリ)
+;
+; これが立っていると、Stage2 は「他のディスクに入っている myOS」を探して
+; 見つかればそちらを起動する。インストールが終わったあと、ディスクを
+; 抜き忘れても普通に起動できるようにするため。
+; live 環境は媒体の中の squashfs を root にして動いているので、
+; 動いている間はドライブがふさがっていて排出できない。
+; レガシー BIOS には起動順を変える口も無い。ここで面倒を見るしかない。
+PT_FLAGS        equ 0x1F8               ; u8
+PT_FLAG_INSTALLER equ 0x01
+
+PROBE_OFF       equ 0x0B00              ; 他のディスクを覗くときの作業領域
+                                        ; (PTBL_OFF の 512 バイト後ろ)
+
 ; --- boot_params (ゼロページ) の主なオフセット -----------------------------
 BP_ORIG_X           equ 0x000
 BP_ORIG_Y           equ 0x001
@@ -143,6 +158,9 @@ stage2_start:
         mov     ss, ax
         mov     sp, 0x7C00
         sti
+        cld                             ; 文字列命令は必ず前進。
+                                        ; BIOS が DF を立てたまま渡してくる
+                                        ; 実装は稀にある。ここで揃えておく。
 
         mov     [boot_drive], dl
 
@@ -339,6 +357,13 @@ stage2_start:
         mov     si, msg_ok
         call    puts_attr
         call    newline
+        mov     byte [cur_attr], ATTR_NORMAL
+
+        ; インストール用の媒体から起動したなら、他のディスクに
+        ; インストール済みの myOS が無いか見に行く。
+        ; あればそちらを起動する (ディスクの抜き忘れ対策)。
+        call    chain_to_installed
+
         jmp     .read_hdr
 .ptbl_failed:
         mov     ah, ATTR_ERR
@@ -864,6 +889,188 @@ pm32_entry:
 
 BITS 16
 
+; ---------------------------------------------------------------------------
+; chain_to_installed - インストール済みの myOS を他のディスクから起動する
+;
+;   いま読んだペイロードテーブルに「インストール用の媒体」の印が
+;   立っているときだけ動く。0x80 から 0x83 までを順に覗き、
+;   印の立っていないペイロードテーブルが見つかったら
+;   「インストール済みの myOS」とみなす。
+;
+;   見つけたら 5 秒数える。そのあいだに I が押されなければ、
+;   読み込み先をそのディスクに切り替え、テーブルも差し替えて戻る。
+;   押されたら何も変えずに戻る (= インストーラが立ち上がる)。
+;
+;   これがある理由:
+;     live 環境は媒体の中の squashfs を root にして動いているので、
+;     動いている間は媒体がふさがっていて排出できない
+;     (CDROMEJECT は開いている数が 1 でないと EBUSY を返す)。
+;     レガシー BIOS には起動順を変える口も無い。
+;     ならば「入れっぱなしでも困らない」ようにするしかない。
+;
+;   壊れる余地を減らすため、状態を変えるのは最後の一手だけにしてある。
+;   途中で失敗したら必ず元へ戻す。
+; ---------------------------------------------------------------------------
+chain_to_installed:
+        pusha
+        push    es
+
+        test    byte [PTBL_OFF + PT_FLAGS], PT_FLAG_INSTALLER
+        jz      .ret                    ; 普通の起動。何もしない
+
+        ; いまの状態を控える
+        mov     al, [dsk_drive]
+        mov     [sv_drive], al
+        mov     al, [dsk_edd]
+        mov     [sv_edd], al
+        mov     al, [dsk_cdrom]
+        mov     [sv_cdrom], al
+        mov     ax, [dsk_spt]
+        mov     [sv_spt], ax
+        mov     ax, [dsk_heads]
+        mov     [sv_heads], ax
+
+        mov     byte [try_drive], 0x80
+.next_drive:
+        mov     al, [try_drive]
+        cmp     al, [sv_drive]
+        je      .skip                   ; 自分自身は見ない
+                                        ; (USB から起動すると自分が 0x80 になる)
+
+        mov     dl, al
+        call    disk_init
+        mov     byte [dsk_cdrom], 0     ; ハードディスクは 512 バイトセクタ
+
+        xor     ax, ax
+        mov     es, ax
+        mov     bx, PROBE_OFF
+        mov     eax, PTBL_LBA
+        mov     cx, 1
+        call    disk_read
+        jc      .skip
+
+        mov     si, PROBE_OFF + PT_MAGIC
+        mov     di, magic_str
+        mov     cx, 8
+        repe    cmpsb
+        jne     .skip
+
+        test    byte [PROBE_OFF + PT_FLAGS], PT_FLAG_INSTALLER
+        jz      .found                  ; 印が無い = インストール済みの本体
+.skip:
+        inc     byte [try_drive]
+        cmp     byte [try_drive], 0x84
+        jb      .next_drive
+        jmp     .restore                ; どこにも入っていなかった
+
+; --- 見つかった -------------------------------------------------------------
+.found:
+        call    newline
+        mov     ah, ATTR_OK
+        mov     si, msg_chain1
+        call    puts_attr
+        call    newline
+        mov     byte [cur_attr], ATTR_NORMAL
+        mov     si, msg_chain2
+        call    puts
+
+        ; 押しっぱなしにされていたぶんを捨てる。
+        ; ここで消しておかないと、前の画面で触ったキーで
+        ; いきなりインストーラへ行ってしまう。
+.flush:
+        mov     ah, 0x01
+        int     0x16
+        jz      .count
+        xor     ah, ah
+        int     0x16
+        jmp     .flush
+
+.count:
+        mov     word [cd_left], 5
+.sec:
+        mov     al, '.'
+        call    putc
+        call    get_ticks
+        mov     [tick_base], eax
+.wait:
+        mov     ah, 0x01
+        int     0x16
+        jz      .nokey
+        xor     ah, ah
+        int     0x16                    ; 取り出す
+        and     al, 0xDF                ; 小文字を大文字に寄せる
+        cmp     al, 'I'
+        je      .setup
+.nokey:
+        call    get_ticks
+        sub     eax, [tick_base]
+        cmp     eax, 18                 ; 18.2 ティック = 1 秒
+        jb      .wait
+        dec     word [cd_left]
+        jnz     .sec
+
+        ; 何も押されなかった。見つけたほうを起動する。
+        ; 読んでおいたテーブルを本番の置き場へ移す。
+        push    ds
+        pop     es
+        mov     si, PROBE_OFF
+        mov     di, PTBL_OFF
+        mov     cx, 256
+        rep     movsw
+
+        call    newline
+        mov     ah, ATTR_OK
+        mov     si, msg_chain_hdd
+        call    puts_attr
+        call    newline
+        mov     byte [cur_attr], ATTR_NORMAL
+        jmp     .ret
+
+; --- I が押された -----------------------------------------------------------
+.setup:
+        call    newline
+        mov     ah, ATTR_WARN
+        mov     si, msg_chain_setup
+        call    puts_attr
+        call    newline
+        mov     byte [cur_attr], ATTR_NORMAL
+        ; 下へ落として元に戻す
+
+.restore:
+        mov     al, [sv_drive]
+        mov     [dsk_drive], al
+        mov     al, [sv_edd]
+        mov     [dsk_edd], al
+        mov     al, [sv_cdrom]
+        mov     [dsk_cdrom], al
+        mov     ax, [sv_spt]
+        mov     [dsk_spt], ax
+        mov     ax, [sv_heads]
+        mov     [dsk_heads], ax
+.ret:
+        pop     es
+        popa
+        ret
+
+; ---------------------------------------------------------------------------
+; get_ticks - INT 1Ah AH=00h で BIOS のティックカウンタを取る
+;   出力: EAX = 起動からのティック数 (18.2 / 秒)
+;   深夜を跨ぐと値が戻るが、そのときは待ちが即座に終わるだけなので
+;   害は無い。
+; ---------------------------------------------------------------------------
+get_ticks:
+        push    ecx
+        push    edx
+        xor     ah, ah
+        int     0x1A
+        movzx   eax, dx
+        movzx   ecx, cx
+        shl     ecx, 16
+        or      eax, ecx
+        pop     edx
+        pop     ecx
+        ret
+
 ; --- 文字列 ----------------------------------------------------------------
 msg_title:      db 'myOS Stage2  -  Phase2-B: Linux Boot Protocol loader', 0
 msg_disk:       db 'Disk        : ', 0
@@ -917,10 +1124,23 @@ msg_jump:       db 'Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...'
 msg_ok:         db 'OK', 0
 msg_fail:       db 'FAILED', 0
 msg_halted:     db 'Halted.', 0
+msg_chain1:     db 'myOS is already installed on this computer.', 0
+msg_chain2:     db 'Starting it.  Press I now to run Setup instead ', 0
+msg_chain_hdd:  db 'Starting the installed myOS', 0
+msg_chain_setup: db 'Running Setup', 0
 magic_str:      db 'MYOSPLD2'
 
 ; --- 変数 ------------------------------------------------------------------
 boot_drive:     db 0
+; chain_to_installed が他のディスクを覗くあいだ、元の状態を預けておく場所
+sv_drive:       db 0
+sv_edd:         db 0
+sv_cdrom:       db 0
+sv_spt:         dw 0
+sv_heads:       dw 0
+cd_left:        dw 0
+try_drive:      db 0
+tick_base:      dd 0
 kver:           dw 0
 setup_sects:    dw 0
 hdr_len:        dw 0

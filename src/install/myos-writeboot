@@ -37,7 +37,10 @@ ALIGN = 4                       # 2048 バイト境界 (CD と同じ揃え方)
 PTBL_MAGIC = b"MYOSPLD2"
 PTBL_LBA = 20
 CMDLINE_OFF = 0x28              # Stage2 の PT_CMDLINE と同じ値
-CMDLINE_MAX = SECTOR - CMDLINE_OFF
+# コマンドラインの終わりは 0x1F0 まで。
+# セクタ末尾 (0x1F0-) には画面の希望と媒体の印を置いてあるので、
+# そこまで伸ばせるようにしておくと長いコマンドラインで踏み潰す。
+CMDLINE_MAX = 0x1F0 - CMDLINE_OFF
 
 MEDIUM = "/run/myos"
 BOOT_IMG = f"{MEDIUM}/boot/boot.img"

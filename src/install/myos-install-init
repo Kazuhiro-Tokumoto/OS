@@ -71,7 +71,7 @@ rc=$?
 if [ "$rc" != "0" ] || [ ! -f /tmp/myos-install.conf ]; then
     echo                                        > /dev/console
     echo "  Setup was cancelled."               > /dev/console
-    echo "  Remove the disc and restart, or use this shell." > /dev/console
+    echo "  Restart the computer, or use this shell." > /dev/console
     echo                                        > /dev/console
     exec /bin/sh < /dev/console > /dev/console 2>&1
 fi
@@ -95,7 +95,7 @@ rc=$?
 printf '\033[2J\033[H'                                   > /dev/console
 echo                                                      > /dev/console
 echo "  Setup has ended (X exited with $rc)."             > /dev/console
-echo "  Remove the disc and restart the computer."        > /dev/console
+echo "  Restart the computer."                             > /dev/console
 echo                                                      > /dev/console
 echo "  A shell is available here if you need to look."   > /dev/console
 echo "  The X log is in /var/log/Xorg-install.log."       > /dev/console

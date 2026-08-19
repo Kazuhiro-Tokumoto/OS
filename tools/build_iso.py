@@ -50,7 +50,12 @@ PTBL_MAGIC = b"MYOSPLD2"
 # コマンドラインが空のままカーネルが起動し、
 # console= が効かずシリアルに何も出ない (原因が見えない)。
 CMDLINE_OFF = 0x28
-CMDLINE_MAX = SECTOR - CMDLINE_OFF
+PT_FLAGS    = 0x1F8                   # stage2_linux.asm の PT_FLAGS と一致必須
+PT_FLAG_INSTALLER = 0x01
+# コマンドラインの終わりは 0x1F0 まで。
+# セクタ末尾 (0x1F0-) には画面の希望と媒体の印を置いてあるので、
+# そこまで伸ばせるようにしておくと長いコマンドラインで踏み潰す。
+CMDLINE_MAX = 0x1F0 - CMDLINE_OFF
 
 # BIOS に読ませる大きさ。Stage1 (1) + Stage2 (17) セクタ。
 BOOT_LOAD_SECTORS = 18
@@ -172,6 +177,17 @@ def build_payload(kernel, initrd, cmdline, base_lba_512):
                      (base_lba_512 + i_lba) if idata else 0, i_cnt,
                      len(idata))
     t[CMDLINE_OFF:CMDLINE_OFF + len(cmd)] = cmd
+
+    # この媒体は「インストール用」だという印。
+    # Stage2 はこれが立っているとき、他のディスクにインストール済みの
+    # myOS が無いか探し、あればそちらを起動する。
+    #
+    # インストールが終わったあと媒体を抜いてもらうのが本筋だが、
+    # live 環境は媒体の中の squashfs を root にして動いているため、
+    # 動いている間はドライブがふさがっていて排出できない。
+    # レガシー BIOS には起動順を変える口も無い。
+    # 「抜き忘れても普通に起動する」で面倒を見る。
+    t[PT_FLAGS] = PT_FLAG_INSTALLER
 
     out = bytearray(lba * SECTOR)
     out[0:SECTOR] = t

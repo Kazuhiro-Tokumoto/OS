@@ -518,20 +518,30 @@ int main(void)
 
         /* 少し見せてから再起動。いきなり落ちると
          * 終わったのか失敗したのか分からない。
-         * 媒体が開かなかったときのために、抜く案内も出しておく。
          *
-         * 言い方は媒体で変える。USB から入れた人に「ディスクを出せ」と
-         * 言っても通じない。名前で見分けるのは文言だけの話なので
-         * これで足りる (実際に開けるかどうかは myos-poweroff 側で
-         * CDROM_GET_CAPABILITY を見て決める)。 */
+         * 「ディスクを抜いてください」とは書かない。
+         * この live 環境は媒体の中の squashfs を root にして動いているので、
+         * 動いている間はドライブがふさがっていて排出できない
+         * (CDROMEJECT は開いている数が 1 でないと EBUSY を返す)。
+         * 抜けと言っておいて抜けない、というのが今までの状態だった。
+         *
+         * 代わりに、抜かなくても済むようにしてある。
+         * インストール用の媒体のペイロードテーブルには印が立っていて、
+         * Stage2 はそれを見ると他のディスクを探し、インストール済みの
+         * myOS が見つかればそちらを起動する (入れっぱなしでも困らない)。
+         * もう一度インストールしたくなったら、その 5 秒のあいだに I を押す。
+         *
+         * 言い方は媒体で変える。USB から入れた人に「ディスク」と
+         * 言っても通じない。 */
         const char *what = "installation media";
         if (!strncmp(medium, "/dev/sr", 7))      what = "disc";
         else if (!strncmp(medium, "/dev/sd", 7)) what = "USB drive";
 
         for (int i = 10; i > 0; i--) {
-            char m[140];
+            char m[200];
             snprintf(m, sizeof(m),
-                     "Setup is complete. Remove the %s. "
+                     "Setup is complete. You can leave the %s in place - "
+                     "myOS will start from the hard disk. "
                      "Restarting in %d second%s...",
                      what, i, i == 1 ? "" : "s");
             tick(100, m);

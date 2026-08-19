@@ -57,7 +57,10 @@ PTBL_LBA = 20                        # stage2_linux.asm の PTBL_LBA と一致�
 PAYLOAD_START_LBA = 64
 PTBL_MAGIC = b"MYOSPLD2"
 CMDLINE_OFF = 0x28                   # ペイロードテーブル内のコマンドライン位置
-CMDLINE_MAX = SECTOR - CMDLINE_OFF
+# コマンドラインの終わりは 0x1F0 まで。
+# セクタ末尾 (0x1F0-) には画面の希望と媒体の印を置いてあるので、
+# そこまで伸ばせるようにしておくと長いコマンドラインで踏み潰す。
+CMDLINE_MAX = 0x1F0 - CMDLINE_OFF
 
 # ルートファイルシステムは 1MB 境界から始める (よくある慣習)
 ROOT_ALIGN = 2048
