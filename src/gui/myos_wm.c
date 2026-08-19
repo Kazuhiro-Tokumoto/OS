@@ -1372,18 +1372,10 @@ int main(void)
                 } else if (tr == 0) {           /* ネットワーク */
                     set_menu(0);
                     set_volwin(0);
-                    char msg[160];
-                    if (net_up)
-                        snprintf(msg, sizeof(msg),
-                                 "Connected.\nAddress: %s", net_addr);
-                    else
-                        snprintf(msg, sizeof(msg),
-                                 "Not connected.\n"
-                                 "No network cable or adapter was found.");
-                    char cmd[256];
-                    snprintf(cmd, sizeof(cmd),
-                             "myos-alert -info 'Network' '%s' &", msg);
-                    if (system(cmd) == -1) { /* 出せないだけなので黙る */ }
+                    /* 状態を出すだけだったのをやめて、繋ぐ画面を開く。
+                     * 「繋がっていません」と言われても、そこから何も
+                     * 出来ないのでは意味が無い。 */
+                    spawn("/usr/local/bin/myos-net");
                 } else {
                     int i = taskbtn_hit(ev.xbutton.x);
                     if (i >= 0) {

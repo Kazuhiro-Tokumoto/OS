@@ -1,0 +1,128 @@
+#!/bin/sh
+# ============================================================================
+# myos-wifi  -  無線 LAN の操作を root 側でやる小さな道具
+#
+#   myos-wifi list                   無線の口を並べる
+#   myos-wifi scan <口>              AP を探す  "SSID<TAB>強さ<TAB>鍵"
+#   myos-wifi connect <口> <SSID>    繋ぐ。合言葉は標準入力から 1 行
+#   myos-wifi status <口>            "ssid=... ip=..."
+#   myos-wifi disconnect <口>
+#
+# デスクトップは一般ユーザーで動くが、scan も接続も CAP_NET_ADMIN が要る。
+# GUI から直接 iw や wpa_supplicant を叩けないので、やることをここに絞って
+# sudoers でパスワード無しで通す (myos-poweroff と同じ考え方)。
+# 「この 5 つだけ」に閉じているので、開けても出来ることは増えない。
+#
+# 合言葉は必ず標準入力で受け取る。引数に載せると ps で他の利用者から
+# 丸見えになる。myos_setup.c で chpasswd に渡しているのと同じ理由。
+# ============================================================================
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+CONFDIR=/etc/myos
+cmd="$1"; dev="$2"
+
+# 口の名前を検めるのは、そのまま外部コマンドに渡すため。
+# 変な文字が混ざっていたら受け付けない。
+case "$dev" in
+    ""|*[!a-zA-Z0-9_-]*) [ "$cmd" = list ] || { echo "bad interface" >&2; exit 2; } ;;
+esac
+
+case "$cmd" in
+list)
+    for d in /sys/class/net/*/wireless; do
+        [ -e "$d" ] || continue
+        n=$(basename "$(dirname "$d")")
+        echo "$n"
+    done
+    ;;
+
+scan)
+    ip link set "$dev" up 2>/dev/null
+    rfkill unblock wifi 2>/dev/null
+    # 一度で拾えないことがあるので 2 回試す。
+    for _ in 1 2; do
+        out=$(iw dev "$dev" scan 2>/dev/null)
+        [ -n "$out" ] && break
+        sleep 2
+    done
+    # BSS ごとに SSID / 強さ / 鍵の有無をまとめる。
+    # 同じ SSID が複数出たら、一番強いものだけ残す。
+    printf '%s\n' "$out" | awk '
+        /^BSS /            { if (ssid != "") emit(); ssid=""; sig=-100; sec="" }
+        /^\tsignal:/       { sig = $2 + 0 }
+        /^\tSSID: /        { ssid = substr($0, 8) }
+        /^\tRSN:/          { sec = "WPA2" }
+        /^\tWPA:/          { if (sec == "") sec = "WPA" }
+        END                { if (ssid != "") emit() }
+        function emit() {
+            if (ssid == "") return
+            if (!(ssid in best) || sig > best[ssid]) {
+                best[ssid] = sig; kind[ssid] = sec
+            }
+        }
+        END {
+            for (s in best) printf "%s\t%d\t%s\n", s, best[s], (kind[s]=="" ? "open" : kind[s])
+        }' | sort -t"$(printf '\t')" -k2,2nr
+    ;;
+
+connect)
+    ssid="$3"
+    [ -n "$ssid" ] || { echo "no ssid" >&2; exit 2; }
+    read -r psk
+    mkdir -p "$CONFDIR"
+    conf="$CONFDIR/wpa-$dev.conf"
+    umask 077
+    {
+        echo "ctrl_interface=/run/wpa_supplicant"
+        echo "update_config=1"
+        if [ -n "$psk" ]; then
+            wpa_passphrase "$ssid" "$psk" 2>/dev/null | grep -v '^\s*#psk='
+        else
+            echo "network={"
+            echo "    ssid=\"$ssid\""
+            echo "    key_mgmt=NONE"
+            echo "}"
+        fi
+    } > "$conf"
+
+    # 前のものが残っていると新しい設定で上がらない。
+    pkill -f "wpa_supplicant.*-i$dev" 2>/dev/null
+    pkill -f "dhclient.*$dev" 2>/dev/null
+    sleep 1
+    ip link set "$dev" up 2>/dev/null
+    wpa_supplicant -B -i "$dev" -c "$conf" >/dev/null 2>&1 || {
+        echo "wpa_supplicant failed" >&2; exit 1; }
+
+    # 繋がるのを待つ。待たずに dhclient を出すと、まだ繋がっていない口に
+    # 要求を投げて必ず失敗する。
+    ok=0
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if iw dev "$dev" link 2>/dev/null | grep -q '^Connected'; then ok=1; break; fi
+        sleep 1
+    done
+    [ "$ok" = 1 ] || { echo "not associated" >&2; exit 1; }
+
+    dhclient -nw "$dev" >/dev/null 2>&1
+    echo ok
+    ;;
+
+status)
+    s=$(iw dev "$dev" link 2>/dev/null | sed -n 's/^\tSSID: //p')
+    a=$(ip -4 addr show "$dev" 2>/dev/null | sed -n 's#.*inet \([0-9.]*\)/.*#\1#p' | head -1)
+    echo "ssid=$s"
+    echo "ip=$a"
+    ;;
+
+disconnect)
+    pkill -f "wpa_supplicant.*-i$dev" 2>/dev/null
+    pkill -f "dhclient.*$dev" 2>/dev/null
+    ip addr flush dev "$dev" 2>/dev/null
+    echo ok
+    ;;
+
+*)
+    echo "usage: myos-wifi list|scan|connect|status|disconnect" >&2
+    exit 2
+    ;;
+esac

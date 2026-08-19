@@ -292,6 +292,13 @@ cat > "$WORK/etc/sudoers.d/myos" <<'EOF'
 #  myos-poweroff が reboot(2) を呼ぶ。ここを /sbin/poweroff の
 #  ままにしていたため、メニューの Shut Down が無反応だった)
 %sudo ALL=(ALL) NOPASSWD: /usr/local/bin/myos-poweroff
+
+# 無線 LAN の操作も同じ扱いにする。
+# scan も wpa_supplicant も dhclient も CAP_NET_ADMIN が要るが、
+# デスクトップは一般ユーザーで動くので、そのままでは何も出来ない。
+# 出来ることを myos-wifi の 5 つ (list/scan/connect/status/disconnect) に
+# 絞ってあるので、ここを開けても増えるのはその 5 つだけ。
+%sudo ALL=(ALL) NOPASSWD: /usr/local/bin/myos-wifi
 EOF
 chmod 440 "$WORK/etc/sudoers.d/myos"
 
@@ -409,8 +416,21 @@ for dev in /sys/class/net/*; do
     [ -e "$dev" ] || continue
     n=$(basename "$dev")
     [ "$n" = "lo" ] && continue
-    # 無線は鍵の入力が要るので、ここでは触らない。有線だけ自動で上げる。
-    [ -d "$dev/wireless" ] && continue
+
+    if [ -d "$dev/wireless" ]; then
+        # 無線は鍵が要るので勝手には繋がない。ただし前に繋いだ設定が
+        # 残っていれば、そこへは繋ぎ直す。毎回 GUI を開かせるのは
+        # 「繋がらない」と同じくらい困る。
+        conf="/etc/myos/wpa-$n.conf"
+        if [ -f "$conf" ] && command -v wpa_supplicant >/dev/null 2>&1; then
+            ip link set "$n" up 2>/dev/null
+            wpa_supplicant -B -i "$n" -c "$conf" >/dev/null 2>&1 &&
+                dhclient -nw "$n" >/dev/null 2>&1
+            echo "[myos-init] wifi: reconnecting $n"
+        fi
+        continue
+    fi
+
     ip link set "$n" up 2>/dev/null
     if [ -x /sbin/dhclient ] || [ -x /usr/sbin/dhclient ]; then
         dhclient -nw "$n" >/dev/null 2>&1
@@ -771,12 +791,14 @@ cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
    "$ROOTDIR/src/gui/myos_runas.c" "$ROOTDIR/src/gui/myos_setup.c" \
    "$ROOTDIR/src/gui/myos_login.c" "$ROOTDIR/src/gui/myos_alert.c" \
    "$ROOTDIR/src/gui/myos_shutdown.c" "$ROOTDIR/src/gui/myos_poweroff.c" \
-   "$ROOTDIR/src/gui/myos_splash.c" \
+   "$ROOTDIR/src/gui/myos_splash.c" "$ROOTDIR/src/gui/myos_net.c" \
    "$ROOTDIR/src/gui/x98.h" "$ROOTDIR/src/gui/myosconf.h" \
    "$ROOTDIR/src/gui/filetypes.h" "$WORK/usr/local/src/"
 # 起動画面。X はまだ無いので Xlib は使わず、freetype だけを直に叩く。
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-splash \
     /usr/local/src/myos_splash.c -lfreetype -lm
+chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 \
+    -o /usr/local/bin/myos-net /usr/local/src/myos_net.c -lX11 -lXft
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-wm \
     /usr/local/src/myos_wm.c -lX11 -lXft
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-files \
@@ -827,10 +849,12 @@ cp "$ROOTDIR/src/install/myos-install-init"    "$WORK/myos-install-init"
 cp "$ROOTDIR/src/install/myos-install-session" "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/install/myos-writeboot"       "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/install/myos-mkfwinit"        "$WORK/usr/local/bin/"
+cp "$ROOTDIR/src/gui/myos-wifi"                "$WORK/usr/local/bin/"
 chmod 755 "$WORK/myos-install-init" \
           "$WORK/usr/local/bin/myos-install-session" \
           "$WORK/usr/local/bin/myos-writeboot" \
-          "$WORK/usr/local/bin/myos-mkfwinit"
+          "$WORK/usr/local/bin/myos-mkfwinit" \
+          "$WORK/usr/local/bin/myos-wifi"
 chmod 755 "$WORK"/usr/local/bin/myos-*
 
 echo "=== 一般の Linux アプリを入れるための道具 ==="
@@ -1400,6 +1424,7 @@ OpenGL Test|app|/usr/bin/glxgears
 MS-DOS Prompt|app|/usr/local/bin/myos-prompt
 Notepad|file|/usr/local/bin/myos-notepad
 Settings|app|/usr/local/bin/myos-settings
+Network|globe|/usr/local/bin/myos-net
 Removable|folder|/usr/local/bin/myos-files /media
 EOF
 
@@ -1408,6 +1433,7 @@ cat > "$WORK/etc/myos/startmenu.conf" <<'EOF'
 Programs|app|/usr/local/bin/myos-files /usr/bin
 Documents|folder|/usr/local/bin/myos-files ~
 Settings|app|/usr/local/bin/myos-settings
+Network|globe|/usr/local/bin/myos-net
 Removable|folder|/usr/local/bin/myos-files /media
 Web|globe|/usr/bin/firefox-esr
 Notepad|file|/usr/local/bin/myos-notepad
