@@ -591,8 +591,47 @@ if [ -n "$SPLASH" ]; then
     wait "$SPLASH" 2>/dev/null
 fi
 
-/usr/bin/xinit /myos-session -- /usr/bin/X :0 vt1 -nolisten tcp -novtswitch -logverbose 6
-rc=$?
+# デスクトップが落ちたら立て直す。
+#
+# タスクマネージャからウィンドウマネージャを終了させると、xinit は
+# 「セッションの主が終わった」と見なして X ごと畳む。今まではそこで
+# シェルに落ちていたので、間違って殺すと再起動するしか戻る道が無かった。
+# Windows が explorer.exe を立て直すのと同じで、勝手に戻すのが正しい。
+#
+# ただし無条件に繰り返すと、X がそもそも起動できない機械 (設定が壊れた、
+# ドライバが無い) で永久に画面が明滅するだけになる。すぐ死んだ場合だけを
+# 「失敗」と数えて、3 回続いたら諦めてシェルを出す。
+# 一度でも長く動いていれば数え直す (使っている最中の事故は何度でも直す)。
+X_FAILS=0
+while :; do
+    X_START=$(cut -d. -f1 /proc/uptime)
+
+    /usr/bin/xinit /myos-session -- \
+        /usr/bin/X :0 vt1 -nolisten tcp -novtswitch -logverbose 6
+    rc=$?
+
+    # 電源を切るときも X は落ちる。ここで抜ける。
+    [ -e /run/myos-shutdown ] && break
+
+    X_END=$(cut -d. -f1 /proc/uptime)
+    X_LIVED=$((X_END - X_START))
+
+    if [ "$X_LIVED" -ge 20 ]; then
+        X_FAILS=0
+    else
+        X_FAILS=$((X_FAILS + 1))
+    fi
+
+    if [ "$X_FAILS" -ge 3 ]; then
+        echo "[myos-init] the desktop failed $X_FAILS times in a row; giving up"
+        break
+    fi
+
+    echo "[myos-init] the desktop exited with $rc after ${X_LIVED}s; restarting"
+    printf '\033[2J\033[H' >&3 2>/dev/null
+    printf '\n  The desktop stopped. Starting it again...\n' >&3 2>/dev/null
+    sleep 1
+done
 
 # 電源を切るときも X は落ちる。myos-poweroff がその直前に置く印を見て、
 # 正常な終了と異常な終了を分ける。

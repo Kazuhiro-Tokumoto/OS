@@ -87,6 +87,32 @@ static Proc  prev[MAX_PROC];
 static int   n_prev;
 static unsigned long long prev_total;
 
+/* 「これを終了するとデスクトップごと落ちる」やつ。
+ *
+ * 実際に踏んだ: タスクマネージャから myos-wm を終了させたら、xinit が
+ * 「セッションの主が終わった」と見なして X ごと畳み、コンソールに
+ * 落ちた。Windows も重要なプロセスには確認を出す。同じにする。
+ *
+ * 名前で見るのは乱暴だが、systemd も cgroup も無いので
+ * 「セッションに属しているか」を機械的に知る術が無い。
+ * 出す相手を絞るほうが、出しすぎて読まれなくなるより良い。 */
+static int is_critical(const char *name)
+{
+    static const char *crit[] = {
+        "Xorg", "X", "myos-wm", "myos-desktop", "myos-session",
+        "dbus-daemon", "myos-init", NULL
+    };
+    for (int i = 0; crit[i]; i++)
+        if (!strcmp(name, crit[i])) return 1;
+    return 0;
+}
+
+/* 確認の窓。出ている間は一覧を触らせない。 */
+static int  confirm_on = 0;
+static int  confirm_force = 0;      /* 1 なら Force End */
+static long confirm_pid = -1;
+static char confirm_name[64];
+
 static int   tab = TAB_APPS;
 static int   sel[N_TABS], top[N_TABS];
 static char  msg[160];
@@ -333,14 +359,24 @@ static void scan_procs(void)
     closedir(d);
     prev_total = total;
 
-    /* CPU の重い順。同じなら常駐メモリの多い順。
-     * 見たいのはたいてい「何が食っているか」なので。 */
+    /* CPU の重い順。同じなら常駐メモリの多い順、それも同じなら PID 順。
+     * 見たいのはたいてい「何が食っているか」なので。
+     *
+     * メモリは MB に丸めてから比べる。1 秒ごとに数え直すので、
+     * 数 KB の増減で行がひっきりなしに入れ替わると、下へ動かしている
+     * 途中で狙いが逸れる。実際、myos-wm を選ぼうとして PID 1 に
+     * 当たった (断られたからよかったものの、事故の元)。
+     * 最後に PID で決めるので、動きの無いものの並びは完全に固定される。 */
     for (int i = 1; i < n_procs; i++) {
         Proc t = procs[i];
         int j = i - 1;
-        while (j >= 0 && (procs[j].pct < t.pct ||
-                          (procs[j].pct == t.pct &&
-                           procs[j].rss_kb < t.rss_kb))) {
+        while (j >= 0) {
+            long a_mb = procs[j].rss_kb / 1024, b_mb = t.rss_kb / 1024;
+            int after = (procs[j].pct < t.pct) ||
+                        (procs[j].pct == t.pct && a_mb < b_mb) ||
+                        (procs[j].pct == t.pct && a_mb == b_mb &&
+                         procs[j].pid > t.pid);
+            if (!after) break;
             procs[j + 1] = procs[j];
             j--;
         }
@@ -409,40 +445,57 @@ static void end_app(void)
     XFlush(dpy);
 }
 
+static void do_end_proc(long pid, const char *name, int force)
+{
+    int sig = force ? SIGKILL : SIGTERM;
+    if (kill((pid_t)pid, sig) == 0)
+        snprintf(msg, sizeof(msg), force ? "Ended %s (%ld)."
+                                         : "Asked %s (%ld) to stop.",
+                 name, pid);
+    else
+        snprintf(msg, sizeof(msg), "Could not stop %s (%ld): %s",
+                 name, pid, strerror(errno));
+}
+
+/* 終了させる前の門番。断るものと、確認を出すものを分ける。
+ * 戻り値 0 = ここで止めた (呼び元は何もしない) */
+static int guard(const Proc *p, int force)
+{
+    if (p->pid == getpid()) {
+        snprintf(msg, sizeof(msg), "That is Task Manager itself.");
+        return 0;
+    }
+    if (p->pid == 1) {
+        /* PID 1 を殺すとカーネルパニックになる。
+         * 押せてしまう場所に置いておくものではない。 */
+        snprintf(msg, sizeof(msg),
+                 "Ending process 1 would stop the computer.");
+        return 0;
+    }
+    if (is_critical(p->name)) {
+        confirm_on = 1;
+        confirm_force = force;
+        confirm_pid = p->pid;
+        snprintf(confirm_name, sizeof(confirm_name), "%s", p->name);
+        return 0;
+    }
+    return 1;
+}
+
 static void end_proc(void)
 {
     if (sel[TAB_PROCS] < 0 || sel[TAB_PROCS] >= n_procs) return;
     Proc *p = &procs[sel[TAB_PROCS]];
-
-    if (p->pid == getpid()) {
-        snprintf(msg, sizeof(msg), "That is Task Manager itself.");
-        return;
-    }
-    if (p->pid == 1) {
-        /* PID 1 を殺すとカーネルパニックになる。押せてしまう場所に
-         * 置いておくものではない。 */
-        snprintf(msg, sizeof(msg),
-                 "Ending process 1 would stop the computer.");
-        return;
-    }
-    if (kill((pid_t)p->pid, SIGTERM) == 0)
-        snprintf(msg, sizeof(msg), "Asked %s (%ld) to stop.",
-                 p->name, p->pid);
-    else
-        snprintf(msg, sizeof(msg), "Could not stop %s (%ld): %s",
-                 p->name, p->pid, strerror(errno));
+    if (!guard(p, 0)) return;
+    do_end_proc(p->pid, p->name, 0);
 }
 
 static void kill_proc(void)
 {
     if (sel[TAB_PROCS] < 0 || sel[TAB_PROCS] >= n_procs) return;
     Proc *p = &procs[sel[TAB_PROCS]];
-    if (p->pid == getpid() || p->pid == 1) { end_proc(); return; }
-    if (kill((pid_t)p->pid, SIGKILL) == 0)
-        snprintf(msg, sizeof(msg), "Ended %s (%ld).", p->name, p->pid);
-    else
-        snprintf(msg, sizeof(msg), "Could not end %s (%ld): %s",
-                 p->name, p->pid, strerror(errno));
+    if (!guard(p, 1)) return;
+    do_end_proc(p->pid, p->name, 1);
 }
 
 /* --- 描画 ---------------------------------------------------------------- */
@@ -608,6 +661,35 @@ static void draw_head(void)
     }
 }
 
+/* 確認の窓。Windows 98 のダイアログと同じ形。 */
+static void draw_confirm(void)
+{
+    int w = 400, h = 150;
+    int px = (WIN_W - w) / 2, py = (WIN_H - h) / 2;
+
+    x98_fill(&x98, cv, px, py, w, h, x98.face);
+    x98_bevel(&x98, cv, px, py, w, h, 1);
+    x98_titlebar(&x98, cv, px + 3, py + 3, w - 6, 18, "myOS");
+
+    char l1[160], l2[160];
+    snprintf(l1, sizeof(l1), "%s (%ld) is part of the desktop.",
+             confirm_name, confirm_pid);
+    snprintf(l2, sizeof(l2), "%s it will close everything you have open.",
+             confirm_force ? "Force-ending" : "Ending");
+
+    x98_text(&x98, cv, px + 20, py + 34, l1, x98.text);
+    x98_text(&x98, cv, px + 20, py + 52, l2, x98.text);
+    x98_text(&x98, cv, px + 20, py + 76,
+             "The desktop will start again by itself.", x98.shadow);
+    x98_text(&x98, cv, px + 20, py + 94,
+             "Unsaved work in other programs is lost.", x98.shadow);
+
+    x98_button(&x98, cv, px + w - 2 * 84 - 24, py + h - BTN_H - 12,
+               84, BTN_H, "End it", 0);
+    x98_button(&x98, cv, px + w - 84 - 14, py + h - BTN_H - 12,
+               84, BTN_H, "Cancel", 0);
+}
+
 static void redraw(void)
 {
     x98_fill(&x98, cv, 0, 0, WIN_W, WIN_H, x98.face);
@@ -635,6 +717,8 @@ static void redraw(void)
     x98_button(&x98, cv, WIN_W - 2 * BTN_W - 20, by, BTN_W, BTN_H,
                "Refresh", 0);
     x98_button(&x98, cv, WIN_W - BTN_W - PAD, by, BTN_W, BTN_H, "Close", 0);
+
+    if (confirm_on) draw_confirm();
 
     XCopyArea(dpy, cv, win, x98.gc, 0, 0, WIN_W, WIN_H, 0, 0);
 }
@@ -725,6 +809,22 @@ int main(void)
             int cnt = (tab == TAB_APPS) ? n_apps : n_procs;
             int vis = (LIST_H - 4) / ROW_H;
 
+            if (confirm_on) {
+                /* 既定は Cancel。Enter で流れで消してしまわないよう、
+                 * 「はい」は明示的に Y か Space だけにする。 */
+                if (n > 0 && (buf[0] == 'y' || buf[0] == 'Y' || buf[0] == ' ')) {
+                    confirm_on = 0;
+                    do_end_proc(confirm_pid, confirm_name, confirm_force);
+                    refresh();
+                } else if (ks == XK_Escape || ks == XK_Return ||
+                           ks == XK_KP_Enter || n > 0) {
+                    confirm_on = 0;
+                    snprintf(msg, sizeof(msg), "Cancelled.");
+                }
+                redraw();
+                break;
+            }
+
             if (ks == XK_Escape) goto done;
             else if (ks == XK_Up   && sel[tab] > 0) sel[tab]--;
             else if (ks == XK_Down && sel[tab] < cnt - 1) sel[tab]++;
@@ -753,6 +853,23 @@ int main(void)
 
         case ButtonPress: {
             int mx = ev.xbutton.x, my = ev.xbutton.y;
+
+            if (confirm_on) {
+                int w = 400, h = 150;
+                int px = (WIN_W - w) / 2, py = (WIN_H - h) / 2;
+                int by = py + h - BTN_H - 12;
+                if (my >= by && my < by + BTN_H &&
+                    mx >= px + w - 2 * 84 - 24 && mx < px + w - 84 - 24) {
+                    confirm_on = 0;
+                    do_end_proc(confirm_pid, confirm_name, confirm_force);
+                    refresh();
+                } else {
+                    confirm_on = 0;
+                    snprintf(msg, sizeof(msg), "Cancelled.");
+                }
+                redraw();
+                break;
+            }
 
             if (my < TAB_H + 4) {
                 int x = 8;
