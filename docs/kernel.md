@@ -86,3 +86,40 @@ firmware-amd-graphics  firmware-intel-sound
 `CONFIG_RANDOMIZE_BASE` を無効にしている。
 自作ブートローダーの問題とカーネルの問題を切り分けやすくするため。
 安定したら戻してよい。
+
+## 組み込みドライバの一覧 (`/lib/modules`)
+
+`.ko` は 1 つも作らない (全部 `=y`) が、`/lib/modules/<版>/` は用意する。
+
+無いと `modprobe` が組み込み済みのドライバを「無い」と言って失敗する。
+
+```
+$ modprobe ext4
+modprobe: FATAL: Module ext4 not found in directory /lib/modules/6.12.9
+```
+
+ルートを動かしているのがその ext4 なので、動いているのに無いと言われる。
+切り分けのときに紛らわしく、modalias で自動ロードを試みる udev も
+毎回空振りする。
+
+置くのは `.ko` ではなく「組み込まれているものの一覧」で、
+`tools/modules-builtin/<版>/` に控えてある。合計 324KB。
+`build_rootfs.sh` がこれを `/lib/modules/<版>/` へ写して `depmod` にかける。
+すると `modprobe ext4` は黙って成功する (組み込み済みだと分かるため)。
+存在しないものは今までどおり失敗する。
+
+### 作り直し方
+
+カーネルの設定を変えたときだけ作り直す。ビルドし終わった木から拾う。
+
+```
+cp $KDIR/linux-$KVER/modules.builtin          tools/modules-builtin/$KVER/
+cp $KDIR/linux-$KVER/modules.builtin.modinfo  tools/modules-builtin/$KVER/
+: > tools/modules-builtin/$KVER/modules.order
+```
+
+**この手順を `build_kernel.sh` に足してはいけない。** あのファイルの
+中身がビルドのカーネルキャッシュの鍵になっていて、触ると中身が同じでも
+カーネルが作り直しになる。版番号の決め (`docs/release-1.0.md` の
+「版の付け方」) はキャッシュが外れたかどうかで `y` か `z` かを決めるので、
+実際には変わっていないカーネルのために `y` が上がることになる。

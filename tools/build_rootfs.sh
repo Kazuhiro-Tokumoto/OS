@@ -23,6 +23,10 @@
 set -e
 
 WORK="${1:-/home/user/rootfs}"
+
+# このスクリプトの置き場所から見たリポジトリの根。
+# 途中で参照するものがあるので、早い段階で決めておく。
+ROOTDIR="$(cd "$(dirname "$0")/.." && pwd)"
 SUITE="${SUITE:-bookworm}"
 MIRROR="${MIRROR:-http://deb.debian.org/debian}"
 
@@ -845,6 +849,36 @@ done
 EOF
 chmod 755 "$WORK/usr/local/bin/myos-automount"
 
+echo "=== 組み込みドライバの一覧を置く ==="
+# .ko は 1 つも無い (全部 =y) が、/lib/modules は作る。
+#
+# 無いと modprobe が「そんなモジュールは無い」と言って失敗する。
+# ルートを動かしている ext4 でさえそう言われる:
+#   modprobe: FATAL: Module ext4 not found in directory /lib/modules/6.12.9
+# ドライバは動いているのに、である。切り分けのとき紛らわしいし、
+# modalias で自動ロードを試みる udev もいちいち空振りする。
+#
+# 中身は .ko ではなく「組み込まれている 627 個の一覧」。
+# tools/modules-builtin に控えてあるものを置いて depmod にかけると、
+# modprobe が「それは組み込み済み」と理解して黙って成功するようになる。
+# 全部で 324KB。
+#
+# この一覧はカーネルの設定を変えたときだけ作り直す。作り方は
+# docs/kernel.md に書いてある (build_kernel.sh には書かない。
+# あれを触るとカーネルのキャッシュが外れて、中身が同じでも
+# 作り直しになるため)。
+MODSRC="$ROOTDIR/tools/modules-builtin"
+if [ -d "$MODSRC" ]; then
+    for d in "$MODSRC"/*/; do
+        [ -d "$d" ] || continue
+        kv="$(basename "$d")"
+        mkdir -p "$WORK/lib/modules/$kv"
+        cp "$d"* "$WORK/lib/modules/$kv/"
+        chroot "$WORK" depmod -b / "$kv" 2>/dev/null || true
+        echo "--- /lib/modules/$kv ($(du -sh "$WORK/lib/modules/$kv" | cut -f1)) ---"
+    done
+fi
+
 echo "=== Xorg の設定 (modesetting + glamor) ==="
 # GPU を使う。カーネルの DRM (i915 / amdgpu / nouveau) の上で
 # modesetting ドライバを動かし、描画は glamor に任せる。
@@ -949,7 +983,6 @@ echo "=== myOS ウィンドウマネージャをビルド ==="
 # 静的リンクで逃げようとすると、libX11 がカーソル作成で libXcursor を
 # dlopen した瞬間に別版の glibc を読み込んで落ちる (SIGFPE)。
 # 中でコンパイルしてしまうのがいちばん素直。
-ROOTDIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # gcc の有無だけでなくヘッダの有無も見る。
 # 最後の掃除で gcc を消しているので、2 回目以降のビルドでは
