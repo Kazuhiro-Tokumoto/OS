@@ -872,6 +872,13 @@ done
 EOF
 chmod 755 "$WORK/usr/local/bin/myos-automount"
 
+echo "=== ライセンスと免責を同梱する ==="
+# 「使った時点で同意したものとする」と決めた以上、入れた機械の中でも
+# 読めないと筋が通らない。ソースを持っていない人のほうが多い。
+mkdir -p "$WORK/usr/share/doc/myos"
+cp "$ROOTDIR/LICENSE"         "$WORK/usr/share/doc/myos/LICENSE"
+cp "$ROOTDIR/LICENSE.ja.md"   "$WORK/usr/share/doc/myos/LICENSE.ja.md"
+
 echo "=== プログラムの追加と削除のカタログ ==="
 # 閲覧ソフトはインストールディスクに載せない。
 #

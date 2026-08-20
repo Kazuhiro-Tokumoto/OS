@@ -291,6 +291,14 @@ static void page_welcome(void)
 
     say(15, 6, "Setup will ask you which disk to use before changing");
     say(16, 6, "anything. Nothing is written until you confirm.");
+
+    /* 「使った時点で同意したものとする」と決めた以上、その文面は
+     * どこかで実際に見えていないと成り立たない。文書の中だけに
+     * 書いてあっても、読んでいない人に同意させたことにはならない。
+     * 最初の画面に出す。 */
+    say(19, 6, "myOS is provided as is. The author takes no responsibility");
+    say(20, 6, "for anything that happens. By using it you accept that.");
+    say(21, 6, "myOS itself is MIT licensed. See LICENSE in the source tree.");
     fflush(stdout);
 }
 
