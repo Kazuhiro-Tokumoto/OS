@@ -698,11 +698,23 @@ static void draw_display(void)
  * 途中で電源が落ちても古いほうで起動する。新しいカーネルが動かなかった
  * ときは、起動中に R を押しっぱなしにすると 1 つ前で立つ。
  */
-static char up_installed[64] = "";
+/* 3 つを別々に持つ。ひとつにまとめると、また嘘をつく。
+ *
+ *   up_os      入れたときの ISO の版。カーネルを入れ替えても変わらない
+ *   up_kernel  いま生領域に乗っているカーネルの版
+ *   up_latest  出ている版
+ *
+ * 押せるかどうかは up_new (myos-update の kernelnew) だけで決める。
+ * 版の数字を見比べて決めてはいけない。z を上げた版はカーネルを
+ * 作り直していないので、数字は進んでいても中身は同じ。押せてしまうと
+ * 21MB 落として生領域を書き換えて、何も変わらないことになる。 */
+static char up_os[64]        = "";
+static char up_kernel[64]    = "";
 static char up_latest[64]    = "";
 static char up_msg[200]      = "";
 static int  up_checked       = 0;
 static int  up_busy          = 0;
+static int  up_new           = 0;   /* 1 = 入れ替える価値がある */
 
 #define UP_BTN_W 132
 #define UP_BTN_H 24
@@ -720,10 +732,14 @@ static void up_check(void)
             if (!eq) continue;
             *eq = 0;
             char *k = myos_trim(line), *v = myos_trim(eq + 1);
-            if (!strcmp(k, "installed"))
-                snprintf(up_installed, sizeof(up_installed), "%s", v);
+            if (!strcmp(k, "os"))
+                snprintf(up_os, sizeof(up_os), "%s", v);
+            else if (!strcmp(k, "kernel"))
+                snprintf(up_kernel, sizeof(up_kernel), "%s", v);
             else if (!strcmp(k, "latest"))
                 snprintf(up_latest, sizeof(up_latest), "%s", v);
+            else if (!strcmp(k, "kernelnew"))
+                up_new = !strcmp(v, "yes");
         }
         pclose(f);
     }
@@ -733,11 +749,18 @@ static void up_check(void)
     if (!up_latest[0] || strchr(up_latest, '('))
         snprintf(up_msg, sizeof(up_msg),
                  "Could not reach the internet. Connect first.");
-    else if (!strcmp(up_installed, up_latest))
-        snprintf(up_msg, sizeof(up_msg), "myOS is up to date.");
-    else
+    else if (up_new)
         snprintf(up_msg, sizeof(up_msg),
-                 "Version %s is available.", up_latest);
+                 "A newer kernel is available (%s).", up_latest);
+    else if (strcmp(up_os, up_latest))
+        /* 出ている版のほうが新しいが、カーネルは作り直されていない。
+         * ここで黙って「最新です」と出すと、Update を押しても何も
+         * 起きない理由が分からない。何が要るのかを書く。 */
+        snprintf(up_msg, sizeof(up_msg),
+                 "Kernel is current. %s changes need a reinstall.",
+                 up_latest);
+    else
+        snprintf(up_msg, sizeof(up_msg), "myOS is up to date.");
 }
 
 static void draw_update(void)
@@ -746,24 +769,29 @@ static void draw_update(void)
 
     x98_text(&x98, win, 16, y, "myOS", x98.text);
     char b[200];
-    snprintf(b, sizeof(b), "    Installed:  %s",
-             up_installed[0] ? up_installed : "(not checked)");
+    /* 「入っているもの」を 2 行に分ける。Update が入れ替えるのは
+     * カーネルだけなので、1 行にまとめると、押したあと直っていない
+     * ものまで直ったように見える。 */
+    snprintf(b, sizeof(b), "    System:     %s",
+             up_os[0] ? up_os : "(not checked)");
     x98_text(&x98, win, 16, y + 22, b, x98.text);
+    snprintf(b, sizeof(b), "    Kernel:     %s",
+             up_kernel[0] ? up_kernel : "(not checked)");
+    x98_text(&x98, win, 16, y + 40, b, x98.text);
     snprintf(b, sizeof(b), "    Available:  %s",
              up_latest[0] ? up_latest : "(not checked)");
-    x98_text(&x98, win, 16, y + 40, b, x98.text);
+    x98_text(&x98, win, 16, y + 58, b, x98.text);
 
-    x98_button(&x98, win, 32, y + 62, UP_BTN_W, UP_BTN_H,
+    x98_button(&x98, win, 32, y + 80, UP_BTN_W, UP_BTN_H,
                up_busy ? "Working..." : "Check for updates", 0);
-    if (up_checked && up_latest[0] && !strchr(up_latest, '(') &&
-        strcmp(up_installed, up_latest))
-        x98_button(&x98, win, 32 + UP_BTN_W + 10, y + 62,
-                   UP_BTN_W, UP_BTN_H, "Update myOS", 0);
+    if (up_checked && up_new)
+        x98_button(&x98, win, 32 + UP_BTN_W + 10, y + 80,
+                   UP_BTN_W, UP_BTN_H, "Update kernel", 0);
 
     if (up_msg[0])
-        x98_text(&x98, win, 32, y + 92, up_msg, x98.shadow);
+        x98_text(&x98, win, 32, y + 110, up_msg, x98.shadow);
 
-    y += 120;
+    y += 138;
     x98_text(&x98, win, 16, y, "What happens", x98.text);
     x98_text(&x98, win, 16, y + 20,
              "    The new kernel is written to the spare half of the boot",
@@ -1033,15 +1061,14 @@ int main(void)
 
             if (tab == TAB_UPDATE) {
                 int y = TAB_H + 20;
-                int by = y + 62;
+                int by = y + 80;
                 if (my >= by && my < by + UP_BTN_H) {
                     if (mx >= 32 && mx < 32 + UP_BTN_W) {
                         redraw(); XFlush(dpy);
                         up_check();
-                    } else if (up_checked && mx >= 32 + UP_BTN_W + 10 &&
-                               mx < 32 + 2 * UP_BTN_W + 10 &&
-                               up_latest[0] && !strchr(up_latest, '(') &&
-                               strcmp(up_installed, up_latest)) {
+                    } else if (up_checked && up_new &&
+                               mx >= 32 + UP_BTN_W + 10 &&
+                               mx < 32 + 2 * UP_BTN_W + 10) {
                         /* 別のプロセスに任せる。ここで待つと、
                          * 数分かかるダウンロードの間ずっと固まって見える。
                          * 端末を出して進み具合が見えるようにする。 */
@@ -1060,7 +1087,7 @@ int main(void)
                         up_busy = 0;
                     }
                 }
-                int ay = y + 120 + 116 + 20;
+                int ay = y + 138 + 116 + 20;   /* draw_update と同じ積み方 */
                 if (my >= ay && my < ay + UP_BTN_H &&
                     mx >= 32 && mx < 32 + UP_BTN_W) {
                     pid_t p = fork();

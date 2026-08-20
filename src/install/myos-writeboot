@@ -32,6 +32,7 @@
 # マウントする (init/main.c の init_eaccess 判定)。起動の道筋は
 # 今までと同じままで、ファームだけが先回りして置かれることになる。
 # ============================================================================
+import hashlib
 import os
 import struct
 import subprocess
@@ -117,6 +118,42 @@ def read_table(disk, lba):
     return t if len(t) == SECTOR and t[:8] == PTBL_MAGIC else None
 
 
+def kernel_sha(disk, lba=PTBL_LBA):
+    """テーブルが指しているカーネルを読み直して sha256 を返す。
+
+    「入れたときの値」を控えておくのではなく、そのつど生領域の実物を
+    読んで数える。控えは書き換え忘れや書き損じで実物とずれるが、
+    ずれた控えを信じると「入れ替えたのに入れ替わっていない」を
+    見落とす。読み直せばずれようが無い。
+
+    setup 部は必ずセクタ丁度に収まり、本体はバイト数がテーブルに
+    入っているので、繋げると元の bzImage と 1 バイトも違わない。
+    """
+    t = read_table(disk, lba)
+    if t is None:
+        return None
+    ks_lba, ks_cnt, kb_lba, _kb_cnt, b_size = struct.unpack_from(
+        "<IIIII", t, 0x08)
+    if not ks_cnt or not b_size:
+        return None
+    h = hashlib.sha256()
+    try:
+        with open(disk, "rb") as f:
+            f.seek(ks_lba * SECTOR)
+            d = f.read(ks_cnt * SECTOR)
+            if len(d) != ks_cnt * SECTOR:
+                return None
+            h.update(d)
+            f.seek(kb_lba * SECTOR)
+            d = f.read(b_size)
+            if len(d) != b_size:
+                return None
+            h.update(d)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
 def pick_slot(disk, boot_lba, area):
     """次に書く置き場の開始 LBA を返す。
 
@@ -144,6 +181,7 @@ def main():
     kernel_path = None
     initrd_path = None
     keep_cmdline = False
+    want_sha = False
 
     # --kernel を渡すと、起動メディアではなくその bzImage を書く。
     # インストール後にカーネルだけ入れ替えるための口。
@@ -157,8 +195,23 @@ def main():
             initrd_path = argv[i + 1]; i += 2
         elif a == "--keep-cmdline":
             keep_cmdline = True; i += 1
+        elif a == "--kernel-sha":
+            want_sha = True; i += 1
         else:
             rest.append(a); i += 1
+
+    # いま起動に使っているカーネルの sha256 を出すだけの口。
+    # myos-update が「落としてくる価値があるか」を決めるのに使う。
+    # ここに置くのは、テーブルの並びを知っているのがこのファイルだから。
+    # 同じ struct を 2 か所に書くと、片方だけ直したときに黙って壊れる。
+    if want_sha:
+        if not rest:
+            die("usage: myos-writeboot --kernel-sha <disk>")
+        h = kernel_sha(rest[0])
+        if h is None:
+            die("ペイロードテーブルを読めません")
+        print(h)
+        return
 
     if len(rest) < 3:
         die("usage: myos-writeboot [--kernel <bzImage>] [--initrd <file>] "

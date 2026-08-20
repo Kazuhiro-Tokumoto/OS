@@ -877,13 +877,18 @@ EOF
 chmod 755 "$WORK/usr/local/bin/myos-automount"
 
 echo "=== 版を刻む ==="
-# myos-update がこれを見て「いま入っているのは何か」を判断する。
+# 入れたときの ISO の版。GUI もインストーラも /usr の中身も、全部この版。
+#
+# myos-update はここを書き換えない。あれが入れ替えるのはカーネルだけ
+# なので、書き換えると「1.5.4 です」と名乗りながら 1.5.4 で直した GUI の
+# 不具合を全部抱えている機械が出来る。次に報告を受けたとき、版番号から
+# 原因を追えなくなる。カーネルの版は kernel = として別の行に入る。
 # ビルドの外から MYOS_VERSION で渡す (ワークフローが渡している)。
 # 渡されなければ 0 にしておく。0 は「どの版より古い」ので、
 # 更新の確認をすると必ず「新しいのがある」と出る。手で作った
 # rootfs でも動きは壊れない。
 mkdir -p "$WORK/etc/myos"
-printf '# myOS: いま入っている版。myos-update が見る。\nversion = %s\n' \
+printf '# myOS: 入れたときの ISO の版。カーネルを入れ替えても変わらない。\nversion = %s\n' \
     "${MYOS_VERSION:-0}" > "$WORK/etc/myos/version.conf"
 cat "$WORK/etc/myos/version.conf"
 

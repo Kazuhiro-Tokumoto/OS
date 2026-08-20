@@ -2,8 +2,8 @@
 # ============================================================================
 # myos-update  -  カーネルを入れ替える root 側の手先
 #
-#   myos-update status              いま入っている版と、出ている版
-#   myos-update check               新しい版があるか (0 = ある)
+#   myos-update status              いま入っているものと、出ているもの
+#   myos-update check               入れ替える価値があるか (0 = ある)
 #   myos-update apply               取ってきて入れ替える
 #   myos-update rollback-info       控えがあるか
 #
@@ -11,6 +11,34 @@
 # 出来ること」の境界になる。取ってくる先は決め打ちで、引数から
 # URL を渡せるようにはしない。渡せるようにすると、任意の中身を
 # 生領域へ書かせる口になる。
+#
+# --- 何を比べるか ------------------------------------------------------------
+#
+# 版の文字列 (1.5.3 と 1.5.4) を比べてはいけない。z を上げた版は
+# 「カーネルを作り直していない」という意味なので、中身は 1 バイトも
+# 違わない。それを落として書くと、21MB 落として生領域を書き換えて、
+# 得るものが何も無いことになる。書き込みには必ず危険が伴うのだから、
+# 得るものが無いなら書かないのが正しい。
+#
+# なので比べるのは実物の sha256。
+#
+#   いま起動に使っているもの: myos-writeboot --kernel-sha が
+#     生領域から読み直して数える。控えを持たないので、ずれようが無い。
+#   出ているもの: リリースの .sha256 (92 バイト)。本体を落とす前に
+#     取れるので、要らないと分かった時点で 21MB を諦められる。
+#
+# --- 版の文字列をどう扱うか --------------------------------------------------
+#
+# このコマンドはカーネルと initramfs しか書き換えない。GUI も
+# インストーラも /usr の中身もそのまま残る。だから version.conf の
+# version (= 入れたときの ISO の版) を書き換えてはいけない。書き換えると
+# 「1.5.4 です」と名乗りながら 1.5.4 で直した GUI の不具合を全部
+# 抱えている機械が出来上がり、次に報告を受けたとき版番号から原因を
+# 追えなくなる。
+#
+# カーネルの版は kernel = として別に持つ。こちらはただの見出しで、
+# 入れ替えるかどうかの判断には使わない (判断は上のとおり sha256)。
+# だから書き損じても表示が古くなるだけで、動きは壊れない。
 #
 # 入れ替えの安全は myos-writeboot 側が持っている:
 #   使っていないほうの置き場へ書く -> 読み返す -> 控えを取る -> 差し替え
@@ -23,11 +51,32 @@ REPO="Kazuhiro-Tokumoto/OS"
 API="https://api.github.com/repos/$REPO/releases/latest"
 CONF=/etc/myos/version.conf
 WORK=/var/tmp/myos-update
+WRITEBOOT=/usr/local/bin/myos-writeboot
 
 die() { echo "myos-update: $1" >&2; exit 1; }
 
-cur_version() {
-    sed -n 's/^version[[:space:]]*=[[:space:]]*//p' "$CONF" 2>/dev/null | head -1
+conf_get() {
+    sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$CONF" 2>/dev/null | head -1
+}
+
+# version.conf の 1 行を書き換える。無ければ足す。
+conf_set() {
+    [ -f "$CONF" ] || printf '# myOS: いま入っている版。\n' > "$CONF"
+    if grep -q "^$1[[:space:]]*=" "$CONF" 2>/dev/null; then
+        sed -i "s|^$1[[:space:]]*=.*|$1 = $2|" "$CONF"
+    else
+        printf '%s = %s\n' "$1" "$2" >> "$CONF"
+    fi
+}
+
+os_version() { conf_get version; }
+
+# カーネルの版は見出しでしかない。記録が無ければ、入れたときの ISO の版
+# がそのままカーネルの版でもあるので、そちらを出す。
+kernel_version() {
+    k=$(conf_get kernel)
+    [ -n "$k" ] && { echo "$k"; return; }
+    os_version
 }
 
 # 起動に使っているディスクと、生領域の場所を割り出す。
@@ -39,6 +88,12 @@ boot_info() {
         die "/etc/myos/boot.conf の中身が足りません"
 }
 
+# いま生領域に乗っているカーネルの sha256。
+local_sha() {
+    [ -x "$WRITEBOOT" ] || return 1
+    "$WRITEBOOT" --kernel-sha "$disk" 2>/dev/null
+}
+
 latest_json() {
     curl -fsSL --max-time 30 "$API" 2>/dev/null || die "リリースの情報を取れません"
 }
@@ -48,28 +103,67 @@ latest_version() {
         head -1
 }
 
+# 出ている版のカーネルの sha256。本体ではなく 92 バイトのほうを取る。
+remote_sha() {
+    curl -fsSL --max-time 60 \
+        "https://github.com/$REPO/releases/download/v$1/myos-kernel-$1.bzImage.sha256" \
+        2>/dev/null | awk '{print $1; exit}'
+}
+
 case "$1" in
 status)
-    echo "installed = $(cur_version)"
-    echo "latest    = $(latest_version 2>/dev/null || echo '(取れません)')"
-    if [ -x /usr/local/bin/myos-writeboot ]; then
-        boot_info 2>/dev/null && echo "disk      = $disk (生領域 $bootlba)"
+    echo "os        = $(os_version)"
+    echo "kernel    = $(kernel_version)"
+    new=$(latest_version 2>/dev/null || true)
+    if [ -z "$new" ]; then
+        echo "latest    = (取れません)"
+        echo "kernelnew = unknown"
+    else
+        echo "latest    = $new"
+        # カーネルを入れ替える意味があるかどうか。
+        # 版が違っても中身が同じなら no。それが z を上げた版。
+        if boot_info 2>/dev/null && cur=$(local_sha) && [ -n "$cur" ] &&
+           want=$(remote_sha "$new") && [ -n "$want" ]; then
+            if [ "$cur" = "$want" ]; then
+                echo "kernelnew = no"
+            else
+                echo "kernelnew = yes"
+            fi
+        else
+            echo "kernelnew = unknown"
+        fi
+    fi
+    if boot_info 2>/dev/null; then
+        echo "disk      = $disk (生領域 $bootlba)"
     fi
     ;;
 
 check)
-    cur=$(cur_version); new=$(latest_version)
+    boot_info
+    new=$(latest_version)
     [ -n "$new" ] || die "最新の版が分かりません"
-    [ "$cur" != "$new" ]
+    cur=$(local_sha) || die "いまのカーネルを読めません"
+    want=$(remote_sha "$new")
+    [ -n "$want" ] || die "出ているカーネルの sha256 を取れません"
+    [ "$cur" != "$want" ]
     ;;
 
 apply)
     boot_info
     new=$(latest_version)
     [ -n "$new" ] || die "最新の版が分かりません"
-    cur=$(cur_version)
-    if [ "$cur" = "$new" ]; then
-        echo "myos-update: 既に $cur です"
+
+    cur=$(local_sha) || die "いまのカーネルを読めません"
+    want=$(remote_sha "$new")
+    [ -n "$want" ] || die "出ているカーネルの sha256 を取れません"
+
+    if [ "$cur" = "$want" ]; then
+        # 版の数字は進んでいても、カーネルは同じもの。書く意味が無い。
+        # 見出しだけ合わせておく。
+        conf_set kernel "$new"
+        echo "myos-update: カーネルは既に最新です ($new と同じ中身)。"
+        echo "myos-update: この版でカーネルは作り直されていないので、"
+        echo "myos-update: 書き換えるものがありません。"
         exit 0
     fi
 
@@ -80,7 +174,7 @@ apply)
     echo "取得中: $k"
     curl -fL --max-time 900 -o "$WORK/$k"        "$base/$k" ||
         die "カーネルを取れません"
-    curl -fL --max-time 60  -o "$WORK/$k.sha256" "$base/$k.sha256" ||
+    curl -fsSL --max-time 60 -o "$WORK/$k.sha256" "$base/$k.sha256" ||
         die "sha256 を取れません"
 
     echo "照合中"
@@ -99,15 +193,21 @@ apply)
 
     echo "書き込み中 (使っていないほうの置き場へ)"
     # shellcheck disable=SC2086
-    /usr/local/bin/myos-writeboot --kernel "$WORK/$k" $fw --keep-cmdline \
+    "$WRITEBOOT" --kernel "$WORK/$k" $fw --keep-cmdline \
         "$disk" "$root" "$bootlba"
 
-    sed -i "s/^version.*/version = $new/" "$CONF" 2>/dev/null ||
-        printf 'version = %s\n' "$new" > "$CONF"
+    # 書けたことを、控えではなく実物で確かめる。
+    got=$(local_sha) || die "書いたあとの読み直しに失敗しました"
+    [ "$got" = "$want" ] ||
+        die "書いたものが合いません (テーブルは差し替わっていません)"
+
+    conf_set kernel "$new"
     rm -rf "$WORK"
-    echo "myos-update: $cur -> $new。再起動すると新しいカーネルで立ちます。"
+    echo "myos-update: カーネルを $new に入れ替えました。"
+    echo "myos-update: 再起動すると新しいカーネルで立ちます。"
     echo "myos-update: 動かなかったら、起動中に R を押しっぱなしにすると"
     echo "myos-update: 1 つ前のカーネルで立ちます。"
+    echo "myos-update: (GUI などカーネル以外は $(os_version) のままです)"
     ;;
 
 rollback-info)
