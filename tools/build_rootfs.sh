@@ -1898,8 +1898,28 @@ if [ "${SLIM:-1}" = "1" ]; then
 
     # --- 2. ファイルを消す -------------------------------------------------
     # 文書。読み物であって動作には要らない。
-    rm -rf "$WORK/usr/share/doc"/* "$WORK/usr/share/man"/* \
-           "$WORK/usr/share/info"/* 2>/dev/null || true
+    #
+    # ただし copyright だけは残す。あれは読み物ではなく、配布に付いて
+    # 回る条件そのもの。GPL のものは「ライセンス文を一緒に配る」ことが
+    # 求められるし、Debian のパッケージはその文面を copyright に置いて
+    # いる。丸ごと消すと、条件を満たさないまま配ることになる。
+    # 569 個で約 17MB (圧縮すれば数 MiB)。閲覧ソフトを外して空けた
+    # 84MiB から見れば安い。
+    #
+    # myos 自身のライセンスもここに置いてあるので、巻き添えで消えない
+    # ようにする (実際、足した直後にこの行で消えていた)。
+    find "$WORK/usr/share/doc" -mindepth 1 \
+         ! -name copyright \
+         ! -path "$WORK/usr/share/doc/myos*" \
+         -delete 2>/dev/null || true
+    rm -rf "$WORK/usr/share/man"/* "$WORK/usr/share/info"/* 2>/dev/null || true
+
+    # 同梱物の索引。掃除が終わった *あと* に作る。
+    # 先に作ると、そのあと消したものまで載ってしまう。
+    sh "$ROOTDIR/tools/gen-third-party.sh" "$WORK" \
+       "$WORK/usr/share/doc/myos/THIRD-PARTY.md" 2>/dev/null || true
+    echo "--- 同梱物の索引: $(grep -c '^| [a-z0-9]' \
+         "$WORK/usr/share/doc/myos/THIRD-PARTY.md" 2>/dev/null || echo 0) 件 ---"
 
     # Noto CJK の実体。purge が効かなかった場合や、前回のビルドの残りが
     # 上書きビルドで生き延びた場合に備えて、ここでも落とす。

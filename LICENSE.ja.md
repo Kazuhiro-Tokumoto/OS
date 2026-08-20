@@ -47,10 +47,14 @@ myOS の配布物 (ISO) には、他の人が書いたものが大量に入っ�
 | fcitx5 / mozc | LGPL / BSD ほか | Debian bookworm |
 | ClamAV | GPLv2 | Debian bookworm |
 | VL Gothic | 独自 (再配布可) | Debian bookworm |
-| そのほか Debian の各パッケージ | 各パッケージによる | Debian bookworm |
+| そのほか 500 個以上 | それぞれ | Debian bookworm |
 
-各パッケージのライセンス全文は、インストール後の
-`/usr/share/doc/<パッケージ名>/copyright` にそのまま入っている。
+**全部の一覧は同梱してある。** ビルドのたびに実物から作り直しているので、
+手で書いた表のように古くならない。
+
+- 索引 — `/usr/share/doc/myos/THIRD-PARTY.md`
+  (パッケージ名とライセンス名の対応表)
+- ライセンス文そのもの — `/usr/share/doc/<パッケージ名>/copyright`
 
 ### ソースコードの入手
 
