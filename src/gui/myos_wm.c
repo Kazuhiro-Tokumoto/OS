@@ -152,7 +152,14 @@ static void load_list(const char *path, Icon *arr, int *n,
     FILE *f = fopen(path, "r");
     if (f) {
         char line[400];
-        while (fgets(line, sizeof(line), f)) add_line_to(arr, n, line);
+        while (fgets(line, sizeof(line), f)) {
+            /* "key = value" の行はアイコンではない。
+             * 古い profile の ~/.myos/desktop.conf には壁紙の設定だけが
+             * 入っていることがあり、それを名前として拾うと化ける。
+             * 区切りの | が無く = がある行は設定とみなして飛ばす。 */
+            if (!strchr(line, '|') && strchr(line, '=')) continue;
+            add_line_to(arr, n, line);
+        }
         fclose(f);
     }
     if (!*n && fallback)
@@ -175,7 +182,16 @@ static const char *default_menu[] = {
 
 static void load_icons(void)
 {
-    load_list(DESKTOP_CONF, icons, &n_icons, default_icons);
+    /* ユーザーのものがあればそれを使う。「プログラムの追加と削除」が
+     * 入れたものをここへ足す。1 つも読めなければシステムの並びに戻る
+     * (壁紙だけが入った古いファイルを掴んでも、空になって /etc に落ちる)。 */
+    {
+        char dpath[512];
+        myos_conf(dpath, sizeof(dpath), "desktop.conf");
+        load_list(dpath, icons, &n_icons, NULL);
+        if (!n_icons)
+            load_list(DESKTOP_CONF, icons, &n_icons, default_icons);
+    }
     load_list(STARTMENU_CONF, menu, &n_menu, default_menu);
 }
 
@@ -217,7 +233,17 @@ static void icon_pos(int i, int *px, int *py)
  * 98 には fit が無いが、いまの写真は画面より大きいのが普通なので、
  * center だけだと真ん中を切り抜いただけの絵になる。
  */
-#define WALL_CONF "desktop.conf"
+/* 壁紙は専用のファイルに置く。
+ *
+ * 1.5.1 まではアイコンと同じ desktop.conf に同居していた。設定アプリが
+ * 壁紙を保存するとき ~/.myos/desktop.conf を丸ごと書き直すので、
+ * そこにアイコンの行を足しても消える。実際「プログラムの追加と削除」で
+ * 入れたもののアイコンが出てこない、という形で刺さった。
+ * 書く人ごとにファイルを分けて、踏み合わないようにする。
+ *
+ * 古い profile では desktop.conf に壁紙が書いてあるので、そちらも見る。 */
+#define WALL_CONF "wallpaper.conf"
+#define WALL_CONF_OLD "desktop.conf"
 
 static Pixmap wall_pm = None;
 
@@ -354,6 +380,8 @@ static void wall_load(void)
 
     char path[512], mode[32] = "center", file[512] = "";
     myos_conf(path, sizeof(path), WALL_CONF);
+    if (access(path, R_OK) != 0)
+        myos_conf(path, sizeof(path), WALL_CONF_OLD);
     FILE *f = fopen(path, "r");
     if (f) {
         char line[600];

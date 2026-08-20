@@ -555,7 +555,9 @@ static void bg_load(void)
 
     /* いまの設定を読んで、選択位置と並べ方に反映する。 */
     char conf[512], cur[256] = "";
-    myos_conf(conf, sizeof(conf), "desktop.conf");
+    myos_conf(conf, sizeof(conf), "wallpaper.conf");
+    if (access(conf, R_OK) != 0)      /* 1.5.1 までの置き場所 */
+        myos_conf(conf, sizeof(conf), "desktop.conf");
     FILE *f = fopen(conf, "r");
     if (f) {
         char line[600];
@@ -581,7 +583,10 @@ static void bg_load(void)
 static void bg_apply(void)
 {
     char conf[512];
-    myos_user_conf(conf, sizeof(conf), "desktop.conf");
+    /* 壁紙だけの専用ファイル。desktop.conf に書くと、そこに並んでいる
+     * デスクトップのアイコンを消してしまう (このファイルは丸ごと
+     * 書き直すため)。書く人ごとに分ける。 */
+    myos_user_conf(conf, sizeof(conf), "wallpaper.conf");
     FILE *f = fopen(conf, "w");
     if (!f) {
         snprintf(bg_msg, sizeof(bg_msg), "Could not save the setting.");

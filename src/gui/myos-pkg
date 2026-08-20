@@ -1,0 +1,67 @@
+#!/bin/sh
+# ============================================================================
+# myos-pkg  -  カタログに載っているものだけを入れる root 側の手先
+#
+#   myos-pkg list              カタログをそのまま出す
+#   myos-pkg installed <id>    入っているか (0 = 入っている)
+#   myos-pkg update            apt の一覧を取り直す
+#   myos-pkg install <id>...   カタログの id を入れる
+#
+# sudoers で NOPASSWD にするので、ここが「一般ユーザーが root として
+# 出来ること」の境界になる。だから **カタログに無い名前は受け付けない**。
+# 引数をそのまま apt へ渡すと、実質 "パスワード無しで何でも入れられる"
+# ことになってしまう。無線の myos-wifi と同じ考え方。
+# ============================================================================
+set -e
+CATALOG=/etc/myos/catalog.conf
+export DEBIAN_FRONTEND=noninteractive
+
+die() { echo "myos-pkg: $1" >&2; exit 1; }
+
+[ -f "$CATALOG" ] || die "$CATALOG がありません"
+
+# id からパッケージ名を引く。無ければ空。
+pkgs_of() {
+    awk -F'|' -v id="$1" '$2 == id { print $4; exit }' "$CATALOG"
+}
+
+case "$1" in
+list)
+    cat "$CATALOG"
+    ;;
+
+installed)
+    [ -n "$2" ] || die "id がありません"
+    p=$(pkgs_of "$2")
+    [ -n "$p" ] || die "カタログに $2 がありません"
+    # 先頭の 1 つが入っていれば入っていると見なす。
+    # 複数を束ねた項目 (開発ツールなど) でも、代表が居れば十分。
+    set -- $p
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q '^install ok installed$'
+    ;;
+
+update)
+    apt-get update -qq
+    ;;
+
+install)
+    shift
+    [ $# -gt 0 ] || die "id がありません"
+    list=""
+    for id in "$@"; do
+        p=$(pkgs_of "$id")
+        [ -n "$p" ] || die "カタログに $id がありません"
+        list="$list $p"
+    done
+    # -y だけでは足りない。設定ファイルの衝突で止まると、
+    # 画面の無いところで返事を待って固まる。
+    apt-get install -y --no-install-recommends \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
+        $list
+    ;;
+
+*)
+    die "使い方: myos-pkg list|installed <id>|update|install <id>..."
+    ;;
+esac

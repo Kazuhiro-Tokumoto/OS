@@ -38,7 +38,6 @@ xserver-xorg-input-libinput,\
 xinit,\
 x11-xserver-utils,\
 xfonts-base,\
-firefox-esr,\
 fonts-dejavu-core,\
 libgtk-3-0,\
 dbus-x11,\
@@ -316,6 +315,10 @@ cat > "$WORK/etc/sudoers.d/myos" <<'EOF'
 # 出来ることを myos-wifi の 5 つ (list/scan/connect/status/disconnect) に
 # 絞ってあるので、ここを開けても増えるのはその 5 つだけ。
 %sudo ALL=(ALL) NOPASSWD: /usr/local/bin/myos-wifi
+# 閲覧ソフトなどを入れるのに要る。myos-pkg はカタログ
+# (/etc/myos/catalog.conf) に載っている id しか受け付けないので、
+# ここが「パスワード無しで何でも入れられる」口にはならない。
+%sudo ALL=(ALL) NOPASSWD: /usr/local/bin/myos-pkg
 EOF
 chmod 440 "$WORK/etc/sudoers.d/myos"
 
@@ -778,6 +781,26 @@ fi
 # 一般ユーザーで動かす (見張るのは本人のダウンロード先なので)。
 /usr/local/bin/myos-scan-daemon >/dev/null 2>&1 &
 
+# 閲覧ソフトが 1 つも無ければ、一度だけ選ぶ画面を出す。
+#
+# 1.5.2 からインストールディスクに閲覧ソフトを載せていない。
+# デスクトップの Internet を押せばいつでも開けるが、初回は
+# 「何を押せばいいか」から分からないので、こちらから出す。
+#
+# 出すのは一度だけ。断った人に毎回出すのは押し付けになる。
+# 印を消せばまた出る。
+if [ ! -e "$HOME/.myos/getapps-done" ]; then
+    have=""
+    for b in firefox-esr firefox epiphany-browser netsurf-gtk chromium; do
+        command -v "$b" >/dev/null 2>&1 && { have=1; break; }
+    done
+    if [ -z "$have" ] && [ -x /usr/local/bin/myos-getapps ]; then
+        mkdir -p "$HOME/.myos"
+        touch "$HOME/.myos/getapps-done"
+        /usr/local/bin/myos-getapps --need-browser >/dev/null 2>&1 &
+    fi
+fi
+
 # 入っているアプリをスタートメニューに拾い直す。
 # あとから .deb などを入れたものが、次のログオンで出てくる。
 /usr/local/bin/myos-refresh-menu >/dev/null 2>&1
@@ -848,6 +871,34 @@ while true; do
 done
 EOF
 chmod 755 "$WORK/usr/local/bin/myos-automount"
+
+echo "=== プログラムの追加と削除のカタログ ==="
+# 閲覧ソフトはインストールディスクに載せない。
+#
+#   1. 場所。Firefox は squashfs に潰しても 84MiB あり、ISO の余裕
+#      36MiB を 1 つで食い潰していた。外して 667 -> 583MiB になる。
+#   2. 選べること。1GB の機械に Firefox は重い。機械に合ったものを
+#      あとから選べるほうがいい。
+#
+# 網が無ければ apt も閲覧ソフトも使えないので、「網に繋がってから
+# 落とす」で困る人はいない。
+#
+# 容量は bookworm のリポジトリで実測した値 (依存を全部足したもの)。
+# 書式: 種別|id|名前|パッケージ|MB|デスクトップの名前|アイコン|コマンド|説明
+# デスクトップの名前が空なら、アイコンは作らない
+# (スタートメニューには myos-refresh-menu が .desktop から拾う)。
+mkdir -p "$WORK/etc/myos"
+cat > "$WORK/etc/myos/catalog.conf" <<'EOF'
+# --- 閲覧ソフト。1 つ選べばよい ---
+browser|firefox|Firefox ESR|firefox-esr|271|Internet|globe|myos-browser|Works with the most sites. Uses the most memory.
+browser|epiphany|Epiphany (GNOME Web)|epiphany-browser|188|Internet|globe|myos-browser|Lighter. A few sites look wrong.
+browser|netsurf|NetSurf|netsurf-gtk|6|Internet|globe|myos-browser|Tiny. Almost no JavaScript, so most of today's web will not open.
+# --- そのほか ---
+extra|devtools|C compiler (gcc)|gcc make libc6-dev|157|||| Build C programs on the machine itself.
+extra|jdk|Java compiler (javac)|default-jdk-headless|75|||| Compile .java, not just run .jar.
+extra|cjkfonts|More Japanese fonts|fonts-noto-cjk|88|||| Adds the Noto family next to VL Gothic.
+extra|vlc|VLC media player|vlc|84|VLC|app|vlc|Plays video and audio files.
+EOF
 
 echo "=== 組み込みドライバの一覧を置く ==="
 # .ko は 1 つも無い (全部 =y) が、/lib/modules は作る。
@@ -1027,6 +1078,7 @@ cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
    "$ROOTDIR/src/gui/myos_shutdown.c" "$ROOTDIR/src/gui/myos_poweroff.c" \
    "$ROOTDIR/src/gui/myos_splash.c" "$ROOTDIR/src/gui/myos_net.c" \
    "$ROOTDIR/src/gui/myos_devmgr.c" "$ROOTDIR/src/gui/myos_taskman.c" \
+   "$ROOTDIR/src/gui/myos_getapps.c" \
    "$ROOTDIR/src/gui/x98.h" "$ROOTDIR/src/gui/myosconf.h" \
    "$ROOTDIR/src/gui/filetypes.h" "$WORK/usr/local/src/"
 # 起動画面。X はまだ無いので Xlib は使わず、freetype だけを直に叩く。
@@ -1040,6 +1092,9 @@ chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 \
 # タスクマネージャ。Ctrl+Alt+Del から出てくる。
 chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 \
     -o /usr/local/bin/myos-taskman /usr/local/src/myos_taskman.c -lX11 -lXft
+# プログラムの追加と削除。閲覧ソフトはこれで入れる。
+chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 \
+    -o /usr/local/bin/myos-getapps /usr/local/src/myos_getapps.c -lX11 -lXft
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-wm \
     /usr/local/src/myos_wm.c -lX11 -lXft
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-files \
@@ -1091,11 +1146,15 @@ cp "$ROOTDIR/src/install/myos-install-session" "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/install/myos-writeboot"       "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/install/myos-mkfwinit"        "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-wifi"                "$WORK/usr/local/bin/"
+cp "$ROOTDIR/src/gui/myos-pkg"                "$WORK/usr/local/bin/"
+cp "$ROOTDIR/src/gui/myos-browser"            "$WORK/usr/local/bin/"
 chmod 755 "$WORK/myos-install-init" \
           "$WORK/usr/local/bin/myos-install-session" \
           "$WORK/usr/local/bin/myos-writeboot" \
           "$WORK/usr/local/bin/myos-mkfwinit" \
-          "$WORK/usr/local/bin/myos-wifi"
+          "$WORK/usr/local/bin/myos-wifi" \
+          "$WORK/usr/local/bin/myos-pkg" \
+          "$WORK/usr/local/bin/myos-browser"
 chmod 755 "$WORK"/usr/local/bin/myos-*
 
 echo "=== 一般の Linux アプリを入れるための道具 ==="
@@ -1465,8 +1524,8 @@ cat > "$WORK/etc/myos/filetypes.conf" <<'EOF'
 
 # --- 文書 -------------------------------------------------------------------
 txt,log,md,ini,cfg,conf,inc,csv|Text Document|file|myos-notepad %1|
-html,htm,xhtml|HTML Document|globe|firefox-esr %1|myos-notepad %1
-pdf|PDF Document|globe|firefox-esr %1|
+html,htm,xhtml|HTML Document|globe|myos-browser %1|myos-notepad %1
+pdf|PDF Document|globe|myos-browser %1|
 
 # --- 画像 -------------------------------------------------------------------
 png,jpg,jpeg,gif,bmp,ppm,pgm,tif,tiff,webp,ico,xpm|Image|file|myos-image %1|
@@ -1558,7 +1617,7 @@ cat > "$WORK/usr/local/bin/xdg-open" <<'EOF'
 # パスとして探して失敗する。scheme:// が付いていたら閲覧ソフトへ。
 case "$1" in
     *://*|mailto:*)
-        exec firefox-esr "$1"
+        exec /usr/local/bin/myos-browser "$1"
         ;;
 esac
 exec /usr/local/bin/myos-open "$1"
@@ -1747,7 +1806,7 @@ cat > "$WORK/etc/myos/desktop.conf" <<'EOF'
 # アイコン: computer / folder / file / app / globe / java
 My Computer|computer|/usr/local/bin/myos-files /
 My Documents|folder|/usr/local/bin/myos-files ~
-Firefox|globe|/usr/bin/firefox-esr
+Internet|globe|/usr/local/bin/myos-browser
 Java Demo|java|/usr/local/bin/myos-java -jar /usr/local/share/myos/hello.jar
 OpenGL Test|app|/usr/bin/glxgears
 MS-DOS Prompt|app|/usr/local/bin/myos-prompt
@@ -1763,10 +1822,11 @@ Programs|app|/usr/local/bin/myos-files /usr/bin
 Documents|folder|/usr/local/bin/myos-files ~
 Settings|app|/usr/local/bin/myos-settings
 Network|globe|/usr/local/bin/myos-net
+Add Programs|app|/usr/local/bin/myos-getapps
 Device Manager|computer|/usr/local/bin/myos-devmgr
 Task Manager|app|/usr/local/bin/myos-taskman
 Removable|folder|/usr/local/bin/myos-files /media
-Web|globe|/usr/bin/firefox-esr
+Internet|globe|/usr/local/bin/myos-browser
 Notepad|file|/usr/local/bin/myos-notepad
 Virus Scan|app|/usr/local/bin/myos-term /usr/local/bin/myos-scan
 MS-DOS Prompt|app|/usr/local/bin/myos-prompt
