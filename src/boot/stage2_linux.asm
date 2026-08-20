@@ -55,6 +55,20 @@ INITRD_DST      equ 0x08000000          ; initramfs (128MB)
                                         ; よう十分に離してある
 SCRATCH_SEG     equ 0x1000              ; bzImage 先頭を置く作業領域 = 0x10000
 PTBL_OFF        equ 0x0900              ; ペイロードテーブルの置き場 (0x0900)
+PTBL_BACKUP_LBA equ 21                  ; 1 つ前のテーブルの控え。
+                                        ; カーネルを入れ替えるとき、
+                                        ; myos-writeboot が差し替える直前の
+                                        ; ものをここへ写す。起動中に R を
+                                        ; 押しっぱなしにすると、こちらで
+                                        ; 起動する。
+                                        ;
+                                        ; 危ないのは「書き込みの中断」より
+                                        ; 「新しいカーネルがその機械で
+                                        ; 動かない」ほう。前者はテーブルが
+                                        ; 1 セクタなので書けるか書けないかの
+                                        ; どちらかで済む。後者は起動しなく
+                                        ; なって手が出せなくなるので、
+                                        ; 戻り道を用意しておく。
 PTBL_LBA        equ 20                  ; ペイロードテーブルのあるセクタ。
                                         ; 20 * 512 = 10240 = 5 * 2048 なので
                                         ; CD の 2048 バイトセクタ境界にも乗る
@@ -313,6 +327,25 @@ stage2_start:
         ; 5. ペイロードテーブルを読む
         ; ------------------------------------------------------------
 .read_ptbl:
+        ; R が押されていたら、1 つ前のカーネルで起動する。
+        ; INT 16h AH=01h は「あるか見るだけ」で取り出さない。
+        ; 取り出さないので、この先の S (セーフグラフィックス) の判定も
+        ; そのまま動く。
+        mov     byte [use_backup], 0
+        mov     ah, 0x01
+        int     0x16
+        jz      .no_rollback
+        and     al, 0xDF                ; 小文字を大文字に寄せる
+        cmp     al, 'R'
+        jne     .no_rollback
+        mov     byte [use_backup], 1
+        mov     ah, ATTR_WARN
+        mov     si, msg_rollback
+        call    puts_attr
+        call    newline
+        mov     byte [cur_attr], ATTR_NORMAL
+.no_rollback:
+
         mov     si, msg_ptbl
         call    puts
         ; CD から起動したときは、ペイロードは ISO の中の別の場所にある。
@@ -328,6 +361,10 @@ stage2_start:
         mov     es, ax
         mov     bx, PTBL_OFF
         mov     eax, PTBL_LBA
+        cmp     byte [use_backup], 0
+        je      .ptbl_not_backup
+        mov     eax, PTBL_BACKUP_LBA
+.ptbl_not_backup:
         cmp     byte [dsk_cdrom], 0
         je      .ptbl_lba_ok
         mov     eax, [cd_ptbl_lba]
@@ -1124,6 +1161,7 @@ msg_jump:       db 'Jumping to kernel entry (ESI=boot_params, EBX=EBP=EDI=0)...'
 msg_ok:         db 'OK', 0
 msg_fail:       db 'FAILED', 0
 msg_halted:     db 'Halted.', 0
+msg_rollback:   db 'R held: starting the previous kernel', 0
 msg_chain1:     db 'myOS is already installed on this computer.', 0
 msg_chain2:     db 'Starting it.  Press I now to run Setup instead ', 0
 msg_chain_hdd:  db 'Starting the installed myOS', 0
@@ -1140,6 +1178,7 @@ sv_spt:         dw 0
 sv_heads:       dw 0
 cd_left:        dw 0
 try_drive:      db 0
+use_backup:     db 0
 tick_base:      dd 0
 kver:           dw 0
 setup_sects:    dw 0

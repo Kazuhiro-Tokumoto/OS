@@ -9,8 +9,14 @@
 # 書くもの (build_image.py が作るディスクイメージと同じ並び):
 #   LBA 0        Stage1。パーティションテーブルだけは元のまま残す
 #   LBA 1-17     Stage2
-#   LBA 20       ペイロードテーブル
+#   LBA 20       ペイロードテーブル (いま起動に使うもの)
+#   LBA 21       その 1 つ前の控え (R を押すとこちらで起動する)
 #   生領域       カーネルの setup 部と本体、そのうしろに initramfs
+#
+# 生領域は 256MB あるのに、使っているのは 57MB ほど。半分ずつに区切って
+# 2 つの置き場として使う。カーネルを入れ替えるときは、いま使っていない
+# ほうへ書いてから、テーブル (1 セクタ) を差し替える。書いている途中で
+# 電源が落ちても、差し替える前なら古いほうがそのまま生きている。
 #
 # 元ネタは起動メディアの中身をそのまま使う。
 #   /run/myos/boot/boot.img     Stage1 + Stage2
@@ -36,6 +42,13 @@ ALIGN = 4                       # 2048 バイト境界 (CD と同じ揃え方)
 
 PTBL_MAGIC = b"MYOSPLD2"
 PTBL_LBA = 20
+# 1 つ前のテーブルの控え。カーネルを入れ替えるとき、書き換える直前の
+# ものをここへ写す。Stage2 は起動中に R が押されていたらこちらを読む。
+#
+# 危ないのは「書き込みの中断」より「新しいカーネルがその機械で動かない」
+# ほう。前者はテーブルが 1 セクタなので実質書けるか書けないかのどちらかで
+# 済むが、後者は起動しなくなって手が出せなくなる。だから戻り道を用意する。
+PTBL_BACKUP_LBA = 21
 CMDLINE_OFF = 0x28              # Stage2 の PT_CMDLINE と同じ値
 # コマンドラインの終わりは 0x1F0 まで。
 # セクタ末尾 (0x1F0-) には画面の希望と媒体の印を置いてあるので、
@@ -84,11 +97,75 @@ def boot_area_sectors(disk, boot_lba):
     return 0
 
 
+def split_bzimage(data):
+    """bzImage を setup 部と本体に分ける。build_iso.py と同じ切り方。"""
+    if data[0x202:0x206] != b"HdrS":
+        die("bzImage に 'HdrS' がありません")
+    setup_sects = data[0x1F1] or 4
+    n = (setup_sects + 1) * SECTOR
+    return data[:n], data[n:]
+
+
+def read_table(disk, lba):
+    """ディスク上のペイロードテーブルを 1 枚読む。目印が違えば None。"""
+    try:
+        with open(disk, "rb") as f:
+            f.seek(lba * SECTOR)
+            t = f.read(SECTOR)
+    except OSError:
+        return None
+    return t if len(t) == SECTOR and t[:8] == PTBL_MAGIC else None
+
+
+def pick_slot(disk, boot_lba, area):
+    """次に書く置き場の開始 LBA を返す。
+
+    生領域を半分ずつ 2 つに区切り、いま使っていないほうを返す。
+    まだ何も入っていなければ前半。
+
+    area が読めなかった (0) ときは区切りようがないので前半に書く。
+    上書きになるが、それは今までと同じ動きなので後退はしない。
+    """
+    first = align_up(boot_lba)
+    if not area:
+        return first, first
+    mid = align_up(boot_lba + area // 2)
+
+    cur = read_table(disk, PTBL_LBA)
+    if cur is None:
+        return first, mid
+    s_lba = struct.unpack_from("<I", cur, 0x08)[0]
+    # いま前半を使っているなら後半へ、後半なら前半へ。
+    return (mid, first) if s_lba < mid else (first, mid)
+
+
 def main():
-    if len(sys.argv) < 4:
-        die("usage: myos-writeboot <disk> <rootdev> <boot_area_lba> [initrd]")
-    disk, rootdev, boot_lba = sys.argv[1], sys.argv[2], int(sys.argv[3])
-    initrd_path = sys.argv[4] if len(sys.argv) > 4 else None
+    argv = sys.argv[1:]
+    kernel_path = None
+    initrd_path = None
+    keep_cmdline = False
+
+    # --kernel を渡すと、起動メディアではなくその bzImage を書く。
+    # インストール後にカーネルだけ入れ替えるための口。
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--kernel" and i + 1 < len(argv):
+            kernel_path = argv[i + 1]; i += 2
+        elif a == "--initrd" and i + 1 < len(argv):
+            initrd_path = argv[i + 1]; i += 2
+        elif a == "--keep-cmdline":
+            keep_cmdline = True; i += 1
+        else:
+            rest.append(a); i += 1
+
+    if len(rest) < 3:
+        die("usage: myos-writeboot [--kernel <bzImage>] [--initrd <file>] "
+            "[--keep-cmdline] <disk> <rootdev> <boot_area_lba> [initrd]")
+    disk, rootdev, boot_lba = rest[0], rest[1], int(rest[2])
+    if initrd_path is None and len(rest) > 3:
+        initrd_path = rest[3]
 
     initrd = b""
     if initrd_path:
@@ -96,33 +173,47 @@ def main():
             die(f"{initrd_path} がありません")
         initrd = open(initrd_path, "rb").read()
 
-    for p in (BOOT_IMG, PAYLOAD):
-        if not os.path.exists(p):
-            die(f"{p} がありません (起動メディアが見えていない)")
+    if kernel_path:
+        # カーネルだけ入れ替える。Stage1 と Stage2 は今のものをそのまま
+        # 使う (ディスクに既に入っている)。触らないほうが安全でもある。
+        if not os.path.exists(kernel_path):
+            die(f"{kernel_path} がありません")
+        k_setup, k_body = split_bzimage(open(kernel_path, "rb").read())
+        stage1 = stage2 = None
+    else:
+        for p in (BOOT_IMG, PAYLOAD):
+            if not os.path.exists(p):
+                die(f"{p} がありません (起動メディアが見えていない)")
 
-    boot = open(BOOT_IMG, "rb").read()
-    if len(boot) < (1 + STAGE2_SECTORS) * SECTOR:
-        die("boot.img が小さすぎます")
-    stage1 = bytearray(boot[:SECTOR])
-    stage2 = boot[SECTOR:(1 + STAGE2_SECTORS) * SECTOR]
+        boot = open(BOOT_IMG, "rb").read()
+        if len(boot) < (1 + STAGE2_SECTORS) * SECTOR:
+            die("boot.img が小さすぎます")
+        stage1 = bytearray(boot[:SECTOR])
+        stage2 = boot[SECTOR:(1 + STAGE2_SECTORS) * SECTOR]
 
-    # 起動メディアのペイロードから、カーネルの setup 部と本体を取り出す。
-    pay = open(PAYLOAD, "rb").read()
-    if pay[:8] != PTBL_MAGIC:
-        die("payload.bin の目印が違います")
-    s_lba, s_cnt, b_lba, b_cnt, b_size = struct.unpack_from("<IIIII", pay, 0x08)
+        # 起動メディアのペイロードから、カーネルの setup 部と本体を取り出す。
+        pay = open(PAYLOAD, "rb").read()
+        if pay[:8] != PTBL_MAGIC:
+            die("payload.bin の目印が違います")
+        s_lba, s_cnt, b_lba, b_cnt, b_size = struct.unpack_from(
+            "<IIIII", pay, 0x08)
 
-    # ペイロード内の位置は CD 上の絶対 LBA になっている。
-    # 先頭 (テーブル) の LBA を引いて、ファイル内の位置に直す。
-    base = s_lba - align_up(1)
-    k_setup = pay[(s_lba - base) * SECTOR:(s_lba - base + s_cnt) * SECTOR]
-    k_body = pay[(b_lba - base) * SECTOR:(b_lba - base) * SECTOR + b_size]
-    if k_setup[0x202 - 0:0x206] != b"HdrS" and k_setup[0x202:0x206] != b"HdrS":
-        die("カーネルの 'HdrS' が見つかりません")
+        # ペイロード内の位置は CD 上の絶対 LBA になっている。
+        # 先頭 (テーブル) の LBA を引いて、ファイル内の位置に直す。
+        base = s_lba - align_up(1)
+        k_setup = pay[(s_lba - base) * SECTOR:(s_lba - base + s_cnt) * SECTOR]
+        k_body = pay[(b_lba - base) * SECTOR:(b_lba - base) * SECTOR + b_size]
+        if k_setup[0x202:0x206] != b"HdrS":
+            die("カーネルの 'HdrS' が見つかりません")
 
     # --- 置き場所を決める ---------------------------------------------------
-    # 生領域 (パーティション 1) の先頭から順に置く。
-    lba = align_up(boot_lba)
+    # 生領域を半分ずつ 2 つに区切り、いま使っていないほうへ書く。
+    # 書き終えてからテーブルを差し替えるので、途中で電源が落ちても
+    # 古いほうがそのまま生きている。
+    area = boot_area_sectors(disk, boot_lba)
+    slot, other = pick_slot(disk, boot_lba, area)
+
+    lba = slot
     ks_lba, ks_cnt = lba, nsect(len(k_setup))
     lba = align_up(lba + ks_cnt)
     kb_lba, kb_cnt = lba, nsect(len(k_body))
@@ -136,11 +227,20 @@ def main():
     # 生領域の大きさは決め打ちにせず、パーティションテーブルから読む。
     # 決め打ちにすると、あとで容量を変えたときに片方だけ直して食い違う。
     # (古い 128MB の入れ方に上書きする場合もあるので、実物を見るのが確実)
-    area = boot_area_sectors(disk, boot_lba)
-    used = lba - align_up(boot_lba)
-    if area and used > area:
-        die(f"生領域 {area * SECTOR // 1048576}MB に収まりません "
-            f"({used * SECTOR // 1048576}MB 必要)")
+    #
+    # 収まるかどうかは「この置き場の終わり」で見る。前半に書いたものが
+    # 後半へはみ出すと、次に入れ替えるとき自分で自分を壊すことになる。
+    if area:
+        limit = align_up(boot_lba + area) if slot != align_up(boot_lba) \
+                else align_up(boot_lba + area // 2)
+        if area // 2 < nsect(len(k_setup)) + nsect(len(k_body)) + \
+                       nsect(len(initrd)) + 3 * ALIGN:
+            # 2 つに割ると入らない大きさ。割らずに前半だけ使う
+            # (入れ替えは上書きになるが、入らないよりよい)。
+            limit = align_up(boot_lba + area)
+        if lba > limit:
+            die(f"生領域の置き場 {(limit - slot) * SECTOR // 1048576}MB に"
+                f"収まりません ({(lba - slot) * SECTOR // 1048576}MB 必要)")
 
     # Stage2 は initramfs を 0x08000000 (128MB) へ読み込む。カーネルが
     # 展開に使う領域 (setup ヘッダの init_size) とぶつかると、伸ばした
@@ -170,6 +270,15 @@ def main():
                f"initcall_blacklist=vmw_pci_driver_init "
                f"root={rootdev} rootfstype=ext4 rw "
                f"init=/myos-init")
+    # カーネルだけ入れ替えるとき、いま動いているコマンドラインを
+    # 引き継ぎたいことがある (解像度の希望や、手で足した設定が
+    # 消えると困る)。--keep-cmdline でそうする。
+    old_tbl = read_table(disk, PTBL_LBA)
+    if keep_cmdline and old_tbl:
+        prev = bytes(old_tbl[CMDLINE_OFF:0x1F0]).split(b"\0")[0]
+        if prev:
+            cmdline = prev.decode("ascii", "replace")
+
     cmd = cmdline.encode("ascii", "replace")
     if len(cmd) >= CMDLINE_MAX:
         die("コマンドラインが長すぎます")
@@ -183,25 +292,32 @@ def main():
                      i_lba, i_cnt, len(initrd))
     tbl[CMDLINE_OFF:CMDLINE_OFF + len(cmd)] = cmd
 
-    # 画面の希望 (0x1F0-) はゼロのまま = 「おまかせ」。
-    # bytearray は 0 埋めなので明示的には書かない。
-    # 入れたあとに設定アプリの Display タブから myos-setres が書き換える。
+    # 画面の希望 (0x1F0-0x1F7)。新規なら 0 =「おまかせ」。
+    # カーネルの入れ替えでは、いま入っているものを写す。ここを 0 に
+    # 戻すと、設定アプリで選んだ解像度が入れ替えのたびに消える。
+    if kernel_path and old_tbl:
+        tbl[0x1F0:0x1F8] = old_tbl[0x1F0:0x1F8]
 
     # --- 書き込む -----------------------------------------------------------
+    # 順番が肝心。
+    #   1. カーネルと initramfs を「使っていないほうの置き場」へ書く
+    #   2. そこまで書けたことを読み返して確かめる
+    #   3. いまのテーブルを控えへ写す
+    #   4. 最後にテーブルを差し替える (1 セクタ)
+    # 3 より前で電源が落ちても、古いテーブルが古い置き場を指したまま
+    # なので、次の起動は今までどおりになる。
     with open(disk, "r+b") as f:
-        # Stage1。パーティションテーブルは元のものを残す。
-        # ここを丸ごと上書きすると、切ったばかりのパーティションが消える。
-        f.seek(0)
-        orig = f.read(SECTOR)
-        stage1[PART_TABLE_OFF:SECTOR] = orig[PART_TABLE_OFF:SECTOR]
-        f.seek(0)
-        f.write(bytes(stage1))
+        if stage1 is not None:
+            # Stage1。パーティションテーブルは元のものを残す。
+            # ここを丸ごと上書きすると、切ったばかりのパーティションが消える。
+            f.seek(0)
+            orig = f.read(SECTOR)
+            stage1[PART_TABLE_OFF:SECTOR] = orig[PART_TABLE_OFF:SECTOR]
+            f.seek(0)
+            f.write(bytes(stage1))
 
-        f.seek(STAGE2_LBA * SECTOR)
-        f.write(stage2)
-
-        f.seek(PTBL_LBA * SECTOR)
-        f.write(bytes(tbl))
+            f.seek(STAGE2_LBA * SECTOR)
+            f.write(stage2)
 
         f.seek(ks_lba * SECTOR)
         f.write(k_setup)
@@ -216,27 +332,50 @@ def main():
         f.flush()
         os.fsync(f.fileno())
 
-    # 書いたものを読み返して確かめる。
-    # ここで間違っていると、次の起動で初めて分かることになる。
+    # 中身が確かに乗ったことを確かめてから、テーブルを差し替える。
     with open(disk, "rb") as f:
-        f.seek(0)
-        if f.read(2) != bytes(stage1[:2]):
-            die("Stage1 の書き込みを確認できません")
-        f.seek(PTBL_LBA * SECTOR)
-        if f.read(8) != PTBL_MAGIC:
-            die("ペイロードテーブルの書き込みを確認できません")
         f.seek(ks_lba * SECTOR + 0x202)
         if f.read(4) != b"HdrS":
-            die("カーネルの書き込みを確認できません")
+            die("カーネルの書き込みを確認できません (テーブルは触っていない)")
+        f.seek(kb_lba * SECTOR)
+        if f.read(64) != k_body[:64]:
+            die("カーネル本体の書き込みを確認できません (テーブルは触っていない)")
         if initrd:
             f.seek(i_lba * SECTOR)
-            if f.read(16) != initrd[:16]:
-                die("initramfs の書き込みを確認できません")
+            if f.read(64) != initrd[:64]:
+                die("initramfs の書き込みを確認できません (テーブルは触っていない)")
+
+    with open(disk, "r+b") as f:
+        # いまのテーブルを控えへ。戻り道はこれ 1 本。
+        if old_tbl:
+            f.seek(PTBL_BACKUP_LBA * SECTOR)
+            f.write(bytes(old_tbl))
+            f.flush()
+            os.fsync(f.fileno())
+
+        f.seek(PTBL_LBA * SECTOR)
+        f.write(bytes(tbl))
+        f.flush()
+        os.fsync(f.fileno())
+
+    # 差し替えたものを読み返す。
+    with open(disk, "rb") as f:
+        if stage1 is not None:
+            f.seek(0)
+            if f.read(2) != bytes(stage1[:2]):
+                die("Stage1 の書き込みを確認できません")
+        f.seek(PTBL_LBA * SECTOR)
+        t = f.read(SECTOR)
+        if t[:8] != PTBL_MAGIC:
+            die("ペイロードテーブルの書き込みを確認できません")
+        if struct.unpack_from("<I", t, 0x08)[0] != ks_lba:
+            die("ペイロードテーブルが新しい置き場を指していません")
 
     subprocess.run(["sync"], check=False)
     fw = f" initrd@{i_lba} ({len(initrd) // 1048576}MB)" if initrd else ""
-    print(f"myos-writeboot: ok  stage2@{STAGE2_LBA} table@{PTBL_LBA} "
-          f"setup@{ks_lba} body@{kb_lba}{fw} root={rootdev}")
+    back = f" backup@{PTBL_BACKUP_LBA}" if old_tbl else ""
+    print(f"myos-writeboot: ok  table@{PTBL_LBA}{back} "
+          f"slot@{slot} setup@{ks_lba} body@{kb_lba}{fw} root={rootdev}")
 
 
 if __name__ == "__main__":
