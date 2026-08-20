@@ -435,6 +435,20 @@ static int do_install(void)
         fclose(f);
     }
 
+    /* あとでカーネルを入れ替えるときに要る情報を残す。
+     * 生領域がディスクのどこから始まるかは、ここでしか分からない
+     * (MBR を読み直しても、どの区画が生領域かは名前が付いていない)。
+     * myos-update がこれを読んで myos-writeboot を呼ぶ。 */
+    snprintf(path, sizeof(path), "%s/etc/myos/boot.conf", TARGET);
+    f = fopen(path, "w");
+    if (f) {
+        fprintf(f, "# myOS: 起動の仕掛けを書いた場所。myos-update が読む。\n");
+        fprintf(f, "disk=%s\n", disk_dev);
+        fprintf(f, "root=%s\n", root_dev);
+        fprintf(f, "bootlba=%s\n", boot_lba);
+        fclose(f);
+    }
+
     /* 初回セットアップをもう一度やらせる。
      * 配布イメージを作ったときの設定が残っていると、
      * 入れた人ではなく作った人のユーザーで起動してしまう。 */

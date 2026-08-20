@@ -319,6 +319,10 @@ cat > "$WORK/etc/sudoers.d/myos" <<'EOF'
 # (/etc/myos/catalog.conf) に載っている id しか受け付けないので、
 # ここが「パスワード無しで何でも入れられる」口にはならない。
 %sudo ALL=(ALL) NOPASSWD: /usr/local/bin/myos-pkg
+# カーネルの入れ替え。取ってくる先は myos-update の中で決め打ちに
+# してあり、引数から URL は渡せない。渡せるようにすると、任意の中身を
+# 生領域へ書かせる口になる。
+%sudo ALL=(ALL) NOPASSWD: /usr/local/bin/myos-update
 EOF
 chmod 440 "$WORK/etc/sudoers.d/myos"
 
@@ -872,6 +876,17 @@ done
 EOF
 chmod 755 "$WORK/usr/local/bin/myos-automount"
 
+echo "=== 版を刻む ==="
+# myos-update がこれを見て「いま入っているのは何か」を判断する。
+# ビルドの外から MYOS_VERSION で渡す (ワークフローが渡している)。
+# 渡されなければ 0 にしておく。0 は「どの版より古い」ので、
+# 更新の確認をすると必ず「新しいのがある」と出る。手で作った
+# rootfs でも動きは壊れない。
+mkdir -p "$WORK/etc/myos"
+printf '# myOS: いま入っている版。myos-update が見る。\nversion = %s\n' \
+    "${MYOS_VERSION:-0}" > "$WORK/etc/myos/version.conf"
+cat "$WORK/etc/myos/version.conf"
+
 echo "=== ライセンスと免責を同梱する ==="
 # 「使った時点で同意したものとする」と決めた以上、入れた機械の中でも
 # 読めないと筋が通らない。ソースを持っていない人のほうが多い。
@@ -1155,13 +1170,15 @@ cp "$ROOTDIR/src/install/myos-mkfwinit"        "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-wifi"                "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-pkg"                "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-browser"            "$WORK/usr/local/bin/"
+cp "$ROOTDIR/src/gui/myos-update"             "$WORK/usr/local/bin/"
 chmod 755 "$WORK/myos-install-init" \
           "$WORK/usr/local/bin/myos-install-session" \
           "$WORK/usr/local/bin/myos-writeboot" \
           "$WORK/usr/local/bin/myos-mkfwinit" \
           "$WORK/usr/local/bin/myos-wifi" \
           "$WORK/usr/local/bin/myos-pkg" \
-          "$WORK/usr/local/bin/myos-browser"
+          "$WORK/usr/local/bin/myos-browser" \
+          "$WORK/usr/local/bin/myos-update"
 chmod 755 "$WORK"/usr/local/bin/myos-*
 
 echo "=== 一般の Linux アプリを入れるための道具 ==="

@@ -1,0 +1,127 @@
+#!/bin/sh
+# ============================================================================
+# myos-update  -  カーネルを入れ替える root 側の手先
+#
+#   myos-update status              いま入っている版と、出ている版
+#   myos-update check               新しい版があるか (0 = ある)
+#   myos-update apply               取ってきて入れ替える
+#   myos-update rollback-info       控えがあるか
+#
+# sudoers で NOPASSWD にするので、ここも「一般ユーザーが root として
+# 出来ること」の境界になる。取ってくる先は決め打ちで、引数から
+# URL を渡せるようにはしない。渡せるようにすると、任意の中身を
+# 生領域へ書かせる口になる。
+#
+# 入れ替えの安全は myos-writeboot 側が持っている:
+#   使っていないほうの置き場へ書く -> 読み返す -> 控えを取る -> 差し替え
+# 差し替える前に落ちれば古いほうがそのまま生きている。
+# 新しいカーネルが動かなかったときは、起動中に R を押すと 1 つ前で立つ。
+# ============================================================================
+set -e
+
+REPO="Kazuhiro-Tokumoto/OS"
+API="https://api.github.com/repos/$REPO/releases/latest"
+CONF=/etc/myos/version.conf
+WORK=/var/tmp/myos-update
+
+die() { echo "myos-update: $1" >&2; exit 1; }
+
+cur_version() {
+    sed -n 's/^version[[:space:]]*=[[:space:]]*//p' "$CONF" 2>/dev/null | head -1
+}
+
+# 起動に使っているディスクと、生領域の場所を割り出す。
+# 入れたときの値は /etc/myos/boot.conf に置いてある。
+boot_info() {
+    [ -f /etc/myos/boot.conf ] || die "/etc/myos/boot.conf がありません"
+    . /etc/myos/boot.conf
+    [ -n "$disk" ] && [ -n "$root" ] && [ -n "$bootlba" ] ||
+        die "/etc/myos/boot.conf の中身が足りません"
+}
+
+latest_json() {
+    curl -fsSL --max-time 30 "$API" 2>/dev/null || die "リリースの情報を取れません"
+}
+
+latest_version() {
+    latest_json | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' |
+        head -1
+}
+
+case "$1" in
+status)
+    echo "installed = $(cur_version)"
+    echo "latest    = $(latest_version 2>/dev/null || echo '(取れません)')"
+    if [ -x /usr/local/bin/myos-writeboot ]; then
+        boot_info 2>/dev/null && echo "disk      = $disk (生領域 $bootlba)"
+    fi
+    ;;
+
+check)
+    cur=$(cur_version); new=$(latest_version)
+    [ -n "$new" ] || die "最新の版が分かりません"
+    [ "$cur" != "$new" ]
+    ;;
+
+apply)
+    boot_info
+    new=$(latest_version)
+    [ -n "$new" ] || die "最新の版が分かりません"
+    cur=$(cur_version)
+    if [ "$cur" = "$new" ]; then
+        echo "myos-update: 既に $cur です"
+        exit 0
+    fi
+
+    rm -rf "$WORK"; mkdir -p "$WORK"
+    base="https://github.com/$REPO/releases/download/v$new"
+    k="myos-kernel-$new.bzImage"
+
+    echo "取得中: $k"
+    curl -fL --max-time 900 -o "$WORK/$k"        "$base/$k" ||
+        die "カーネルを取れません"
+    curl -fL --max-time 60  -o "$WORK/$k.sha256" "$base/$k.sha256" ||
+        die "sha256 を取れません"
+
+    echo "照合中"
+    ( cd "$WORK" && sha256sum -c "$k.sha256" ) ||
+        die "sha256 が合いません (壊れたものを書くわけにいかない)"
+
+    # ファームウェアの initramfs は、その場で作り直す。
+    # 入れたときと同じ中身とは限らない (ファームを足したかもしれない)。
+    fw=""
+    if [ -x /usr/local/bin/myos-mkfwinit ]; then
+        echo "ファームウェアをまとめ中"
+        if /usr/local/bin/myos-mkfwinit / "$WORK/fw.cpio.gz" >/dev/null 2>&1; then
+            fw="--initrd $WORK/fw.cpio.gz"
+        fi
+    fi
+
+    echo "書き込み中 (使っていないほうの置き場へ)"
+    # shellcheck disable=SC2086
+    /usr/local/bin/myos-writeboot --kernel "$WORK/$k" $fw --keep-cmdline \
+        "$disk" "$root" "$bootlba"
+
+    sed -i "s/^version.*/version = $new/" "$CONF" 2>/dev/null ||
+        printf 'version = %s\n' "$new" > "$CONF"
+    rm -rf "$WORK"
+    echo "myos-update: $cur -> $new。再起動すると新しいカーネルで立ちます。"
+    echo "myos-update: 動かなかったら、起動中に R を押しっぱなしにすると"
+    echo "myos-update: 1 つ前のカーネルで立ちます。"
+    ;;
+
+rollback-info)
+    boot_info
+    # LBA 21 に控えがあるか
+    if dd if="$disk" bs=512 skip=21 count=1 2>/dev/null |
+       head -c 8 | grep -q MYOSPLD2; then
+        echo "backup = yes"
+    else
+        echo "backup = no"
+    fi
+    ;;
+
+*)
+    die "使い方: myos-update status|check|apply|rollback-info"
+    ;;
+esac

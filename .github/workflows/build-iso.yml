@@ -151,6 +151,10 @@ jobs:
           ls -l build/hello.jar
 
       - name: ルートファイルシステムをビルド
+        # MYOS_VERSION は /etc/myos/version.conf に刻まれる。
+        # myos-update がこれと GitHub のリリースを見比べる。
+        env:
+          MYOS_VERSION: ${{ steps.ver.outputs.version }}
         run: sudo -E sh tools/build_rootfs.sh "$ROOTFS"
 
       # ルートを固める前にやること。GPU のファームウェアをここから拾う。
@@ -208,6 +212,17 @@ jobs:
           retention-days: 90
           compression-level: 0     # ISO は縮まない。時間の無駄
 
+      # カーネル単体も置く。インストール済みの機械はこれを取ってきて
+      # 入れ替える (ISO を焼き直して入れ直す必要が無い)。
+      # 21MB。sha256 を並べて置いて、落とした側が突き合わせられるように
+      # しておく。中身が壊れたまま生領域へ書くと起動しなくなる。
+      - name: カーネルを単体でも置く
+        run: |
+          cp build/bzImage "build/myos-kernel-${{ steps.ver.outputs.version }}.bzImage"
+          cd build && sha256sum "myos-kernel-${{ steps.ver.outputs.version }}.bzImage" \
+              > "myos-kernel-${{ steps.ver.outputs.version }}.bzImage.sha256"
+          cat "myos-kernel-${{ steps.ver.outputs.version }}.bzImage.sha256"
+
       - name: リリースに添付
         if: github.event_name == 'push' || inputs.release
         env:
@@ -245,6 +260,8 @@ jobs:
               --notes-file /tmp/notes.md \
               --target "$GITHUB_SHA"
           fi
+          K="myos-kernel-${{ steps.ver.outputs.version }}.bzImage"
           gh release upload "$TAG" \
-            "build/$ISO" "build/$ISO.sha256" --clobber
+            "build/$ISO" "build/$ISO.sha256" \
+            "build/$K" "build/$K.sha256" --clobber
           gh release view "$TAG" --json url --jq .url

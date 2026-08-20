@@ -146,9 +146,10 @@ static void save_theme(void)
 }
 
 /* --- タブ ---------------------------------------------------------------- */
-enum { TAB_LOOK = 0, TAB_BG, TAB_TYPES, TAB_DISPLAY, TAB_SYSTEM, N_TABS };
+enum { TAB_LOOK = 0, TAB_BG, TAB_TYPES, TAB_DISPLAY, TAB_SYSTEM,
+       TAB_UPDATE, N_TABS };
 static const char *tab_name[N_TABS] = {
-    "Appearance", "Background", "File Types", "Display", "System"
+    "Appearance", "Background", "File Types", "Display", "System", "Update"
 };
 static int tab = TAB_LOOK;
 
@@ -687,6 +688,105 @@ static void draw_display(void)
                  "myOS falls back to one that works.", x98.shadow);
 }
 
+/* --- 更新 ----------------------------------------------------------------
+ * カーネル・Debian のセキュリティ更新・アプリを 1 箇所にまとめる。
+ * どれも「網に繋がっていないと何も出来ない」点は同じなので、
+ * 別々の画面に散らすより、ここに並べたほうが分かりやすい。
+ *
+ * カーネルの入れ替えだけは危ないので、何が起きるかを先に書いておく。
+ * 使っていないほうの置き場へ書いてからテーブルを差し替えるので、
+ * 途中で電源が落ちても古いほうで起動する。新しいカーネルが動かなかった
+ * ときは、起動中に R を押しっぱなしにすると 1 つ前で立つ。
+ */
+static char up_installed[64] = "";
+static char up_latest[64]    = "";
+static char up_msg[200]      = "";
+static int  up_checked       = 0;
+static int  up_busy          = 0;
+
+#define UP_BTN_W 132
+#define UP_BTN_H 24
+
+static void up_check(void)
+{
+    up_busy = 1;
+    snprintf(up_msg, sizeof(up_msg), "Checking...");
+
+    FILE *f = popen("sudo -n /usr/local/bin/myos-update status 2>/dev/null", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            char *eq = strchr(line, '=');
+            if (!eq) continue;
+            *eq = 0;
+            char *k = myos_trim(line), *v = myos_trim(eq + 1);
+            if (!strcmp(k, "installed"))
+                snprintf(up_installed, sizeof(up_installed), "%s", v);
+            else if (!strcmp(k, "latest"))
+                snprintf(up_latest, sizeof(up_latest), "%s", v);
+        }
+        pclose(f);
+    }
+    up_checked = 1;
+    up_busy = 0;
+
+    if (!up_latest[0] || strchr(up_latest, '('))
+        snprintf(up_msg, sizeof(up_msg),
+                 "Could not reach the internet. Connect first.");
+    else if (!strcmp(up_installed, up_latest))
+        snprintf(up_msg, sizeof(up_msg), "myOS is up to date.");
+    else
+        snprintf(up_msg, sizeof(up_msg),
+                 "Version %s is available.", up_latest);
+}
+
+static void draw_update(void)
+{
+    int y = TAB_H + 20;
+
+    x98_text(&x98, win, 16, y, "myOS", x98.text);
+    char b[200];
+    snprintf(b, sizeof(b), "    Installed:  %s",
+             up_installed[0] ? up_installed : "(not checked)");
+    x98_text(&x98, win, 16, y + 22, b, x98.text);
+    snprintf(b, sizeof(b), "    Available:  %s",
+             up_latest[0] ? up_latest : "(not checked)");
+    x98_text(&x98, win, 16, y + 40, b, x98.text);
+
+    x98_button(&x98, win, 32, y + 62, UP_BTN_W, UP_BTN_H,
+               up_busy ? "Working..." : "Check for updates", 0);
+    if (up_checked && up_latest[0] && !strchr(up_latest, '(') &&
+        strcmp(up_installed, up_latest))
+        x98_button(&x98, win, 32 + UP_BTN_W + 10, y + 62,
+                   UP_BTN_W, UP_BTN_H, "Update myOS", 0);
+
+    if (up_msg[0])
+        x98_text(&x98, win, 32, y + 92, up_msg, x98.shadow);
+
+    y += 120;
+    x98_text(&x98, win, 16, y, "What happens", x98.text);
+    x98_text(&x98, win, 16, y + 20,
+             "    The new kernel is written to the spare half of the boot",
+             x98.shadow);
+    x98_text(&x98, win, 16, y + 36,
+             "    area first. Only then does myOS switch over, so losing",
+             x98.shadow);
+    x98_text(&x98, win, 16, y + 52,
+             "    power partway through leaves the old one running.",
+             x98.shadow);
+    x98_text(&x98, win, 16, y + 72,
+             "    If the new kernel does not start, hold R while booting",
+             x98.text);
+    x98_text(&x98, win, 16, y + 88,
+             "    to go back to the previous one.", x98.text);
+
+    y += 116;
+    x98_text(&x98, win, 16, y, "Programs and security updates", x98.text);
+    x98_button(&x98, win, 32, y + 20, UP_BTN_W, UP_BTN_H, "Add Programs", 0);
+    x98_text(&x98, win, 32 + UP_BTN_W + 12, y + 26,
+             "Browsers and other software.", x98.shadow);
+}
+
 static void draw_system(void)
 {
     char buf[256];
@@ -754,6 +854,7 @@ static void redraw(void)
     case TAB_BG:      draw_bg(); break;
     case TAB_DISPLAY: draw_display(); break;
     case TAB_SYSTEM: draw_system(); break;
+    case TAB_UPDATE: draw_update(); break;
     }
     draw_buttons();
 }
@@ -928,6 +1029,49 @@ int main(void)
                     redraw();
                 }
                 if (my < BTN_Y) break;
+            }
+
+            if (tab == TAB_UPDATE) {
+                int y = TAB_H + 20;
+                int by = y + 62;
+                if (my >= by && my < by + UP_BTN_H) {
+                    if (mx >= 32 && mx < 32 + UP_BTN_W) {
+                        redraw(); XFlush(dpy);
+                        up_check();
+                    } else if (up_checked && mx >= 32 + UP_BTN_W + 10 &&
+                               mx < 32 + 2 * UP_BTN_W + 10 &&
+                               up_latest[0] && !strchr(up_latest, '(') &&
+                               strcmp(up_installed, up_latest)) {
+                        /* 別のプロセスに任せる。ここで待つと、
+                         * 数分かかるダウンロードの間ずっと固まって見える。
+                         * 端末を出して進み具合が見えるようにする。 */
+                        up_busy = 1;
+                        snprintf(up_msg, sizeof(up_msg),
+                                 "A window will show the progress.");
+                        pid_t p = fork();
+                        if (p == 0) {
+                            execl("/usr/local/bin/myos-term", "myos-term",
+                                  "sh", "-c",
+                                  "sudo -n /usr/local/bin/myos-update apply; "
+                                  "echo; echo 'Press Enter to close'; read x",
+                                  (char *)NULL);
+                            _exit(127);
+                        }
+                        up_busy = 0;
+                    }
+                }
+                int ay = y + 120 + 116 + 20;
+                if (my >= ay && my < ay + UP_BTN_H &&
+                    mx >= 32 && mx < 32 + UP_BTN_W) {
+                    pid_t p = fork();
+                    if (p == 0) {
+                        execl("/usr/local/bin/myos-getapps",
+                              "myos-getapps", (char *)NULL);
+                        _exit(127);
+                    }
+                }
+                redraw();
+                break;
             }
 
             if (tab == TAB_SYSTEM) {
