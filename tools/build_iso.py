@@ -226,7 +226,22 @@ def build_payload(kernel, initrd, cmdline, base_lba_512):
     return bytes(out)
 
 
-def chs_bytes(lba, heads=255, spt=63):
+# isohybrid が使っているジオメトリ。ディスクの実際の形とは関係なく、
+# 「CHS の欄をどう埋めるか」の取り決めでしかない。
+#
+# 255x63 ではなくこの値なのは、実際に世に出ている hybrid ISO が
+# そうしているから。Alpine と Debian の ISO の先頭 512 バイトを読んで
+# 終了 CHS を逆算したら、どちらも head の上限が 63、sector が 32 で、
+# この形に一致した。実機で起動している書き方に合わせるのが確実。
+HYBRID_HEADS = 64
+HYBRID_SPT = 32
+# パーティションの種別も同じ理由で 0x00 にする。0x00 は本来「空き」の
+# 意味だが、isohybrid はここを 0x00 にしていて、それで実機が起動して
+# いる。Linux は ISO9660 のほうを読むので、この欄は見ていない。
+HYBRID_PART_TYPE = 0x00
+
+
+def chs_bytes(lba, heads=HYBRID_HEADS, spt=HYBRID_SPT):
     """LBA を CHS の 3 バイトに直す。表せない大きさなら 0xFE 0xFF 0xFF。
 
     LBA だけ埋めて CHS を適当な値にしてはいけない。BIOS の中には
@@ -292,7 +307,7 @@ def make_hybrid(iso_path, boot_img, ptbl):
     # 種別は 0x83 (Linux) にしておく。BIOS はここを起動可否の判断に
     # 使うだけで、中身の解釈はしない。
     total = (len(data) + SECTOR - 1) // SECTOR
-    write_partition_table(mbr, [(0, total, 0x83, True)])
+    write_partition_table(mbr, [(0, total, HYBRID_PART_TYPE, True)])
 
     data[0:len(mbr)] = mbr
     off = SYSAREA_PTBL_LBA * SECTOR
@@ -461,7 +476,10 @@ def main():
     print(f"[VERIFY] OK   LBA {SYSAREA_PTBL_LBA} のテーブルは元と同一")
     if data[0x1BE] != 0x80:
         die("パーティションが起動可能になっていません")
-    print("[VERIFY] OK   パーティションテーブル (起動可能)")
+    if data[0x1BF:0x1C2] != b"\x00\x01\x00":
+        die(f"開始 CHS が LBA 0 と合っていません ({data[0x1BF:0x1C2].hex()})")
+    print("[VERIFY] OK   パーティションテーブル "
+          f"(起動可能 / 種別 0x{data[0x1C2]:02X} / 開始 CHS 00 01 00)")
     # CD 側を壊していないこと。ISO9660 の目印は 0x8001 の 'CD001'。
     if data[0x8001:0x8006] != b"CD001":
         die("ISO9660 の目印を壊しました")
