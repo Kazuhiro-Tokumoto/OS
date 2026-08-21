@@ -226,6 +226,21 @@ def build_payload(kernel, initrd, cmdline, base_lba_512):
     return bytes(out)
 
 
+def chs_bytes(lba, heads=255, spt=63):
+    """LBA を CHS の 3 バイトに直す。表せない大きさなら 0xFE 0xFF 0xFF。
+
+    LBA だけ埋めて CHS を適当な値にしてはいけない。BIOS の中には
+    エントリの整合性を見て、食い違っていると「壊れたテーブル」と
+    判断して起動候補から外すものがある。
+    """
+    c = lba // (heads * spt)
+    h = (lba // spt) % heads
+    s = lba % spt + 1                     # セクタ番号は 1 から数える
+    if c > 1023:
+        return b"\xFE\xFF\xFF"
+    return bytes([h, ((c >> 2) & 0xC0) | s, c & 0xFF])
+
+
 def write_partition_table(mbr, parts):
     """MBR にパーティションエントリを書く。
 
@@ -236,9 +251,9 @@ def write_partition_table(mbr, parts):
     for i, (start, count, ptype, boot) in enumerate(parts[:4]):
         e = bytearray(16)
         e[0] = 0x80 if boot else 0x00
-        e[1:4] = b"\x00\x02\x00"        # 開始 CHS (LBA を使うので便宜的な値)
+        e[1:4] = chs_bytes(start)
         e[4] = ptype
-        e[5:8] = b"\xFE\xFF\xFF"        # 終了 CHS (同上)
+        e[5:8] = chs_bytes(start + count - 1)
         struct.pack_into("<II", e, 8, start, count)
         off = 0x1BE + i * 16
         mbr[off:off + 16] = e
