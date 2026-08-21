@@ -8,6 +8,28 @@
 #   /myos.squashfs          インストールする中身 (圧縮したルート)
 #
 # 起動の流れ:
+# CD からも USB からも起動できる (いわゆる isohybrid):
+#   ISO9660 は先頭 32KB を「システム領域」として規格上まるごと空けている。
+#   xorriso もそこには何も書かない。だからここに、ディスクとして起動する
+#   ための入口を置ける。CD 側の仕掛けとは一切重ならない。
+#
+#     LBA 0-17   Stage1 + Stage2 (/boot/boot.img と同じ中身)
+#     LBA 20     ペイロードテーブルの写し
+#
+#   これで Stage1 も Stage2 も直さずに済む。理由は 2 つ:
+#
+#   1. Stage1 は 0x7E00 に 'MYS2' があれば読み込みを飛ばす。CD では BIOS が
+#      18 セクタまとめて載せてくれるので飛ばし、USB では BIOS が 1 セクタ
+#      しか載せないので自分で LBA 1-17 を読む。どちらも既にある動き。
+#
+#   2. ペイロードテーブルの中の LBA は「ISO の先頭からの 512 バイト単位の
+#      絶対値」で入っている (build_payload の base_lba_512)。CD では
+#      disk_read が 4 で割って 2048 バイト単位に直し、ディスクではそのまま
+#      使う。つまり同じ 1 枚のテーブルが両方で正しい。
+#
+#   Stage2 が「テーブルはどこか」を CD 用 (cd_ptbl_lba) とディスク用
+#   (PTBL_LBA = 20) で切り替えるので、両方に置いておけば必ず当たる。
+#
 #   BIOS が boot.img を 0x7C00 に読み込む (ノーエミュレーション起動)
 #     -> Stage1 は Stage2 が既に載っているのを見て読み込みを省く
 #       -> Stage2 が INT 13h AH=4Bh で「CD から起動した」と判定する
@@ -52,6 +74,14 @@ PTBL_MAGIC = b"MYOSPLD2"
 CMDLINE_OFF = 0x28
 PT_FLAGS    = 0x1F8                   # stage2_linux.asm の PT_FLAGS と一致必須
 PT_FLAG_INSTALLER = 0x01
+
+# ISO9660 のシステム領域。規格で先頭 32KB が丸ごと空けてある。
+# ここに Stage1+Stage2 とペイロードテーブルの写しを置いて、
+# USB メモリからも起動できるようにする (isohybrid)。
+SYSAREA_SIZE = 32768
+# ディスクとして起動したとき Stage2 が読みに行くセクタ。
+# stage2_linux.asm の PTBL_LBA と必ず同じ値。
+SYSAREA_PTBL_LBA = 20
 # コマンドラインの終わりは 0x1F0 まで。
 # セクタ末尾 (0x1F0-) には画面の希望と媒体の印を置いてあるので、
 # そこまで伸ばせるようにしておくと長いコマンドラインで踏み潰す。
@@ -196,6 +226,65 @@ def build_payload(kernel, initrd, cmdline, base_lba_512):
     return bytes(out)
 
 
+def write_partition_table(mbr, parts):
+    """MBR にパーティションエントリを書く。
+
+    BIOS 的にはパーティションテーブルが無くても起動できる実装が多いが、
+    無いと「起動できるディスク」と見なさない BIOS もあるので付けておく。
+    Stage1 のコードは 0x1BE より手前に収まっているので上書きにならない。
+    """
+    for i, (start, count, ptype, boot) in enumerate(parts[:4]):
+        e = bytearray(16)
+        e[0] = 0x80 if boot else 0x00
+        e[1:4] = b"\x00\x02\x00"        # 開始 CHS (LBA を使うので便宜的な値)
+        e[4] = ptype
+        e[5:8] = b"\xFE\xFF\xFF"        # 終了 CHS (同上)
+        struct.pack_into("<II", e, 8, start, count)
+        off = 0x1BE + i * 16
+        mbr[off:off + 16] = e
+
+
+def make_hybrid(iso_path, boot_img, ptbl):
+    """出来上がった ISO に、ディスクとしての起動口を足す。
+
+    ISO9660 のシステム領域 (先頭 32KB) は規格上まるごと空きで、
+    xorriso も触らない。そこへ Stage1 + Stage2 とペイロードテーブルの
+    写しを置くと、USB メモリに dd しただけで起動するようになる。
+
+    CD 側は El Torito で /boot/boot.img を読むので、こちらとは
+    まったく別経路。だから CD 起動には一切影響しない。
+    """
+    data = bytearray(iso_path.read_bytes())
+
+    end = SYSAREA_PTBL_LBA * SECTOR + SECTOR      # 使うのはここまで
+    if end > SYSAREA_SIZE:
+        die(f"システム領域 {SYSAREA_SIZE} バイトに収まりません ({end})")
+
+    # 本当に空いているか確かめてから書く。ここが将来 xorriso に使われる
+    # ようになったら、黙って壊すのではなく気づけるようにしておく。
+    if any(data[:SYSAREA_SIZE]):
+        die("ISO のシステム領域が空ではありません "
+            "(xorriso が何か書いた? 壊す前に止めます)")
+
+    if len(boot_img) != BOOT_LOAD_SECTORS * SECTOR:
+        die(f"ブートイメージの大きさが違います ({len(boot_img)})")
+    if ptbl[:8] != PTBL_MAGIC:
+        die("ペイロードテーブルの目印が違います")
+
+    mbr = bytearray(boot_img)
+
+    # ISO 全体を 1 つのパーティションに見せる。中身は ISO9660 なので
+    # 種別は 0x83 (Linux) にしておく。BIOS はここを起動可否の判断に
+    # 使うだけで、中身の解釈はしない。
+    total = (len(data) + SECTOR - 1) // SECTOR
+    write_partition_table(mbr, [(0, total, 0x83, True)])
+
+    data[0:len(mbr)] = mbr
+    off = SYSAREA_PTBL_LBA * SECTOR
+    data[off:off + SECTOR] = ptbl
+    iso_path.write_bytes(bytes(data))
+
+
 # --- ISO -------------------------------------------------------------------
 def make_iso(isodir, out, label):
     run(["xorriso", "-as", "mkisofs",
@@ -337,6 +426,31 @@ def main():
     if data[poff:poff + 8] != PTBL_MAGIC:
         die("ペイロードテーブルの目印が見つかりません")
     print("[VERIFY] OK   ペイロードテーブル 'MYOSPLD2'")
+
+    # --- ここから: USB からも起動できるようにする -------------------------
+    print("[ISO] システム領域にディスク用の起動口を置く")
+    make_hybrid(out, img, data[poff:poff + SECTOR])
+
+    data = out.read_bytes()
+    if data[510:512] != b"\x55\xAA":
+        die("先頭セクタに 0x55AA がありません")
+    print("[VERIFY] OK   先頭セクタ 0x55AA (ディスクとして起動できる)")
+    if data[SECTOR + 3:SECTOR + 7] != b"MYS2":
+        die("LBA 1 に Stage2 の目印 'MYS2' がありません")
+    print("[VERIFY] OK   LBA 1 に Stage2")
+    hoff = SYSAREA_PTBL_LBA * SECTOR
+    if data[hoff:hoff + 8] != PTBL_MAGIC:
+        die(f"LBA {SYSAREA_PTBL_LBA} にペイロードテーブルがありません")
+    if data[hoff:hoff + SECTOR] != data[poff:poff + SECTOR]:
+        die("写したペイロードテーブルが元と違います")
+    print(f"[VERIFY] OK   LBA {SYSAREA_PTBL_LBA} のテーブルは元と同一")
+    if data[0x1BE] != 0x80:
+        die("パーティションが起動可能になっていません")
+    print("[VERIFY] OK   パーティションテーブル (起動可能)")
+    # CD 側を壊していないこと。ISO9660 の目印は 0x8001 の 'CD001'。
+    if data[0x8001:0x8006] != b"CD001":
+        die("ISO9660 の目印を壊しました")
+    print("[VERIFY] OK   ISO9660 'CD001' は無事")
 
     size = out.stat().st_size
     print()
