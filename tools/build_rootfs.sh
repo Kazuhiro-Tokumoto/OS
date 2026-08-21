@@ -1701,7 +1701,12 @@ if [ -z "$heap" ] || [ "$heap" = "auto" ]; then
     total_mb=$((total_kb / 1024))
     heap=$((total_mb / 4))                 # 全体の 1/4
     [ "$heap" -lt 192 ] && heap=192        # 下限。これ未満だと Swing が苦しい
-    [ "$heap" -gt 1024 ] && heap=1024      # 上限。デスクトップ用途ならこれで十分
+    # 上限。以前は 1024 にしていたが、それだと 8GB 積んだ機械でも 1GB で
+    # 頭打ちになり、Minecraft のような LWJGL のゲームが動かせない。
+    # -Xmx は「上限」であって確保ではないので、大きめでも積んでいない
+    # ぶんを取られることはない。1/4 の縛りは残してあるから、
+    # メモリの少ない機械では今までどおり小さいままになる。
+    [ "$heap" -gt 4096 ] && heap=4096
 fi
 
 exec java -Xmx${heap}m -Dsun.java2d.opengl=false "$@"

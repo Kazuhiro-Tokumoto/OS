@@ -213,8 +213,18 @@ static const struct { const char *label; const char *val; } heaps[] = {
     { "256 MB",  "256" },
     { "512 MB",  "512" },
     { "1024 MB", "1024" },
+    { "2048 MB", "2048" },
+    { "4096 MB", "4096" },
 };
 #define N_HEAPS ((int)(sizeof(heaps) / sizeof(heaps[0])))
+
+/* 2 列に並べる。縦一列のままだと、選択肢を増やしたぶんだけ下の
+ * 「Hardware」と「System settings」が押し出されて、窓の底
+ * (BTN_Y) にぶつかる。2 列なら増やしても背は縮む。 */
+#define HEAP_COLS  2
+#define HEAP_ROWS  ((N_HEAPS + HEAP_COLS - 1) / HEAP_COLS)
+#define HEAP_COL_W 200
+#define HEAP_ROW_H 22
 static int heap_sel = 0;
 
 static void load_java(void)
@@ -842,15 +852,16 @@ static void draw_system(void)
     x98_text(&x98, win, 16, y + 20,
              "    How much memory Java programs may use.", x98.shadow);
     for (int i = 0; i < N_HEAPS; i++) {
-        int ry = y + 42 + i * 22;
-        x98_bevel(&x98, win, 32, ry, 13, 13, 0);
-        x98_fill(&x98, win, 34, ry + 2, 9, 9, x98.white);
-        if (i == heap_sel) x98_fill(&x98, win, 36, ry + 4, 5, 5, x98.text);
-        x98_text(&x98, win, 54, ry + (13 - x98_text_h(&x98)) / 2 - 1,
+        int rx = 32 + (i % HEAP_COLS) * HEAP_COL_W;
+        int ry = y + 42 + (i / HEAP_COLS) * HEAP_ROW_H;
+        x98_bevel(&x98, win, rx, ry, 13, 13, 0);
+        x98_fill(&x98, win, rx + 2, ry + 2, 9, 9, x98.white);
+        if (i == heap_sel) x98_fill(&x98, win, rx + 4, ry + 4, 5, 5, x98.text);
+        x98_text(&x98, win, rx + 22, ry + (13 - x98_text_h(&x98)) / 2 - 1,
                  heaps[i].label, x98.text);
     }
 
-    y += 42 + N_HEAPS * 22 + 14;
+    y += 42 + HEAP_ROWS * HEAP_ROW_H + 14;
     x98_text(&x98, win, 16, y, "Hardware", x98.text);
     x98_text(&x98, win, 16, y + 20,
              "    What is installed, and whether a driver is loaded for it.",
@@ -1104,15 +1115,17 @@ int main(void)
             if (tab == TAB_SYSTEM) {
                 int y = TAB_H + 20 + 96 + 42;
                 for (int i = 0; i < N_HEAPS; i++) {
-                    int ry = y + i * 22;
-                    if (my >= ry && my < ry + 16 && mx >= 32 && mx < 300) {
+                    int rx = 32 + (i % HEAP_COLS) * HEAP_COL_W;
+                    int ry = y + (i / HEAP_COLS) * HEAP_ROW_H;
+                    if (my >= ry && my < ry + 16 &&
+                        mx >= rx && mx < rx + HEAP_COL_W - 10) {
                         heap_sel = i;
                         redraw();
                         break;
                     }
                 }
                 /* デバイスマネージャー。draw_system() の位置と揃えること。 */
-                int dy = TAB_H + 20 + 96 + 42 + N_HEAPS * 22 + 14 + 38;
+                int dy = TAB_H + 20 + 96 + 42 + HEAP_ROWS * HEAP_ROW_H + 14 + 38;
                 if (my >= dy && my < dy + 24 && mx >= 32 && mx < 32 + 140) {
                     pid_t p = fork();
                     if (p == 0) {
