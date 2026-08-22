@@ -34,6 +34,7 @@
 # ============================================================================
 import hashlib
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -182,6 +183,7 @@ def main():
     initrd_path = None
     keep_cmdline = False
     want_sha = False
+    switch_root = None
 
     # --kernel を渡すと、起動メディアではなくその bzImage を書く。
     # インストール後にカーネルだけ入れ替えるための口。
@@ -197,6 +199,8 @@ def main():
             keep_cmdline = True; i += 1
         elif a == "--kernel-sha":
             want_sha = True; i += 1
+        elif a == "--switch-root" and i + 1 < len(argv):
+            switch_root = argv[i + 1]; i += 2
         else:
             rest.append(a); i += 1
 
@@ -211,6 +215,58 @@ def main():
         if h is None:
             die("ペイロードテーブルを読めません")
         print(h)
+        return
+
+    # ルートだけ差し替える口。カーネルの塊には一切触らない。
+    #
+    # ルートを A/B で持つと、更新は「使っていないほうへ新しい中身を
+    # 展開して、起動するルートを切り替える」だけになる。切り替えの実体は
+    # コマンドラインの root= を書き換えることで、テーブル 1 セクタの
+    # 書き込みで済む。
+    #
+    # 控えは今までどおり LBA 21 へ写す。だから **起動中に R を押せば
+    # 古いテーブルで立ち、古いルートに戻る**。カーネルのために作った
+    # 戻り道が、そのままルートにも効く。新しい仕掛けは要らない。
+    if switch_root:
+        if not rest:
+            die("usage: myos-writeboot --switch-root <rootdev> <disk>")
+        disk = rest[0]
+        cur = read_table(disk, PTBL_LBA)
+        if cur is None:
+            die("ペイロードテーブルを読めません")
+
+        prev = bytes(cur[CMDLINE_OFF:0x1F0]).split(b"\x00")[0]
+        line = prev.decode("ascii", "replace")
+        if "root=" not in line:
+            die(f"いまのコマンドラインに root= がありません: {line!r}")
+        new_line = re.sub(r"root=\S+", f"root={switch_root}", line)
+
+        cmd = new_line.encode("ascii", "replace")
+        if len(cmd) >= CMDLINE_MAX:
+            die("コマンドラインが長すぎます")
+
+        tbl = bytearray(cur)
+        # 前の内容を消してから書く。短くなったとき、古い文字列の尻尾が
+        # 残って別のコマンドラインになってしまう。
+        for k in range(CMDLINE_OFF, 0x1F0):
+            tbl[k] = 0
+        tbl[CMDLINE_OFF:CMDLINE_OFF + len(cmd)] = cmd
+
+        with open(disk, "r+b") as f:
+            # 先に控え。ここで落ちても、まだ差し替えていないので
+            # 次の起動は今までどおり。
+            f.seek(PTBL_BACKUP_LBA * SECTOR)
+            f.write(bytes(cur))
+            f.flush(); os.fsync(f.fileno())
+            f.seek(PTBL_LBA * SECTOR)
+            f.write(bytes(tbl))
+            f.flush(); os.fsync(f.fileno())
+
+        got = read_table(disk, PTBL_LBA)
+        if got is None or bytes(got[CMDLINE_OFF:0x1F0]).split(b"\x00")[0] != cmd:
+            die("書き込みを確認できませんでした")
+        print(f"myos-writeboot: ok  root {line.split('root=')[1].split()[0]} "
+              f"-> {switch_root}  (控えは LBA {PTBL_BACKUP_LBA})")
         return
 
     if len(rest) < 3:

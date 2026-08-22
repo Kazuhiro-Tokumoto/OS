@@ -4,7 +4,8 @@
 #
 #   myos-update status              いま入っているものと、出ているもの
 #   myos-update check               入れ替える価値があるか (0 = ある)
-#   myos-update apply               取ってきて入れ替える
+#   myos-update apply               カーネルを取ってきて入れ替える
+#   myos-update apply-system        システムまるごと入れ替える (ルート A/B)
 #   myos-update rollback-info       控えがあるか
 #
 # sudoers で NOPASSWD にするので、ここも「一般ユーザーが root として
@@ -86,6 +87,8 @@ boot_info() {
     . /etc/myos/boot.conf
     [ -n "$disk" ] && [ -n "$root" ] && [ -n "$bootlba" ] ||
         die "/etc/myos/boot.conf の中身が足りません"
+    # roota / rootb は A/B が取れた機械にだけ書いてある。無くてもよい。
+    : "${roota:=}" "${rootb:=}" "${home:=}"
 }
 
 # いま生領域に乗っているカーネルの sha256。
@@ -135,6 +138,11 @@ status)
     fi
     if boot_info 2>/dev/null; then
         echo "disk      = $disk (生領域 $bootlba)"
+        if [ -n "$roota" ] && [ -n "$rootb" ]; then
+            echo "system    = A/B ($roota / $rootb、いま $root)"
+        else
+            echo "system    = 1 本 ($root)"
+        fi
     fi
     ;;
 
@@ -210,6 +218,97 @@ apply)
     echo "myos-update: (GUI などカーネル以外は $(os_version) のままです)"
     ;;
 
+apply-system)
+    # システム (ルート) をまるごと入れ替える。
+    #
+    # カーネルの更新では GUI の直しが届かない。squashfs の中に居るので、
+    # そこを入れ替えないと何も変わらない。区画を A/B で切ってある機械
+    # では、使っていないほうへ展開して起動先を切り替えるだけで済む。
+    #
+    # 危ない橋を渡らない順番:
+    #   1. 落とす        (まだ何も書いていない)
+    #   2. 照合する      (壊れたものを展開しない)
+    #   3. 空けて展開    (使っていないほう。いま動いている側は無傷)
+    #   4. 起動先を切替  (テーブル 1 セクタ。控えは LBA 21 へ)
+    # 3 の途中で落ちても、いま動いている側は何も変わらない。
+    # 4 のあとで新しい側が起動しなければ、起動中に R で戻る。
+    boot_info
+    [ -n "$roota" ] && [ -n "$rootb" ] || \
+        die "この機械はルートが 1 本です (入れ直しが要ります)"
+
+    new=$(latest_version)
+    [ -n "$new" ] || die "最新の版が分かりません"
+    cur=$(os_version)
+    if [ "$cur" = "$new" ]; then
+        echo "myos-update: 既に $cur です"
+        exit 0
+    fi
+
+    # いま動いていないほうへ入れる。root= と見比べれば分かる。
+    if [ "$root" = "$roota" ]; then target="$rootb"; else target="$roota"; fi
+    echo "myos-update: いま $root で動いています。$target へ入れます。"
+
+    rm -rf "$WORK"; mkdir -p "$WORK"
+    base="https://github.com/$REPO/releases/download/v$new"
+    r="myos-root-$new.squashfs"
+
+    echo "取得中: $r"
+    curl -fL --max-time 1800 -o "$WORK/$r"        "$base/$r" ||
+        die "システムを取れません"
+    curl -fsSL --max-time 60 -o "$WORK/$r.sha256" "$base/$r.sha256" ||
+        die "sha256 を取れません"
+
+    echo "照合中"
+    ( cd "$WORK" && sha256sum -c "$r.sha256" ) ||
+        die "sha256 が合いません (壊れたものを展開するわけにいかない)"
+
+    echo "$target を空けています"
+    mkfs.ext4 -F -q -m 0 -L myos "$target" || die "$target を空けられません"
+
+    mkdir -p "$WORK/mnt" "$WORK/sq"
+    mount "$target" "$WORK/mnt" || die "$target をマウントできません"
+    mount -t squashfs -o ro,loop "$WORK/$r" "$WORK/sq" || {
+        umount "$WORK/mnt"; die "落としたシステムを開けません"; }
+
+    echo "展開中 (数分かかります)"
+    if ! cp -a "$WORK/sq/." "$WORK/mnt/"; then
+        umount "$WORK/sq"; umount "$WORK/mnt"
+        die "展開に失敗しました (起動先は切り替えていません)"
+    fi
+
+    # 入れた機械に合わせた設定を引き継ぐ。squashfs は作った人の
+    # ものなので、そのままだと fstab も boot.conf も合わない。
+    for keep in etc/fstab etc/myos/boot.conf etc/myos/version.conf \
+                etc/adjtime etc/localtime etc/timezone \
+                etc/default/keyboard etc/X11/xorg.conf.d/10-keyboard.conf; do
+        if [ -e "/$keep" ]; then
+            mkdir -p "$WORK/mnt/$(dirname "$keep")"
+            cp -a "/$keep" "$WORK/mnt/$keep" 2>/dev/null || true
+        fi
+    done
+    # 入れ直しの扱いにしない。使う人を作り直させると、home の中身と
+    # 食い違って別人になってしまう。
+    : > "$WORK/mnt/etc/myos/setup-done" 2>/dev/null || true
+    [ -e /etc/myos/login.conf ] && \
+        cp -a /etc/myos/login.conf "$WORK/mnt/etc/myos/login.conf" 2>/dev/null
+    # 版だけは新しいものにする。
+    printf '# myOS: 入れたときの ISO の版。\nversion = %s\n' "$new" \
+        > "$WORK/mnt/etc/myos/version.conf" 2>/dev/null || true
+
+    sync
+    umount "$WORK/sq"; umount "$WORK/mnt"
+
+    echo "起動先を切り替え中"
+    /usr/local/bin/myos-writeboot --switch-root "$target" "$disk" ||
+        die "切り替えに失敗しました (展開したものは残っていますが、起動先は今までのままです)"
+
+    rm -rf "$WORK"
+    echo "myos-update: $cur -> $new。再起動すると新しいほうで立ちます。"
+    echo "myos-update: 動かなかったら、起動中に R を押しっぱなしにすると"
+    echo "myos-update: 前のほうで立ちます。自分のファイル (/home) は"
+    echo "myos-update: どちらでも同じものが見えます。"
+    ;;
+
 rollback-info)
     boot_info
     # LBA 21 に控えがあるか
@@ -222,6 +321,6 @@ rollback-info)
     ;;
 
 *)
-    die "使い方: myos-update status|check|apply|rollback-info"
+    die "使い方: myos-update status|check|apply|apply-system|rollback-info"
     ;;
 esac

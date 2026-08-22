@@ -223,6 +223,19 @@ jobs:
               > "myos-kernel-${{ steps.ver.outputs.version }}.bzImage.sha256"
           cat "myos-kernel-${{ steps.ver.outputs.version }}.bzImage.sha256"
 
+      # ルート (squashfs) も単体で置く。これがあると、入れ直さずに
+      # システムまるごと入れ替えられる。myos-update が使っていないほうの
+      # ルート区画へ展開し、ペイロードテーブルの root= を書き換える。
+      #
+      # カーネルだけの更新では GUI の直しが届かない。実際、直る頻度が
+      # 高いのは GUI 側のほう。
+      - name: ルートを単体でも置く
+        run: |
+          cp build/myos.squashfs "build/myos-root-${{ steps.ver.outputs.version }}.squashfs"
+          cd build && sha256sum "myos-root-${{ steps.ver.outputs.version }}.squashfs" \
+              > "myos-root-${{ steps.ver.outputs.version }}.squashfs.sha256"
+          cat "myos-root-${{ steps.ver.outputs.version }}.squashfs.sha256"
+
       - name: リリースに添付
         if: github.event_name == 'push' || inputs.release
         env:
@@ -261,7 +274,9 @@ jobs:
               --target "$GITHUB_SHA"
           fi
           K="myos-kernel-${{ steps.ver.outputs.version }}.bzImage"
+          R="myos-root-${{ steps.ver.outputs.version }}.squashfs"
           gh release upload "$TAG" \
             "build/$ISO" "build/$ISO.sha256" \
-            "build/$K" "build/$K.sha256" --clobber
+            "build/$K" "build/$K.sha256" \
+            "build/$R" "build/$R.sha256" --clobber
           gh release view "$TAG" --json url --jq .url
