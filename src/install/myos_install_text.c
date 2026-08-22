@@ -500,6 +500,45 @@ static void fail_page(const char *what, int rc)
  * 目安はメモリと同じだけ。休止状態は作らないので倍は要らない。
  * 4GB を超えても使い切ることはまず無いので頭を打つ。
  * ルートに 2.5GB 残せないなら作らない (入らないほうが困る)。 */
+/* ルートを 2 本にできるか、できるならいくつずつ取るか。
+ *
+ * 0 を返したら「無理なので今までどおり 1 本」。
+ *
+ * 2 本にする理由は更新のため。使っていないほうへ新しい中身を展開して、
+ * ペイロードテーブルの root= を書き換えるだけで入れ替わる。壊れていたら
+ * 起動中に R を押せば 1 つ前のテーブルで立つ。カーネルの A/B と
+ * まったく同じ仕掛けが、そのままルートにも効く。
+ *
+ * 小さいディスクでは諦める。古い機械を切り捨てたくないので、
+ * 「A/B が取れないなら入れられない」にはしない。
+ */
+static long root_ab_mb(long long avail_bytes, long swap)
+{
+    long long disk_mb = avail_bytes / (1024 * 1024);
+    /* 起動領域 256MB とスワップを引いた残りを、root x2 と home で分ける */
+    long long rest = disk_mb - 256 - swap;
+
+    /* home に最低これだけは残す。1GB では「入れた直後から置き場が無い」
+     * のと変わらないので、実用になる線を引く。 */
+    const long long HOME_MIN = 4096;
+    /* ルート 1 本の既定と下限。myOS 本体が 2.5GB あり、apt で入れる
+     * ものを足すと 4GB では窮屈。8GB あれば当面困らない。
+     *
+     * 下限を 6GB と高めに置いているのは、**縮めてまで A/B にする値打ちが
+     * 無い**から。16GB のディスクで 4.7GB ずつに割るより、13GB の 1 本の
+     * ほうが日々使いやすい。更新の便利さと、そもそも使えることを
+     * 秤にかけて、後者を採る。 */
+    const long long WANT = 8192;
+    const long long MIN  = 6144;
+
+    long long each = WANT;
+    if (rest - each * 2 < HOME_MIN)
+        each = (rest - HOME_MIN) / 2;   /* home を守って縮める */
+    if (each < MIN) return 0;           /* 縮めても足りない。1 本でいく */
+    if (each > WANT) each = WANT;
+    return (long)each;
+}
+
 static long swap_mb(long long avail_bytes)
 {
     long ram_mb = 0;
@@ -531,6 +570,11 @@ static long swap_mb(long long avail_bytes)
     return mb;
 }
 
+/* ルート B と home。A/B が取れなかったときは空のまま。
+ * 引数で持ち回すと do_partition の顔が長くなりすぎるのでここに置く。 */
+static char rootb[64];
+static char home[64];
+
 static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
                         char *swapdev, size_t sn, int *first_part)
 {
@@ -561,6 +605,12 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
      * スワップだけ落として続ける。 */
     long sw = swap_mb(whole ? d->bytes : d->free_bytes);
 
+    /* ルートを 2 本取れるか。取れたら更新でまるごと入れ替えられる。
+     * 「ディスク全体を使う」ときだけ。空き領域へ足す入れ方では、
+     * 既存の区画がいくつあるか分からず、基本区画 4 つの枠に収まる
+     * 保証が無い。そこまで面倒を見ると失敗の仕方が増える。 */
+    long ab = whole ? root_ab_mb(d->bytes, sw) : 0;
+
     char cmd[256];
     FILE *fp;
     int rc;
@@ -576,7 +626,23 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
              * 余裕が 16MB しか無く、ファームが増えるたびに危うくなる。 */
             fprintf(fp, ",256M,83,*\n");
             if (sw) fprintf(fp, ",%ldM,82\n", sw);
-            fprintf(fp, ",,83\n");
+            if (ab) {
+                /* ルート A、そのあと拡張区画にルート B と home。
+                 *
+                 * MBR の基本区画は 4 つまで。起動領域・スワップ・
+                 * ルート A で 3 つ使うので、残りは 1 つしかない。
+                 * そこを拡張区画にして、中にルート B と home を置く。
+                 *
+                 * カーネルは区画を見ずに生 LBA で読むので、
+                 * ブートローダーには何の影響も無い。Linux は論理区画から
+                 * 普通に起動できる。 */
+                fprintf(fp, ",%ldM,83\n", ab);   /* root A */
+                fprintf(fp, ",,5\n");            /* 拡張区画 (残り全部) */
+                fprintf(fp, ",%ldM,83\n", ab);   /* root B (論理) */
+                fprintf(fp, ",,83\n");           /* home  (論理、残り) */
+            } else {
+                fprintf(fp, ",,83\n");
+            }
             rc = pclose(fp);
             *first_part = 1;
         } else {
@@ -591,7 +657,11 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
             *first_part = count_parts_before(d) + 1;
         }
         if (rc == 0) break;
-        if (sw) { sw = 0; continue; }   /* 区画が足りない。スワップを諦める */
+        /* 諦める順。まず A/B、次にスワップ。
+         * どちらも「無いと入らない」ものではないので、
+         * 入れられることを優先する。 */
+        if (ab) { ab = 0; continue; }
+        if (sw) { sw = 0; continue; }
         fail_page(whole ? "sfdisk" : "sfdisk --append", rc);
         return 0;
     }
@@ -604,6 +674,14 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
         snprintf(swapdev, sn, "/dev/%s%s%d", d->name, sep, *first_part + 1);
     snprintf(rootdev, rn, "/dev/%s%s%d", d->name, sep,
              *first_part + (sw ? 2 : 1));
+
+    /* ルート B と home。論理区画は基本区画がいくつあっても **必ず 5 から**
+     * 数える。スワップの有無で番号がずれない (実際に切って確かめた)。 */
+    rootb[0] = home[0] = 0;
+    if (ab) {
+        snprintf(rootb, sizeof(rootb), "/dev/%s%s5", d->name, sep);
+        snprintf(home,  sizeof(home),  "/dev/%s%s6", d->name, sep);
+    }
 
     /* カーネルにテーブルを読み直させる */
     char *pr[] = { "partprobe", dev, NULL };
@@ -628,6 +706,31 @@ static int do_partition(const Disk *d, int whole, char *rootdev, size_t rn,
                    rootdev, NULL };
     rc = run(mk);
     if (rc != 0) { fail_page("mkfs.ext4", rc); return 0; }
+
+    if (rootb[0]) {
+        /* ルート B。いまは空のまま置く。更新のときに、ここへ新しい
+         * 中身を展開して切り替える。空でも困らないのは、切り替えるのは
+         * 展開し終えてからだから。 */
+        say(11, 6, "  Preparing the spare system area ...");
+        fflush(stdout);
+        char *mb[] = { "mkfs.ext4", "-F", "-q", "-m", "0", "-L", "myos-b",
+                       rootb, NULL };
+        /* ここで転んでも入れるのはやめない。A/B が使えなくなるだけで、
+         * 入れた myOS は普通に動く。使えないことは boot.conf に
+         * 書かなければそのまま伝わる。 */
+        if (run(mb) != 0) rootb[0] = 0;
+    }
+
+    if (home[0]) {
+        /* home は共有。ルートを入れ替えても、ここは触らない。
+         * これが無いと A/B にする意味が半分無くなる (自分のファイルが
+         * 古いほうに置き去りになる)。 */
+        say(11, 6, "  Formatting the home area ...");
+        fflush(stdout);
+        char *mh[] = { "mkfs.ext4", "-F", "-q", "-m", "0", "-L", "myos-home",
+                       home, NULL };
+        if (run(mh) != 0) { home[0] = 0; rootb[0] = 0; }
+    }
 
     say(12, 6, "Done.");
     fflush(stdout);
@@ -697,6 +800,10 @@ int main(void)
         fprintf(f, "whole   = %d\n", mode == 0 ? 1 : 0);
         fprintf(f, "bootlba = %lld\n", boot_lba);
         if (swapdev[0]) fprintf(f, "swap    = %s\n", swapdev);
+        /* A/B が取れたときだけ書く。書かなければ、後半も更新の仕掛けも
+         * 「A/B は無い」として動く。無い機械に嘘を伝えないほうが安全。 */
+        if (rootb[0]) fprintf(f, "rootb   = %s\n", rootb);
+        if (home[0])  fprintf(f, "home    = %s\n", home);
         fclose(f);
     }
 

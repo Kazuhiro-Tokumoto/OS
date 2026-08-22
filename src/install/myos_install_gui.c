@@ -88,6 +88,10 @@ static char   copy_err[128] = "";
 
 static char   root_dev[64] = "";
 static char   swap_dev[64] = "";   /* 切れなかったときは空 */
+/* もう 1 本のルートと、共有する home。A/B が取れなかった機械では空。
+ * 空のときは今までとまったく同じ形で入る。 */
+static char   rootb_dev[64] = "";
+static char   home_dev[64]  = "";
 static char   disk_dev[64] = "";
 static char   boot_lba[32] = "2048";
 
@@ -248,6 +252,8 @@ static void load_conf(void)
         else if (!strcmp(k, "disk")) snprintf(disk_dev, sizeof(disk_dev), "%s", v);
         else if (!strcmp(k, "bootlba")) snprintf(boot_lba, sizeof(boot_lba), "%s", v);
         else if (!strcmp(k, "swap")) snprintf(swap_dev, sizeof(swap_dev), "%s", v);
+        else if (!strcmp(k, "rootb")) snprintf(rootb_dev, sizeof(rootb_dev), "%s", v);
+        else if (!strcmp(k, "home"))  snprintf(home_dev, sizeof(home_dev), "%s", v);
     }
     fclose(f);
 }
@@ -430,6 +436,10 @@ static int do_install(void)
          * 切れなかった機械では swap_dev が空なので、行ごと出ない。 */
         if (swap_dev[0])
             fprintf(f, "%-12s none   swap  sw        0 0\n", swap_dev);
+        /* home は共有。ルートを入れ替えても、自分のファイルはここに残る。
+         * myos-init がこれを見て mount する。 */
+        if (home_dev[0])
+            fprintf(f, "%-12s /home  ext4  defaults  0 2\n", home_dev);
         fprintf(f, "proc         /proc  proc  defaults  0 0\n");
         fprintf(f, "sysfs        /sys   sysfs defaults  0 0\n");
         fclose(f);
@@ -446,6 +456,14 @@ static int do_install(void)
         fprintf(f, "disk=%s\n", disk_dev);
         fprintf(f, "root=%s\n", root_dev);
         fprintf(f, "bootlba=%s\n", boot_lba);
+        /* ルートの入れ替え先。両方書いておいて、いま動いているほうは
+         * root= と見比べれば分かる。「どちらが現役か」を別に持つと、
+         * 書き換えの途中で落ちたときに食い違う。 */
+        if (rootb_dev[0]) {
+            fprintf(f, "roota=%s\n", root_dev);
+            fprintf(f, "rootb=%s\n", rootb_dev);
+        }
+        if (home_dev[0]) fprintf(f, "home=%s\n", home_dev);
         fclose(f);
     }
 

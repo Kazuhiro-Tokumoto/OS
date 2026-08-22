@@ -434,6 +434,21 @@ hwclock --hctosys || echo "[myos-init] hwclock failed; the clock may be off"
 # 「壊れた」に見える。
 swapon -a 2>/dev/null || true
 
+# /home を別の区画に置いてある機械では、それをマウントする。
+#
+# ルートを A/B で入れ替える作りにしたので、自分のファイルはルートの外に
+# 置いてある。ここでマウントしないと、**入れ替えた瞬間に自分の
+# ファイルが消えたように見える** (実際には古いルートの中に残っている
+# のだが、区別が付かない)。
+#
+# mount -a ではなく /home だけを狙う。fstab には proc や sysfs も
+# 書いてあり、ここまでで既にマウント済み。二重にやると警告が出るし、
+# 失敗したときにどれが失敗したのか分からなくなる。
+if grep -qs '[[:space:]]/home[[:space:]]' /etc/fstab; then
+    mount /home 2>/dev/null || \
+        echo "[myos-init] could not mount /home; files will go to the root"
+fi
+
 # --- 起動中の画面 ---------------------------------------------------------
 # ここから先の出力は画面に出さず BOOTLOG.TXT に残す。98 と同じ考え方で、
 # 普段は静かに上げて、おかしいときだけ後からログを読む。
