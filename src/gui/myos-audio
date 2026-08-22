@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+# ============================================================================
+# myos-audio  -  音をどこから出すかを選ぶ
+#
+#   myos-audio list        出せる出口を並べる
+#   myos-audio set <id>    そこへ切り替える。鳴っているものも連れて行く
+#
+# なぜ要るか
+# ----------
+# 実機には出口が複数ある。マザーボードの緑の穴、HDMI のモニタ内蔵
+# スピーカー、DisplayPort、光デジタル。どれから出したいかは機械ごとに
+# 違うのに、myOS は起動時に決め打ちで選んでいた。
+#
+#   「HDMI が既定になっていたらアナログへ寄せる」
+#
+# 実機でよくある「音が出ない」を潰すつもりの処理だったが、HDMI の
+# モニタで聞きたい人には**完全に裏目**になる。実際そうなった。
+# 決め打ちで当てにいくのをやめて、選べるようにする。
+#
+# 繋がっていないものを出さない
+# ----------------------------
+# PulseAudio はポートごとに available を持っている。挿さっていない
+# 穴は no になる。ここを見れば「選べるのに音が出ない」を防げる。
+#
+#   available: yes      挿さっている。出す
+#   available: no       挿さっていない。**出さない**
+#   available: unknown  コーデックが判別できない。出す (隠すと詰む)
+#
+# unknown を隠さないのが肝。古いコーデックはジャック検出を持っていない
+# ことがあり、そこを隠すと**唯一の出口が消えて何も選べなくなる**。
+#
+# プロファイルが off でも分かる
+# -----------------------------
+# HDMI は、カードのプロファイルが off だと sink が存在しない。だが
+# ポートの一覧と available はプロファイルと無関係に出る。だから
+# 「挿さっているが今は使えない出口」を見つけて、選ばれたときに
+# プロファイルごと切り替えられる。
+#
+# pactl の出力は翻訳される (日本語環境では項目名まで日本語になる)。
+# 読み取る側が壊れるので、必ず LC_ALL=C で呼ぶこと。
+# ============================================================================
+import os
+import re
+import subprocess
+import sys
+import time
+
+ENV = dict(os.environ, LC_ALL="C", LANG="C")
+
+
+def pactl(*args, check=False):
+    try:
+        r = subprocess.run(["pactl", *args], capture_output=True,
+                           text=True, env=ENV, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return "" if not check else None
+    if check and r.returncode != 0:
+        return None
+    return r.stdout
+
+
+def parse_cards(text):
+    """pactl list cards を読む。
+
+    欲しいのは、カードごとの
+      - 名前 (set-card-profile に渡すもの)
+      - 見せる名前
+      - 出力ポート (説明、available、どのプロファイルに属するか)
+      - いま有効なプロファイル
+    """
+    cards = []
+    cur = None
+    port = None
+    section = None
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        indent = len(raw) - len(raw.lstrip("\t"))
+
+        if raw.startswith("Card #"):
+            cur = {"name": "", "desc": "", "active": "", "ports": []}
+            cards.append(cur)
+            section = None
+            port = None
+            continue
+        if cur is None:
+            continue
+
+        if line.startswith("Name:"):
+            cur["name"] = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("Active Profile:"):
+            cur["active"] = line.split(":", 1)[1].strip()
+            continue
+        if line == "Profiles:":
+            section = "profiles"; continue
+        if line == "Ports:":
+            section = "ports"; port = None; continue
+        if line == "Properties:":
+            # Properties はカード直下にもポートの下にも出る。
+            # インデントで見分ける (ポートの下は深い)。
+            section = "cardprops" if indent <= 1 else "portprops"
+            continue
+
+        if section == "cardprops" and line.startswith("device.description"):
+            cur["desc"] = line.split("=", 1)[1].strip().strip('"')
+            continue
+
+        if section == "ports" or section == "portprops":
+            # 例: analog-output-lineout: Line Out (type: Line, priority: 9000,
+            #      latency offset: 0 usec, availability group: ..., available: no)
+            m = re.match(r"^([A-Za-z0-9_.:+-]+): (.*?) \((.*)\)$", line)
+            if m and indent >= 2 and "available:" in m.group(3):
+                port = {"name": m.group(1), "desc": m.group(2),
+                        "avail": "unknown", "profiles": [], "type": ""}
+                a = re.search(r"available: (\w+)", m.group(3))
+                if a:
+                    port["avail"] = a.group(1)
+                t = re.search(r"type: (\w+)", m.group(3))
+                if t:
+                    port["type"] = t.group(1)
+                cur["ports"].append(port)
+                section = "ports"
+                continue
+            if port is not None and line.startswith("Part of profile(s):"):
+                got = line.split(":", 1)[1]
+                port["profiles"] = [p.strip() for p in got.split(",") if p.strip()]
+                continue
+
+    return cards
+
+
+def outputs(all_ports=False):
+    """選ばせてよい出口を並べる。
+
+    入力しかないポート (マイクなど) は落とす。判定は「出力の
+    プロファイルに属しているか」で行う。名前で当てにいくと、
+    環境ごとの綴りの違いで漏れる。
+
+    挿さっていないもの (available: no) は出さない。ただし
+    **それで 1 つも残らなかったときは、全部出す**。
+
+    選べるものが無い画面を出しても、使う人には打つ手が無い。
+    ジャック検出が壊れている機械や、検出を持たない古いコーデックで
+    そうなる。「出しても鳴らないかもしれない」ほうが、
+    「何も選べない」よりまし。
+    """
+    cards = parse_cards(pactl("list", "cards"))
+
+    def collect(skip_unavailable):
+        out = []
+        for c in cards:
+            for p in c["ports"]:
+                outp = [x for x in p["profiles"] if x.startswith("output:")]
+                if not outp:
+                    continue
+                if skip_unavailable and p["avail"] == "no":
+                    continue
+                active = c["active"] in p["profiles"]
+                out.append({
+                    "id": f"{c['name']}/{p['name']}",
+                    "card": c["name"],
+                    "port": p["name"],
+                    "profile": c["active"] if active else outp[0],
+                    "label": f"{c['desc'] or c['name']} - {p['desc']}",
+                    "avail": p["avail"],
+                    "active": active,
+                })
+        return out
+
+    if all_ports:
+        return collect(False)
+    got = collect(True)
+    return got if got else collect(False)
+
+
+def default_sink():
+    return (pactl("get-default-sink") or "").strip()
+
+
+def sink_of_card(card_name):
+    """そのカードが持っている sink の名前。無ければ None。"""
+    cards = parse_cards(pactl("list", "cards"))
+    idx = None
+    for i, c in enumerate(cards):
+        if c["name"] == card_name:
+            idx = i
+            break
+    text = pactl("list", "sinks")
+    name = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("Name:"):
+            name = line.split(":", 1)[1].strip()
+        elif line.startswith("Card:") and name:
+            try:
+                if int(line.split(":", 1)[1].strip().lstrip("#")) == idx:
+                    return name
+            except ValueError:
+                pass
+    return None
+
+
+def cmd_list(all_ports=False):
+    cur = default_sink()
+    for o in outputs(all_ports):
+        sink = sink_of_card(o["card"])
+        mark = "*" if (o["active"] and sink and sink == cur) else "-"
+        print(f"{mark}\t{o['id']}\t{o['label']}\t{o['avail']}")
+
+
+def cmd_set(target):
+    o = next((x for x in outputs() if x["id"] == target), None)
+    if o is None:
+        print(f"myos-audio: そんな出口はありません: {target}", file=sys.stderr)
+        return 1
+
+    # プロファイルが違うなら先に切り替える。HDMI は off のことが多く、
+    # そのままでは sink すら無い。
+    if not o["active"]:
+        if pactl("set-card-profile", o["card"], o["profile"], check=True) is None:
+            print("myos-audio: プロファイルを切り替えられません "
+                  f"({o['card']} {o['profile']})", file=sys.stderr)
+            return 1
+        # sink が生えるまで少し待つ。すぐには出てこない。
+        for _ in range(20):
+            if sink_of_card(o["card"]):
+                break
+            time.sleep(0.1)
+
+    sink = sink_of_card(o["card"])
+    if not sink:
+        print("myos-audio: 出口はできましたが sink が見つかりません",
+              file=sys.stderr)
+        return 1
+
+    pactl("set-sink-port", sink, o["port"])
+    pactl("set-default-sink", sink)
+
+    # いま鳴っているものを連れて行く。既定を変えただけでは移らない。
+    # ここをやらないと「切り替えたのに音が変わらない」になる。
+    for line in (pactl("list", "short", "sink-inputs") or "").splitlines():
+        f = line.split()
+        if f:
+            pactl("move-sink-input", f[0], sink)
+
+    # 次に起動したときも同じ出口を使えるように控える。
+    # ここを残さないと、再起動のたびに pulseaudio の判断へ戻ってしまい、
+    # 「選んだのに毎回元に戻る」になる。
+    try:
+        conf = os.path.join(os.path.expanduser("~"), ".myos")
+        os.makedirs(conf, exist_ok=True)
+        with open(os.path.join(conf, "audio.conf"), "w") as f:
+            f.write("# myOS: 音の出口。設定の Sound タブが書く。\n")
+            f.write(f"output = {o['id']}\n")
+    except OSError:
+        pass                      # 控えられなくても、今の切り替えは効いている
+
+    print(f"myos-audio: {o['label']}")
+    return 0
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("使い方: myos-audio list | set <id>", file=sys.stderr)
+        return 2
+    if sys.argv[1] == "list":
+        cmd_list("--all" in sys.argv); return 0
+    if sys.argv[1] == "set" and len(sys.argv) > 2:
+        return cmd_set(sys.argv[2])
+    print("使い方: myos-audio list [--all] | set <id>", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

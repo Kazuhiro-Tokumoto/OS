@@ -146,12 +146,97 @@ static void save_theme(void)
 }
 
 /* --- タブ ---------------------------------------------------------------- */
-enum { TAB_LOOK = 0, TAB_BG, TAB_TYPES, TAB_DISPLAY, TAB_SYSTEM,
+enum { TAB_LOOK = 0, TAB_BG, TAB_TYPES, TAB_DISPLAY, TAB_SOUND, TAB_SYSTEM,
        TAB_UPDATE, N_TABS };
 static const char *tab_name[N_TABS] = {
-    "Appearance", "Background", "File Types", "Display", "System", "Update"
+    "Appearance", "Background", "File Types", "Display", "Sound", "System",
+    "Update"
 };
 static int tab = TAB_LOOK;
+
+/* --- 音の出口 ------------------------------------------------------------
+ *
+ * 一覧の取得も切り替えも myos-audio に任せる。ここで pactl を直接
+ * 叩かないのは、出口の見つけ方 (プロファイルが off の HDMI をどう
+ * 拾うか、繋がっていないものをどう落とすか) が地味に込み入っていて、
+ * 画面の都合と混ぜたくないから。あちらは単体で試せる。
+ */
+#define MAX_SNK 12
+#define SNK_ROW 22
+static struct {
+    char id[192];
+    char label[160];
+    int  active;          /* いまここから出ている */
+    int  unplugged;       /* available: no。逃げ道で出しているもの */
+} snd[MAX_SNK];
+static int n_snd = 0;
+static int snd_sel = -1;
+static int snd_loaded = 0;
+static char snd_msg[160] = "";
+
+static void snd_load(void)
+{
+    n_snd = 0;
+    snd_sel = -1;
+    snd_msg[0] = 0;
+
+    FILE *f = popen("/usr/local/bin/myos-audio list 2>/dev/null", "r");
+    if (!f) {
+        snprintf(snd_msg, sizeof(snd_msg), "Could not ask the sound system.");
+        snd_loaded = 1;
+        return;
+    }
+    char line[512];
+    while (n_snd < MAX_SNK && fgets(line, sizeof(line), f)) {
+        /* 形式: <*|-> TAB <id> TAB <label> TAB <avail> */
+        char *p1 = strchr(line, '\t');
+        if (!p1) continue;
+        *p1++ = 0;
+        char *p2 = strchr(p1, '\t');
+        if (!p2) continue;
+        *p2++ = 0;
+        char *p3 = strchr(p2, '\t');
+        if (p3) *p3++ = 0;
+        char *nl = strchr(p3 ? p3 : p2, '\n');
+        if (nl) *nl = 0;
+
+        snprintf(snd[n_snd].id, sizeof(snd[n_snd].id), "%s", p1);
+        snprintf(snd[n_snd].label, sizeof(snd[n_snd].label), "%s", p2);
+        snd[n_snd].active = (line[0] == '*');
+        snd[n_snd].unplugged = (p3 && !strcmp(p3, "no"));
+        if (snd[n_snd].active) snd_sel = n_snd;
+        n_snd++;
+    }
+    pclose(f);
+
+    if (n_snd == 0)
+        snprintf(snd_msg, sizeof(snd_msg),
+                 "No sound hardware was found.");
+    else if (snd_sel < 0)
+        snd_sel = 0;
+    snd_loaded = 1;
+}
+
+static void snd_apply(void)
+{
+    if (snd_sel < 0 || snd_sel >= n_snd) return;
+    char cmd[320];
+    snprintf(cmd, sizeof(cmd),
+             "/usr/local/bin/myos-audio set '%s' >/dev/null 2>&1",
+             snd[snd_sel].id);
+    /* このプログラムは SIGCHLD を SIG_IGN にしている。そのままだと
+     * system() の中の waitpid が ECHILD で失敗し、成功していても
+     * 必ず -1 が返る。ここだけ既定に戻して呼ぶ (他の場所と同じ作法)。 */
+    void (*old_chld)(int) = signal(SIGCHLD, SIG_DFL);
+    int rc = system(cmd);
+    signal(SIGCHLD, old_chld);
+
+    if (rc != 0)
+        snprintf(snd_msg, sizeof(snd_msg),
+                 "Could not switch to that output.");
+    else
+        snd_msg[0] = 0;
+}
 
 /* --- ファイルの種類 ------------------------------------------------------ */
 #define FT_LIST_X 12
@@ -825,6 +910,56 @@ static void draw_update(void)
              "Browsers and other software.", x98.shadow);
 }
 
+static void draw_sound(void)
+{
+    int y = TAB_H + 20;
+
+    x98_text(&x98, win, 16, y, "Where sound comes out", x98.text);
+    x98_text(&x98, win, 16, y + 20,
+             "    Outputs with nothing plugged in are not listed.",
+             x98.shadow);
+
+    int ly = y + 44;
+    x98_bevel(&x98, win, 16, ly, WIN_W - 32, MAX_SNK * SNK_ROW + 8, 1);
+    x98_fill(&x98, win, 18, ly + 2, WIN_W - 36, MAX_SNK * SNK_ROW + 4,
+             x98.white);
+
+    for (int i = 0; i < n_snd; i++) {
+        int ry = ly + 6 + i * SNK_ROW;
+        x98_bevel(&x98, win, 26, ry, 13, 13, 0);
+        x98_fill(&x98, win, 28, ry + 2, 9, 9, x98.white);
+        if (i == snd_sel) x98_fill(&x98, win, 30, ry + 4, 5, 5, x98.text);
+
+        char b[200];
+        /* 逃げ道で出しているものは、そうと分かるようにしておく。
+         * 黙って並べると「選んだのに鳴らない」の理由が見えない。 */
+        snprintf(b, sizeof(b), "%s%s", snd[i].label,
+                 snd[i].unplugged ? "  (not detected)" : "");
+        x98_text(&x98, win, 48, ry + (13 - x98_text_h(&x98)) / 2 - 1,
+                 b, x98.text);
+    }
+
+    if (n_snd == 0)
+        x98_text(&x98, win, 30, ly + 8,
+                 snd_msg[0] ? snd_msg : "Looking...", x98.shadow);
+
+    int by = ly + MAX_SNK * SNK_ROW + 18;
+    x98_button(&x98, win, 16, by, 100, 24, "Test", 0);
+    x98_button(&x98, win, 124, by, 100, 24, "Refresh", 0);
+
+    /* 2 行の説明と 1 行のエラーを、同じ場所で出し分ける。
+     * 片方だけ差し替えると文が混ざって意味を成さなくなる。 */
+    if (snd_msg[0] && n_snd > 0) {
+        x98_text(&x98, win, 16, by + 32, snd_msg, x98.shadow);
+    } else {
+        x98_text(&x98, win, 16, by + 32,
+                 "    The change takes effect at once, including sound",
+                 x98.shadow);
+        x98_text(&x98, win, 16, by + 48,
+                 "    that is already playing.", x98.shadow);
+    }
+}
+
 static void draw_system(void)
 {
     char buf[256];
@@ -892,6 +1027,10 @@ static void redraw(void)
     case TAB_TYPES:  draw_types();  break;
     case TAB_BG:      draw_bg(); break;
     case TAB_DISPLAY: draw_display(); break;
+    case TAB_SOUND:
+        if (!snd_loaded) snd_load();
+        draw_sound();
+        break;
     case TAB_SYSTEM: draw_system(); break;
     case TAB_UPDATE: draw_update(); break;
     }
@@ -1110,6 +1249,41 @@ int main(void)
                 }
                 redraw();
                 break;
+            }
+
+            if (tab == TAB_SOUND) {
+                int ly = TAB_H + 20 + 44;
+                for (int i = 0; i < n_snd; i++) {
+                    int ry = ly + 6 + i * SNK_ROW;
+                    if (my >= ry && my < ry + 16 &&
+                        mx >= 26 && mx < WIN_W - 32) {
+                        if (snd_sel != i) {
+                            snd_sel = i;
+                            /* 選んだ瞬間に切り替える。Apply を待たせると
+                             * 「音を聞いて確かめる」が出来ない。 */
+                            snd_apply();
+                        }
+                        redraw();
+                        break;
+                    }
+                }
+                int by = ly + MAX_SNK * SNK_ROW + 18;
+                if (my >= by && my < by + 24) {
+                    if (mx >= 16 && mx < 116) {
+                        /* テスト音。鳴らないときは選び直せばよい。 */
+                        pid_t p = fork();
+                        if (p == 0) {
+                            execlp("speaker-test", "speaker-test",
+                                   "-c", "2", "-t", "wav", "-l", "1",
+                                   (char *)NULL);
+                            _exit(127);
+                        }
+                    } else if (mx >= 124 && mx < 224) {
+                        snd_load();
+                        redraw();
+                    }
+                }
+                if (my < BTN_Y) break;
             }
 
             if (tab == TAB_SYSTEM) {

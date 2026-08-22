@@ -792,19 +792,20 @@ fi
 if command -v pulseaudio >/dev/null 2>&1; then
     pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1
 
-    # 画面と音の出口が別々にあると、pulseaudio が HDMI のほうを既定に
-    # することがある。挿していないケーブルへ流れるので、本体の
-    # スピーカーからは何も聞こえない。実機でよくある「音が出ない」の
-    # 正体がこれ。HDMI 以外の出口があれば、そちらへ寄せる。
-    if command -v pactl >/dev/null 2>&1; then
-        cur=$(pactl get-default-sink 2>/dev/null)
-        case "$cur" in
-            *hdmi*|*HDMI*)
-                alt=$(pactl list short sinks 2>/dev/null |
-                      awk '$2 !~ /hdmi|HDMI/ { print $2; exit }')
-                [ -n "$alt" ] && pactl set-default-sink "$alt" >/dev/null 2>&1
-                ;;
-        esac
+    # 出口の決め打ちはしない。
+    #
+    # 以前はここで「HDMI が既定ならアナログへ寄せる」ことをしていた。
+    # 実機でよくある「音が出ない」を潰すつもりだったが、HDMI のモニタ
+    # 内蔵スピーカーで聞きたい人には**完全に裏目**になる。実際そうなった。
+    # どちらが正解かは機械ごとに違うので、こちらで決めてはいけない。
+    #
+    # 代わりに、前回選んだものがあればそれを復元する。無ければ
+    # pulseaudio の判断に任せる。選び直すのは設定の Sound タブ。
+    if [ -r "$HOME/.myos/audio.conf" ] && command -v pactl >/dev/null 2>&1; then
+        want=$(sed -n 's/^output[[:space:]]*=[[:space:]]*//p' \
+               "$HOME/.myos/audio.conf" 2>/dev/null | head -1)
+        [ -n "$want" ] && /usr/local/bin/myos-audio set "$want" \
+                          >/dev/null 2>&1
     fi
 fi
 
@@ -1203,6 +1204,7 @@ cp "$ROOTDIR/src/gui/myos-wifi"                "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-pkg"                "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-browser"            "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-update"             "$WORK/usr/local/bin/"
+cp "$ROOTDIR/src/gui/myos-audio"              "$WORK/usr/local/bin/"
 chmod 755 "$WORK/myos-install-init" \
           "$WORK/usr/local/bin/myos-install-session" \
           "$WORK/usr/local/bin/myos-writeboot" \
@@ -1210,7 +1212,8 @@ chmod 755 "$WORK/myos-install-init" \
           "$WORK/usr/local/bin/myos-wifi" \
           "$WORK/usr/local/bin/myos-pkg" \
           "$WORK/usr/local/bin/myos-browser" \
-          "$WORK/usr/local/bin/myos-update"
+          "$WORK/usr/local/bin/myos-update" \
+          "$WORK/usr/local/bin/myos-audio"
 chmod 755 "$WORK"/usr/local/bin/myos-*
 
 echo "=== 一般の Linux アプリを入れるための道具 ==="
