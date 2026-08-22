@@ -19,12 +19,24 @@
 #
 # 繋がっていないものを出さない
 # ----------------------------
-# PulseAudio はポートごとに available を持っている。挿さっていない
-# 穴は no になる。ここを見れば「選べるのに音が出ない」を防げる。
+# PulseAudio はポートごとに「挿さっているか」を持っている。ここを見れば
+# 「選べるのに音が出ない」を防げる。
 #
-#   available: yes      挿さっている。出す
-#   available: no       挿さっていない。**出さない**
-#   available: unknown  コーデックが判別できない。出す (隠すと詰む)
+#   available            挿さっている。出す
+#   not available        挿さっていない。**出さない**
+#   availability unknown コーデックが判別できない。出す (隠すと詰む)
+#
+# 書き方が版で違う。pactl 16 (Debian 12) はこう書く:
+#
+#   hdmi-output-0: HDMI / DisplayPort (type: HDMI, priority: 5900,
+#       latency offset: 0 usec, availability group: Legacy 3, not available)
+#
+# 括弧の**最後の項目**が「挿さっているか」で、"available:" とは書かない。
+# 古い pactl は "available: no" と書く。両方読めるようにしてある。
+#
+# ここを "available:" で探していたせいで、1 つもポートが取れず、実機で
+# HDMI を挿しても一覧に出てこなかった。しかも "availability group:" が
+# 紛らわしい。あれはポートの識別子で、挿さっているかとは関係が無い。
 #
 # unknown を隠さないのが肝。古いコーデックはジャック検出を持っていない
 # ことがあり、そこを隠すと**唯一の出口が消えて何も選べなくなる**。
@@ -46,6 +58,23 @@ import sys
 import time
 
 ENV = dict(os.environ, LC_ALL="C", LANG="C")
+
+
+def port_avail(inside):
+    """ポートの括弧の中から「挿さっているか」を取る。
+
+    版によって書き方が違うので両方見る。分からなければ unknown。
+    unknown は隠さない方針なので、読めなかったときに消えることはない。
+    """
+    m = re.search(r"available: (\w+)", inside)     # 古い pactl
+    if m:
+        return m.group(1)
+    tail = inside.rsplit(",", 1)[-1].strip()       # 新しい pactl は文で書く
+    if tail == "not available":
+        return "no"
+    if tail == "available":
+        return "yes"
+    return "unknown"                               # "availability unknown" も
 
 
 def pactl(*args, check=False):
@@ -78,7 +107,14 @@ def parse_cards(text):
         indent = len(raw) - len(raw.lstrip("\t"))
 
         if raw.startswith("Card #"):
-            cur = {"name": "", "desc": "", "active": "", "ports": []}
+            # 番号も控える。sinks 側の "Card: #N" はこの番号を指すので、
+            # 並び順で数えてはいけない (番号は飛ぶことがある)。
+            try:
+                num = int(raw.strip()[6:])
+            except ValueError:
+                num = -1
+            cur = {"name": "", "desc": "", "active": "", "ports": [],
+                   "index": num}
             cards.append(cur)
             section = None
             port = None
@@ -108,14 +144,17 @@ def parse_cards(text):
 
         if section == "ports" or section == "portprops":
             # 例: analog-output-lineout: Line Out (type: Line, priority: 9000,
-            #      latency offset: 0 usec, availability group: ..., available: no)
+            #      latency offset: 0 usec, availability group: Legacy 1,
+            #      not available)
+            #
+            # 目印は priority:。ポートの行には必ず入っていて、下の
+            # Properties の行には入らない。「挿さっているか」の書き方は
+            # 版で違うので、行を拾う条件には使わない。
             m = re.match(r"^([A-Za-z0-9_.:+-]+): (.*?) \((.*)\)$", line)
-            if m and indent >= 2 and "available:" in m.group(3):
+            if m and indent >= 2 and "priority:" in m.group(3):
                 port = {"name": m.group(1), "desc": m.group(2),
-                        "avail": "unknown", "profiles": [], "type": ""}
-                a = re.search(r"available: (\w+)", m.group(3))
-                if a:
-                    port["avail"] = a.group(1)
+                        "avail": port_avail(m.group(3)),
+                        "profiles": [], "type": ""}
                 t = re.search(r"type: (\w+)", m.group(3))
                 if t:
                     port["type"] = t.group(1)
@@ -156,7 +195,11 @@ def outputs(all_ports=False):
                     continue
                 if skip_unavailable and p["avail"] == "no":
                     continue
-                active = c["active"] in p["profiles"]
+                # 動いているプロファイルは足し算で書かれる。
+                #   Active Profile: output:analog-stereo+input:analog-stereo
+                # 丸ごと比べると、出ている出口まで「使われていない」に
+                # なる。分解して、どれか 1 つでも一致すればよい。
+                active = bool(set(c["active"].split("+")) & set(p["profiles"]))
                 out.append({
                     "id": f"{c['name']}/{p['name']}",
                     "card": c["name"],
@@ -182,9 +225,9 @@ def sink_of_card(card_name):
     """そのカードが持っている sink の名前。無ければ None。"""
     cards = parse_cards(pactl("list", "cards"))
     idx = None
-    for i, c in enumerate(cards):
+    for c in cards:
         if c["name"] == card_name:
-            idx = i
+            idx = c["index"]
             break
     text = pactl("list", "sinks")
     name = None

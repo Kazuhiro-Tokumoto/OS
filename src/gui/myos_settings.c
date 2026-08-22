@@ -170,6 +170,7 @@ static struct {
     int  unplugged;       /* available: no。逃げ道で出しているもの */
 } snd[MAX_SNK];
 static int n_snd = 0;
+static int snd_all = 0;       /* 1 = 挿さっていないものも並べる */
 static int snd_sel = -1;
 static int snd_loaded = 0;
 static char snd_msg[160] = "";
@@ -180,7 +181,9 @@ static void snd_load(void)
     snd_sel = -1;
     snd_msg[0] = 0;
 
-    FILE *f = popen("/usr/local/bin/myos-audio list 2>/dev/null", "r");
+    FILE *f = popen(snd_all
+                    ? "/usr/local/bin/myos-audio list --all 2>/dev/null"
+                    : "/usr/local/bin/myos-audio list 2>/dev/null", "r");
     if (!f) {
         snprintf(snd_msg, sizeof(snd_msg), "Could not ask the sound system.");
         snd_loaded = 1;
@@ -211,7 +214,8 @@ static void snd_load(void)
 
     if (n_snd == 0)
         snprintf(snd_msg, sizeof(snd_msg),
-                 "No sound hardware was found.");
+                 snd_all ? "No sound hardware was found."
+                         : "Nothing detected. Try \"Show all outputs\".");
     else if (snd_sel < 0)
         snd_sel = 0;
     snd_loaded = 1;
@@ -950,7 +954,9 @@ static void draw_sound(void)
 
     x98_text(&x98, win, 16, y, "Where sound comes out", x98.text);
     x98_text(&x98, win, 16, y + 20,
-             "    Outputs with nothing plugged in are not listed.",
+             snd_all
+             ? "    Every output is listed, plugged in or not."
+             : "    Outputs with nothing plugged in are not listed.",
              x98.shadow);
 
     int ly = y + 44;
@@ -980,6 +986,20 @@ static void draw_sound(void)
     int by = ly + MAX_SNK * SNK_ROW + 18;
     x98_button(&x98, win, 16, by, 100, 24, "Test", 0);
     x98_button(&x98, win, 124, by, 100, 24, "Refresh", 0);
+
+    /* 逃げ道。挿さっているかの判定は当てにならないことがある
+     * (ジャック検出を持たないコーデック、HDMI の ELD が来ていない、
+     *  こちらの読み違い)。隠す作りには、必ず全部出す道を付けておく。 */
+    x98_bevel(&x98, win, 244, by + 5, 13, 13, 0);
+    x98_fill(&x98, win, 246, by + 7, 9, 9, x98.white);
+    if (snd_all) {
+        /* 小さいチェック。線 2 本で十分それらしく見える
+         * (myos_setup.c の checkbox と同じ描き方)。 */
+        XSetForeground(dpy, x98.gc, x98.text);
+        XDrawLine(dpy, win, x98.gc, 247, by + 11, 249, by + 14);
+        XDrawLine(dpy, win, x98.gc, 249, by + 14, 254, by + 8);
+    }
+    x98_text(&x98, win, 264, by + 5, "Show all outputs", x98.text);
 
     /* 2 行の説明と 1 行のエラーを、同じ場所で出し分ける。
      * 片方だけ差し替えると文が混ざって意味を成さなくなる。 */
@@ -1326,6 +1346,10 @@ int main(void)
                             _exit(127);
                         }
                     } else if (mx >= 124 && mx < 224) {
+                        snd_load();
+                        redraw();
+                    } else if (mx >= 244 && mx < 420) {
+                        snd_all = !snd_all;
                         snd_load();
                         redraw();
                     }
