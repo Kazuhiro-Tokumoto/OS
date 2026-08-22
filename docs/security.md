@@ -103,8 +103,15 @@ ln -sf /usr/share/zoneinfo/<tz> /etc/localtime
 ウィンドウマネージャがまだ居ないので、`override_redirect` の
 全画面ウィンドウにして、自分で `XSetInputFocus` している。
 
-Cancel で抜けると `setup-done` を置かないので、次の起動でまた出る。
-そのときは root のままデスクトップが出るので、直せる。
+出口は **Shut down** の釦だけ (もとは Cancel)。押すと終了状態 2 で返り、
+`myos-session` が `myos-poweroff` を呼んで電源を落とす。ESC では抜けない
+(事故で押せる場所に、代償の重い出口を置かない)。
+
+`setup-done` は最後まで終わったときにしか置かないので、Shut down で
+抜けた機械は次の起動でまたここから始まる。
+
+セットアップが途中で死んだ (終了状態が 0 でも 2 でもない) ときだけ、
+root のままデスクトップを出す。何も出来ないより、直せる画面が出るほうがいい。
 
 ## ログオン画面 (`src/gui/myos_login.c`)
 

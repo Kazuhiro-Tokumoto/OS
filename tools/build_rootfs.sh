@@ -732,17 +732,29 @@ conf=/etc/myos/login.conf
 get() { sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$conf" 2>/dev/null | head -1; }
 
 # 初回だけセットアップ。ここでユーザーとパスワードが決まる。
+#
+# 終了状態 2 は「Shut down を押された」。setup-done を置いていないので、
+# 次に電源を入れればまたここから始まる。中途半端に root の机を出すより、
+# 一度切って仕切り直してもらうほうが分かりやすい。
 if [ ! -e /etc/myos/setup-done ]; then
     /usr/local/bin/myos-setup
+    rc=$?
+    if [ "$rc" = "2" ]; then
+        echo "[myos-session] setup cancelled, powering off"
+        # myos-poweroff は X も含めて畳んでから電源を切る。
+        # ここはまだ root なので sudo は要らない。
+        exec /usr/local/bin/myos-poweroff
+    fi
 fi
 
 user="$(get user)"
 auto="$(get autologin)"
 
-# セットアップを飛ばされた (Cancel) 場合は root のまま出す。
-# 何も出来ないより、直せる画面が出るほうがいい。
+# ここに来て user が無いのは、セットアップが途中で死んだときだけ
+# (Shut down なら上で電源が落ちている)。何も出来ないより、
+# 直せる画面が出るほうがいいので root のまま出す。
 if [ -z "$user" ]; then
-    echo "[myos-session] setup not completed, running as root"
+    echo "[myos-session] setup did not finish, running as root"
     exec /usr/local/bin/myos-desktop
 fi
 

@@ -12,6 +12,12 @@
  * root で動く。ここで作ったユーザーで、以後のデスクトップが動く。
  * 終わったら /etc/myos/setup-done を置くので、次からは出ない。
  *
+ * 終了状態:
+ *   0 … 設定を書き終えた (setup-done を置いた)
+ *   1 … 画面が開けなかった
+ *   2 … Shut down を押された。呼び出し側が電源を落とす。
+ *        setup-done は置かないので、次の起動でまたここに来る。
+ *
  * ウィンドウマネージャがまだ居ないので override_redirect の全画面にして、
  * 自分でキーボードのフォーカスを取る。
  *
@@ -431,12 +437,13 @@ static void draw_page(void)
     switch (step) {
     case ST_WELCOME:
         label(24, 56, "Welcome to myOS.");
-        label(24, 88, "Setup will prepare this computer for you.");
-        label(24, 116, "It takes about a minute. You will be asked for:");
-        label(24, 144, "  - a user name");
-        label(24, 162, "  - a password");
-        label(24, 180, "  - your keyboard layout and time zone");
-        label(24, 220, "Press Next to continue.");
+        label(24, 84, "Setup will prepare this computer for you.");
+        label(24, 110, "It takes about a minute. You will be asked for:");
+        label(24, 136, "  - a user name");
+        label(24, 154, "  - a password");
+        label(24, 172, "  - your keyboard layout and time zone");
+        label(24, 202, "Press Next to continue. Shut down turns the");
+        label(24, 220, "computer off; Setup runs again the next time.");
         label(24, 250, "Mouse not working? Tab moves, Space selects,");
         label(24, 268, "Enter is Next. The whole setup works from the");
         label(24, 286, "keyboard alone.");
@@ -540,7 +547,9 @@ static void redraw(void)
                step == ST_FINISH ? "Finish" : "Next >", 0);
     if (f == W_NEXT) focus_rect(gx + 4, gy + 4, BTN_W - 8, BTN_H - 8);
     btn_geom(2, &gx, &gy);
-    x98_button(&x98, win, gx, gy, BTN_W, BTN_H, "Cancel", 0);
+    /* もとは Cancel。押すと電源が落ちるので、そう名乗らせる。
+     * 「取り消し」の顔をして機械を止める釦は罠でしかない。 */
+    x98_button(&x98, win, gx, gy, BTN_W, BTN_H, "Shut down", 0);
     if (f == W_CANCEL) focus_rect(gx + 4, gy + 4, BTN_W - 8, BTN_H - 8);
 
     /* ページ番号。長さの見当が付くだけで気分が違う。 */
@@ -595,6 +604,10 @@ static int do_next(void)
 }
 
 /* 戻る。ページの内容は残したまま。 */
+/* Cancel を押されたか。押されていたら終了状態 2 で抜けて、
+ * 呼び出し側 (myos-session) に電源を切ってもらう。 */
+static int cancelled = 0;
+
 static void do_back(void)
 {
     if (step <= ST_WELCOME) return;
@@ -670,19 +683,17 @@ int main(void)
             } else if (ks == XK_Escape) {
                 /* ESC では抜けない。
                  *
-                 * ここを抜けると使う人が作られないまま、root のまま
-                 * デスクトップが出る。直せる画面が出るほうがよい、と
-                 * 思って逃げ道を用意してあるのだが、**ESC は事故で
-                 * 押せる**。指が滑っただけで root の机に着いてしまう。
+                 * 出口は Shut down の釦だけにしてある。あれは狙って
+                 * 押すものなので、事故では踏まない。ESC は指が滑った
+                 * だけで押せてしまうので、出口には向かない。
                  *
-                 * 逃げ道は Cancel のボタンに残してある。あれは狙って
-                 * 押すものなので、事故では踏まない。代償の重い出口は、
-                 * それなりの手間の先に置く。 */
+                 * なお Shut down で抜けても setup-done は置かないので、
+                 * 次に電源を入れたらまたここから始まる。 */
             } else if (ks == XK_Return || ks == XK_KP_Enter) {
                 /* Enter は既定のボタン。ただしフォーカスが Back や Cancel に
                  * 乗っているときは、そちらを押したことにする。 */
                 if (f == W_BACK)        do_back();
-                else if (f == W_CANCEL) goto done;
+                else if (f == W_CANCEL) { cancelled = 1; goto done; }
                 else if (do_next())     goto done;
             } else if (ks == XK_space) {
                 /* Space は「今いるところ」を操作する。ただし入力欄では
@@ -690,7 +701,7 @@ int main(void)
                 if (f == W_AUTOLOGIN)   autologin = !autologin;
                 else if (f == W_KBD)    kbd ^= 1;
                 else if (f == W_BACK)   do_back();
-                else if (f == W_CANCEL) goto done;
+                else if (f == W_CANCEL) { cancelled = 1; goto done; }
                 else if (f == W_NEXT) { if (do_next()) goto done; }
                 else if (e) x98_edit_insert(e, " ", 1);
             } else if (ks == XK_Up || ks == XK_Down ||
@@ -739,8 +750,10 @@ int main(void)
                     focus_set(W_NEXT);
                     if (do_next()) goto done;
                 } else if (hit == 2) {
-                    /* Cancel。設定を書かずに抜ける。
+                    /* Shut down。設定を書かずに抜ける。
                      * setup-done を置かないので、次の起動でまた出る。 */
+                    focus_set(W_CANCEL);
+                    cancelled = 1;
                     goto done;
                 }
             } else if (step == ST_OPTIONS) {
@@ -772,5 +785,7 @@ done:
     memset(ed_pw1.buf, 0, sizeof(ed_pw1.buf));
     memset(ed_pw2.buf, 0, sizeof(ed_pw2.buf));
     XCloseDisplay(dpy);
-    return 0;
+    /* 2 = 使う人がやめた。呼び出し側はここで電源を落とす。
+     * 0 と分けているのは、設定が書けなかった事故と区別するため。 */
+    return cancelled ? 2 : 0;
 }
