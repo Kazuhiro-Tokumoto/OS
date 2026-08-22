@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 #include "x98.h"
 
@@ -68,6 +69,13 @@ static void draw_password(int px, int py, int w, int h)
     x98_vline(&x98, win, cx, py + 3, h - 6, x98.text);
 }
 
+/* 失敗の理由。ここを 1 つの旗にしていたのが元の間違いで、
+ * 「パスワードが違う」と「コマンドが転んだ」が同じ扱いだった。
+ * 実機で myos-setres が転んだとき、正しいパスワードを入れているのに
+ * 「Wrong password」と出て、本当のエラーがどこにも出なかった。 */
+enum { FAIL_NONE = 0, FAIL_AUTH, FAIL_CMD };
+static char cmd_err[160] = "";
+
 static void redraw(void)
 {
     x98_fill(&x98, win, 0, 0, WIN_W, WIN_H, x98.face);
@@ -81,10 +89,16 @@ static void redraw(void)
     x98_text(&x98, win, 14, 88, "Password:", x98.text);
     draw_password(90, 84, WIN_W - 90 - 14, 20);
 
-    if (failed)
+    if (failed == FAIL_AUTH)
         x98_text(&x98, win, 14, 112,
                  "Wrong password, or you are not an administrator.",
                  x98.text);
+    else if (failed == FAIL_CMD) {
+        /* 認証は通っている。転んだのはコマンドのほう。
+         * その場で理由が読めないと、使う人は打つ手が無い。 */
+        x98_text(&x98, win, 14, 112, "The command could not run:", x98.text);
+        x98_text(&x98, win, 14, 128, cmd_err, x98.text);
+    }
 
     x98_button(&x98, win, WIN_W - 2 * BTN_W - 24, WIN_H - BTN_H - 14,
                BTN_W, BTN_H, "OK", 0);
@@ -92,9 +106,20 @@ static void redraw(void)
                BTN_W, BTN_H, "Cancel", 0);
 }
 
-/* sudo にパスワードを食わせて実行する。
- * 成功したら二度と戻らない (このプロセスは用済み)。 */
-static int try_run(char **argv)
+/* 認証と実行を 2 段に分ける。
+ *
+ * 1 段にまとめると区別が付かない。sudo は認証に失敗しても 1 で終わるし、
+ * 起動したコマンドが 1 で終わってもやはり 1 が返る。実機でこれを踏んだ:
+ * 正しいパスワードを入れているのに "Wrong password" と出て、本当の理由
+ * (myos-setres: /dev/root がありません) がどこにも出なかった。
+ *
+ *   1 段目  sudo -S -k -v    認証だけ。ここの失敗は「パスワードが違う」
+ *   2 段目  sudo -n <cmd>    実行。ここの失敗はコマンドの都合
+ *
+ * -v は認証して時刻印を更新するだけで、何も起動しない。2 段目の -n は
+ * その時刻印を使うので、もう一度聞かれることはない。
+ */
+static int authenticate(void)
 {
     int fd[2];
     if (pipe(fd) != 0) return 0;
@@ -106,10 +131,10 @@ static int try_run(char **argv)
         close(fd[1]);
         dup2(fd[0], 0);
         close(fd[0]);
-        /* -S: パスワードを標準入力から読む
-         * -k: 前回の認証を使い回さない。毎回きちんと聞く
-         * -p: sudo 自身のプロンプトは出さない (画面に出る先が無い) */
-        execvp("sudo", argv);
+        int null = open("/dev/null", O_WRONLY);
+        if (null >= 0) { dup2(null, 2); close(null); }
+        char *av[] = { "sudo", "-S", "-k", "-v", "-p", "", NULL };
+        execvp("sudo", av);
         _exit(127);
     }
 
@@ -126,10 +151,68 @@ static int try_run(char **argv)
 
     int st = 0;
     while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
 
-    /* sudo は認証に失敗すると 1 で終わる。
-     * 認証が通れば、あとは起動したコマンド次第なので成功とみなす。 */
-    return WIFEXITED(st) && WEXITSTATUS(st) != 1;
+/* 認証済みの前提で実行する。転んだら、その理由を err に汲んでくる。
+ * 画面に出すのはここで拾った 1 行。使う人が次に何をすればいいかは、
+ * 大抵そこに書いてある。 */
+static int run_command(char **argv, char *err, size_t errsz)
+{
+    err[0] = 0;
+
+    int ep[2];
+    if (pipe(ep) != 0) return 0;
+
+    pid_t p = fork();
+    if (p < 0) { close(ep[0]); close(ep[1]); return 0; }
+
+    if (p == 0) {
+        close(ep[0]);
+        dup2(ep[1], 2);
+        close(ep[1]);
+        int null = open("/dev/null", O_RDONLY);
+        if (null >= 0) { dup2(null, 0); close(null); }
+        execvp("sudo", argv);
+        _exit(127);
+    }
+
+    close(ep[1]);
+    char buf[1024];
+    size_t n = 0;
+    ssize_t r;
+    while (n < sizeof(buf) - 1 &&
+           (r = read(ep[0], buf + n, sizeof(buf) - 1 - n)) > 0)
+        n += (size_t)r;
+    buf[n] = 0;
+    close(ep[0]);
+
+    int st = 0;
+    while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 0) return 1;
+
+    /* 最後の中身のある行を採る。sudo の前置きより、コマンド自身が
+     * 最後に言い残したことのほうが役に立つ。 */
+    char *last = NULL;
+    for (char *ln = strtok(buf, "\n"); ln; ln = strtok(NULL, "\n")) {
+        while (*ln == ' ' || *ln == '\t') ln++;
+        if (*ln) last = ln;
+    }
+    if (last) snprintf(err, errsz, "%.*s", (int)errsz - 1, last);
+    else      snprintf(err, errsz, "exit code %d",
+                       WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+    return 0;
+}
+
+/* 認証 -> 実行。成功したら 1。失敗したら failed に理由を立てる。 */
+static int try_run(char **argv)
+{
+    if (!authenticate()) { failed = FAIL_AUTH; return 0; }
+    if (!run_command(argv, cmd_err, sizeof(cmd_err))) {
+        failed = FAIL_CMD;
+        return 0;
+    }
+    return 1;
 }
 
 int main(int argc, char **argv)
@@ -157,11 +240,9 @@ int main(int argc, char **argv)
     /* sudo に渡す argv を先に組み立てておく */
     char *sargv[64];
     int   sn = 0;
+    /* 認証は authenticate() が済ませる。ここは -n (聞かない) で実行だけ。 */
     sargv[sn++] = "sudo";
-    sargv[sn++] = "-S";
-    sargv[sn++] = "-k";
-    sargv[sn++] = "-p";
-    sargv[sn++] = "";
+    sargv[sn++] = "-n";
     for (int i = 1; i < argc && sn < 62; i++) sargv[sn++] = argv[i];
     sargv[sn] = NULL;
 
@@ -221,7 +302,6 @@ int main(int argc, char **argv)
 
             if (ks == XK_Return || ks == XK_KP_Enter) {
                 if (try_run(sargv)) goto out;
-                failed = 1;
                 x98_edit_set(&pw, "");
             } else if (ks == XK_Escape) {
                 goto out;
@@ -242,7 +322,6 @@ int main(int argc, char **argv)
                 int ok_x = WIN_W - 2 * BTN_W - 24;
                 if (mx >= ok_x && mx < ok_x + BTN_W) {
                     if (try_run(sargv)) goto out;
-                    failed = 1;
                     x98_edit_set(&pw, "");
                     redraw();
                 } else if (mx >= WIN_W - BTN_W - 14) {

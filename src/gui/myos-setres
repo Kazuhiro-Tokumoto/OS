@@ -37,22 +37,33 @@ def die(msg):
 
 
 def boot_disk():
-    """ルートが載っているディスク (パーティションではない) を返す。"""
-    src = None
-    with open("/proc/mounts") as f:
-        for line in f:
-            p = line.split()
-            if len(p) > 1 and p[1] == "/":
-                src = p[0]
-    if not src or not src.startswith("/dev/"):
-        die("ルートのデバイスが分かりません")
+    """ルートが載っているディスク (パーティションではない) を返す。
 
-    name = os.path.basename(src)
-    # sda2 -> sda / nvme0n1p2 -> nvme0n1 / mmcblk0p1 -> mmcblk0
-    if re.search(r"\d+p\d+$", name):
-        disk = re.sub(r"p\d+$", "", name)
-    else:
-        disk = re.sub(r"\d+$", "", name)
+    /proc/mounts に出てくる名前は当てにできない。カーネルが root= で
+    そのままマウントすると **/dev/root** という、実体のファイルが無い
+    名前が出る。実機で踏んだ:
+
+        myos-setres: /dev/root がありません
+
+    なので名前ではなく **デバイス番号** から引く。ルートの st_dev を
+    major:minor に分けて /sys/dev/block から辿れば、名前が何であろうと
+    実物に行き着く。sda2 でも nvme0n1p2 でも mmcblk0p1 でも同じ道。
+    """
+    st = os.stat("/")
+    maj, mnr = os.major(st.st_dev), os.minor(st.st_dev)
+    link = f"/sys/dev/block/{maj}:{mnr}"
+    if not os.path.exists(link):
+        die("ルートのデバイスが分かりません "
+            f"(major {maj}, minor {mnr})")
+
+    # 例: /sys/devices/.../block/sda/sda2  (パーティション)
+    #     /sys/devices/.../block/sda       (ディスクそのもの)
+    real = os.path.realpath(link)
+    name = os.path.basename(real)
+    parent = os.path.basename(os.path.dirname(real))
+    # 親が /sys/block に居るならパーティション。居ないなら自分がディスク。
+    disk = parent if os.path.exists(f"/sys/block/{parent}") else name
+
     path = f"/dev/{disk}"
     if not os.path.exists(path):
         die(f"{path} がありません")
