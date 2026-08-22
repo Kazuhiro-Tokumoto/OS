@@ -386,6 +386,33 @@ mount -t tmpfs    tmpfs    /run
 mount -t tmpfs    tmpfs    /tmp
 mount -o remount,rw /
 
+# /dev/root を実体へ向けておく。
+#
+# カーネルが root= でそのままマウントすると (myOS は initramfs に /init を
+# 置かないのでこの道を通る)、/proc/mounts に出てくる名前が **/dev/root**
+# になる。ところがそんなデバイスファイルは無い。実機で踏んだ:
+#
+#   myos-setres: /dev/root がありません
+#
+# 道具の側で名前に頼らないようにはしたが (デバイス番号から引く)、
+# df や mount の表示は /dev/root のままだし、ここを見に行くものが
+# 他にもあれば同じことが起きる。**張っておくのが筋。**
+#
+# 場所は /proc/self/mountinfo の 3 列目 (major:minor) から引く。
+# 名前ではなく番号なので、/dev/root と書かれていようが関係ない。
+if [ ! -e /dev/root ]; then
+    mm=$(awk '$5 == "/" { print $3; exit }' /proc/self/mountinfo 2>/dev/null)
+    if [ -n "$mm" ]; then
+        real=$(readlink -f "/sys/dev/block/$mm" 2>/dev/null)
+        name=${real##*/}
+        # ルートは普通パーティション (sda2)。ディスクそのものではない。
+        # 意味のとおりに、パーティションへ向ける。
+        if [ -n "$name" ] && [ -b "/dev/$name" ]; then
+            ln -sf "/dev/$name" /dev/root
+        fi
+    fi
+fi
+
 hostname myos
 
 # 本体の時計を読む。/etc/adjtime の LOCAL を見て、ローカル時刻として
