@@ -287,7 +287,7 @@ static void page_welcome(void)
     say(6,  6, "This program prepares myOS to run on your computer.");
 
     say(9,  6, "  * To set up myOS now, press ENTER.");
-    say(11, 6, "  * To quit Setup without installing, press F3.");
+    say(11, 6, "  * To quit Setup and shut down, press F3.");
 
     say(15, 6, "Setup will ask you which disk to use before changing");
     say(16, 6, "anything. Nothing is written until you confirm.");
@@ -658,7 +658,10 @@ int main(void)
     for (;;) {
         int k = getkey();
         if (k == '\r' || k == '\n') break;
-        if (k == 1002 || k == 'q') { restore_mode(); cls(); printf(C_RESET "\n"); return 1; }
+        /* 2 は「使う人がやめた」。1 は「途中で失敗した」。
+         * myos-install-init がこれを見て出口を変える。
+         * やめたときは電源を切り、失敗したときは shell を出す。 */
+        if (k == 1002 || k == 'q') { restore_mode(); cls(); printf(C_RESET "\n"); return 2; }
     }
 
     scan_disks();
@@ -666,7 +669,7 @@ int main(void)
     int di, mode;
     for (;;) {
         di = page_select_disk();
-        if (di < 0) { restore_mode(); cls(); printf(C_RESET "\n"); return 1; }
+        if (di < 0) { restore_mode(); cls(); printf(C_RESET "\n"); return 2; }
 
         mode = page_select_mode(&disks[di]);
         if (mode < 0) continue;

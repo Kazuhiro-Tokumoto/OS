@@ -68,10 +68,39 @@ fi
 /usr/local/bin/myos-install-text < /dev/console > /dev/console 2>&1
 rc=$?
 
+# 2 は「使う人が F3 でやめた」。1 やそれ以外は「途中で失敗した」。
+# 出口を分ける。やめただけの人に shell を出しても、出来ることは何も
+# 無いし、意味の分からない画面が残るほうが困る。逆に失敗したときは、
+# その場で中を見られないと原因が追えない。
+if [ "$rc" = "2" ]; then
+    echo                                       > /dev/console
+    echo "  Setup was cancelled."              > /dev/console
+    echo "  The computer will shut down."      > /dev/console
+    echo "  You can remove the disc or USB stick." > /dev/console
+    echo                                       > /dev/console
+    sync
+
+    # ここの PID 1 はこのシェルなので、poweroff コマンドは当てに
+    # できない (systemd 向けのものが入っていることがある)。
+    # カーネルに直接頼むのが確実。
+    echo 1 > /proc/sys/kernel/sysrq 2>/dev/null
+    sleep 1
+    echo o > /proc/sysrq-trigger 2>/dev/null
+
+    # sysrq が塞がれている機械向けの保険。
+    sleep 2
+    poweroff -f 2>/dev/null
+    halt -f 2>/dev/null
+
+    # どれも効かなかったとき用。電源ボタンを押してもらう。
+    echo "  Please turn the computer off."     > /dev/console
+    exec /bin/sh < /dev/console > /dev/console 2>&1
+fi
+
 if [ "$rc" != "0" ] || [ ! -f /tmp/myos-install.conf ]; then
     echo                                        > /dev/console
-    echo "  Setup was cancelled."               > /dev/console
-    echo "  Restart the computer, or use this shell." > /dev/console
+    echo "  Setup could not continue (code $rc)." > /dev/console
+    echo "  Restart the computer, or use this shell to look." > /dev/console
     echo                                        > /dev/console
     exec /bin/sh < /dev/console > /dev/console 2>&1
 fi
