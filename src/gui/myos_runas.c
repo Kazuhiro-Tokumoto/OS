@@ -113,11 +113,20 @@ static void redraw(void)
  * 正しいパスワードを入れているのに "Wrong password" と出て、本当の理由
  * (myos-setres: /dev/root がありません) がどこにも出なかった。
  *
- *   1 段目  sudo -S -k -v    認証だけ。ここの失敗は「パスワードが違う」
- *   2 段目  sudo -n <cmd>    実行。ここの失敗はコマンドの都合
+ *   1 段目  sudo -S -k -v <なし>   認証だけ。ここの失敗は「パスワードが違う」
+ *   2 段目  sudo -S -k <cmd>       実行。ここの失敗はコマンドの都合
  *
- * -v は認証して時刻印を更新するだけで、何も起動しない。2 段目の -n は
- * その時刻印を使うので、もう一度聞かれることはない。
+ * 両方にパスワードを渡す。時刻印 (sudo が覚えている「さっき認証した」)
+ * には頼らない。-k を付けた sudo は認証しても時刻印を更新しないため。
+ *
+ *   man sudo: -k ... will not update the user's cached credentials
+ *
+ * ここを 2 段目 -n (聞かない) にしていたら、1 段目が通ったのに
+ * 2 段目が「sudo: パスワードが必要です」で必ず転んだ。実機で踏んだ。
+ *
+ * -k を外せば時刻印は残るが、そうすると「前に認証してから 15 分以内」の
+ * 間はどんな文字を打っても sudo -v が素通りする。パスワードを聞く画面が
+ * 何も守らなくなるので、-k は外さない。渡す手間のほうを取る。
  */
 static int authenticate(void)
 {
@@ -145,9 +154,8 @@ static int authenticate(void)
     (void)ign;
     close(fd[1]);
 
-    /* 渡し終えたら手元からは消す */
-    memset(pw.buf, 0, sizeof(pw.buf));
-    pw.len = pw.cur = 0;
+    /* ここではまだ消せない。2 段目にも同じものを渡す (時刻印に頼らない)。
+     * 消すのは try_run の最後。 */
 
     int st = 0;
     while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
@@ -163,21 +171,36 @@ static int run_command(char **argv, char *err, size_t errsz)
 
     int ep[2];
     if (pipe(ep) != 0) return 0;
+    int ip[2];
+    if (pipe(ip) != 0) { close(ep[0]); close(ep[1]); return 0; }
 
     pid_t p = fork();
-    if (p < 0) { close(ep[0]); close(ep[1]); return 0; }
+    if (p < 0) {
+        close(ep[0]); close(ep[1]); close(ip[0]); close(ip[1]);
+        return 0;
+    }
 
     if (p == 0) {
         close(ep[0]);
         dup2(ep[1], 2);
         close(ep[1]);
-        int null = open("/dev/null", O_RDONLY);
-        if (null >= 0) { dup2(null, 0); close(null); }
+        close(ip[1]);
+        dup2(ip[0], 0);
+        close(ip[0]);
         execvp("sudo", argv);
         _exit(127);
     }
 
     close(ep[1]);
+
+    /* sudo -S はここから 1 行読む。読み終えたぶんから先は起動された
+     * コマンドの標準入力になるので、閉じて EOF を見せる。 */
+    close(ip[0]);
+    ssize_t ign;
+    ign = write(ip[1], pw.buf, pw.len);
+    ign = write(ip[1], "\n", 1);
+    (void)ign;
+    close(ip[1]);
     char buf[1024];
     size_t n = 0;
     ssize_t r;
@@ -207,12 +230,19 @@ static int run_command(char **argv, char *err, size_t errsz)
 /* 認証 -> 実行。成功したら 1。失敗したら failed に理由を立てる。 */
 static int try_run(char **argv)
 {
-    if (!authenticate()) { failed = FAIL_AUTH; return 0; }
-    if (!run_command(argv, cmd_err, sizeof(cmd_err))) {
+    int ok = 0;
+    if (!authenticate()) {
+        failed = FAIL_AUTH;
+    } else if (!run_command(argv, cmd_err, sizeof(cmd_err))) {
         failed = FAIL_CMD;
-        return 0;
+    } else {
+        ok = 1;
     }
-    return 1;
+
+    /* 2 段とも渡し終えた。手元からは消す。 */
+    memset(pw.buf, 0, sizeof(pw.buf));
+    pw.len = pw.cur = 0;
+    return ok;
 }
 
 int main(int argc, char **argv)
@@ -240,9 +270,13 @@ int main(int argc, char **argv)
     /* sudo に渡す argv を先に組み立てておく */
     char *sargv[64];
     int   sn = 0;
-    /* 認証は authenticate() が済ませる。ここは -n (聞かない) で実行だけ。 */
+    /* 認証は authenticate() が済ませているが、-k のせいで時刻印は
+     * 残っていない。ここでもパスワードを渡す (run_command が流す)。 */
     sargv[sn++] = "sudo";
-    sargv[sn++] = "-n";
+    sargv[sn++] = "-S";
+    sargv[sn++] = "-k";
+    sargv[sn++] = "-p";
+    sargv[sn++] = "";
     for (int i = 1; i < argc && sn < 62; i++) sargv[sn++] = argv[i];
     sargv[sn] = NULL;
 

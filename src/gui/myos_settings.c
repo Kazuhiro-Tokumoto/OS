@@ -809,10 +809,23 @@ static char up_latest[64]    = "";
 static char up_msg[200]      = "";
 static int  up_checked       = 0;
 static int  up_busy          = 0;
-static int  up_new           = 0;   /* 1 = 入れ替える価値がある */
+static int  up_new           = 0;   /* 1 = カーネルを入れ替える価値がある */
+static int  up_ab            = 0;   /* 1 = ルートが A/B。入れ直さずに済む */
+static int  up_sysnew        = 0;   /* 1 = システム側が古い */
 
 #define UP_BTN_W 132
 #define UP_BTN_H 24
+
+/* 押せる釦の並びを 1 箇所で決める。描くところと当たり判定で別々に
+ * 数えると、片方だけ直したときにずれる (Add Programs でやった)。
+ * 0 番は Check for updates で、いつでも居る。 */
+#define UP_BTN_X(i) (32 + (i) * (UP_BTN_W + 10))
+static void up_slots(int *kern, int *sys)
+{
+    int i = 1;
+    *kern = (up_checked && up_new)              ? i++ : -1;
+    *sys  = (up_checked && up_sysnew && up_ab)  ? i++ : -1;
+}
 
 static void up_check(void)
 {
@@ -835,22 +848,38 @@ static void up_check(void)
                 snprintf(up_latest, sizeof(up_latest), "%s", v);
             else if (!strcmp(k, "kernelnew"))
                 up_new = !strcmp(v, "yes");
+            else if (!strcmp(k, "system"))
+                /* "A/B (/dev/sda3 / /dev/sda5、いま ...)" か "1 本 (...)"。
+                 * 頭の 3 文字だけ見る。中身の書き方はいつ変わってもいい。 */
+                up_ab = !strncmp(v, "A/B", 3);
         }
         pclose(f);
     }
     up_checked = 1;
     up_busy = 0;
 
+    up_sysnew = up_latest[0] && !strchr(up_latest, '(') &&
+                strcmp(up_os, up_latest);
+
     if (!up_latest[0] || strchr(up_latest, '('))
         snprintf(up_msg, sizeof(up_msg),
                  "Could not reach the internet. Connect first.");
+    else if (up_new && up_sysnew && up_ab)
+        snprintf(up_msg, sizeof(up_msg),
+                 "%s is available. Update the system, then the kernel.",
+                 up_latest);
     else if (up_new)
         snprintf(up_msg, sizeof(up_msg),
                  "A newer kernel is available (%s).", up_latest);
-    else if (strcmp(up_os, up_latest))
-        /* 出ている版のほうが新しいが、カーネルは作り直されていない。
-         * ここで黙って「最新です」と出すと、Update を押しても何も
-         * 起きない理由が分からない。何が要るのかを書く。 */
+    else if (up_sysnew && up_ab)
+        /* ルートが A/B なら入れ直さなくてよい。使っていないほうへ
+         * 入れて、起動先を切り替えるだけで済む。 */
+        snprintf(up_msg, sizeof(up_msg),
+                 "%s is available. It goes to the spare root.", up_latest);
+    else if (up_sysnew)
+        /* ルートが 1 本の機械。入れ替える先が無いので入れ直すしかない。
+         * ここで黙って「最新です」と出すと、押しても何も起きない理由が
+         * 分からない。何が要るのかを書く。 */
         snprintf(up_msg, sizeof(up_msg),
                  "Kernel is current. %s changes need a reinstall.",
                  up_latest);
@@ -877,11 +906,16 @@ static void draw_update(void)
              up_latest[0] ? up_latest : "(not checked)");
     x98_text(&x98, win, 16, y + 58, b, x98.text);
 
-    x98_button(&x98, win, 32, y + 80, UP_BTN_W, UP_BTN_H,
+    x98_button(&x98, win, UP_BTN_X(0), y + 80, UP_BTN_W, UP_BTN_H,
                up_busy ? "Working..." : "Check for updates", 0);
-    if (up_checked && up_new)
-        x98_button(&x98, win, 32 + UP_BTN_W + 10, y + 80,
+    int ks, ss;
+    up_slots(&ks, &ss);
+    if (ks >= 0)
+        x98_button(&x98, win, UP_BTN_X(ks), y + 80,
                    UP_BTN_W, UP_BTN_H, "Update kernel", 0);
+    if (ss >= 0)
+        x98_button(&x98, win, UP_BTN_X(ss), y + 80,
+                   UP_BTN_W, UP_BTN_H, "Update system", 0);
 
     if (up_msg[0])
         x98_text(&x98, win, 32, y + 110, up_msg, x98.shadow);
@@ -889,16 +923,16 @@ static void draw_update(void)
     y += 138;
     x98_text(&x98, win, 16, y, "What happens", x98.text);
     x98_text(&x98, win, 16, y + 20,
-             "    The new kernel is written to the spare half of the boot",
+             "    The new kernel goes to the spare half of the boot area,",
              x98.shadow);
     x98_text(&x98, win, 16, y + 36,
-             "    area first. Only then does myOS switch over, so losing",
+             "    the new system to the spare root. myOS switches over only",
              x98.shadow);
     x98_text(&x98, win, 16, y + 52,
-             "    power partway through leaves the old one running.",
+             "    after the write finishes, so losing power changes nothing.",
              x98.shadow);
     x98_text(&x98, win, 16, y + 72,
-             "    If the new kernel does not start, hold R while booting",
+             "    If the new one does not start, hold R while booting",
              x98.text);
     x98_text(&x98, win, 16, y + 88,
              "    to go back to the previous one.", x98.text);
@@ -1213,25 +1247,38 @@ int main(void)
                 int y = TAB_H + 20;
                 int by = y + 80;
                 if (my >= by && my < by + UP_BTN_H) {
-                    if (mx >= 32 && mx < 32 + UP_BTN_W) {
+                    int ks, ss, hit = -1;
+                    up_slots(&ks, &ss);
+                    for (int i = 0; i < 3; i++)
+                        if (mx >= UP_BTN_X(i) && mx < UP_BTN_X(i) + UP_BTN_W)
+                            hit = i;
+
+                    /* 別のプロセスに任せる。ここで待つと、数分かかる
+                     * ダウンロードの間ずっと固まって見える。端末を出して
+                     * 進み具合が見えるようにする。 */
+                    const char *sub = NULL;
+                    if (hit == 0) {
                         redraw(); XFlush(dpy);
                         up_check();
-                    } else if (up_checked && up_new &&
-                               mx >= 32 + UP_BTN_W + 10 &&
-                               mx < 32 + 2 * UP_BTN_W + 10) {
-                        /* 別のプロセスに任せる。ここで待つと、
-                         * 数分かかるダウンロードの間ずっと固まって見える。
-                         * 端末を出して進み具合が見えるようにする。 */
+                    } else if (hit >= 0 && hit == ks) {
+                        sub = "apply";
+                    } else if (hit >= 0 && hit == ss) {
+                        sub = "apply-system";
+                    }
+
+                    if (sub) {
+                        char c[200];
+                        snprintf(c, sizeof(c),
+                                 "sudo -n /usr/local/bin/myos-update %s; "
+                                 "echo; echo 'Press Enter to close'; read x",
+                                 sub);
                         up_busy = 1;
                         snprintf(up_msg, sizeof(up_msg),
                                  "A window will show the progress.");
                         pid_t p = fork();
                         if (p == 0) {
                             execl("/usr/local/bin/myos-term", "myos-term",
-                                  "sh", "-c",
-                                  "sudo -n /usr/local/bin/myos-update apply; "
-                                  "echo; echo 'Press Enter to close'; read x",
-                                  (char *)NULL);
+                                  "sh", "-c", c, (char *)NULL);
                             _exit(127);
                         }
                         up_busy = 0;
