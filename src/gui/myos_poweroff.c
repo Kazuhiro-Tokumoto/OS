@@ -28,9 +28,84 @@
 #include <sys/reboot.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <stdlib.h>
 
 /* myos-init と取り決めた印。片方だけ直すと噛み合わなくなる。 */
 #define SHUTDOWN_FLAG "/run/myos-shutdown"
+
+/* 自分の親をたどって並べる。
+ *
+ * 数えるときにこれを除く。理由は sudo。このプログラムは sudo 経由で
+ * 起動されるので、親の sudo は「子 (自分) が終わるまで」終われない。
+ * 自分は SIGTERM を無視して電源を切る役なので、**永久に終わらない**。
+ * 除かないと「1 個残っている」が消えず、毎回上限まで待つことになる。
+ *
+ * 毎回たどり直すのが肝心。上の代 (WM や X) が先に終わると、その時点で
+ * 親子関係が PID 1 に付け替わり、この一覧から自然に消える。
+ * 最初に一度だけ数えて固定すると、終わったはずの X を待たなくなる。 */
+static int is_ancestor(pid_t target)
+{
+    pid_t p = getppid();
+    for (int hop = 0; p > 1 && hop < 32; hop++) {
+        if (p == target) return 1;
+        char path[64], line[256];
+        snprintf(path, sizeof(path), "/proc/%d/status", (int)p);
+        FILE *f = fopen(path, "r");
+        if (!f) return 0;
+        pid_t up = 0;
+        while (fgets(line, sizeof(line), f))
+            if (!strncmp(line, "PPid:", 5)) { up = (pid_t)atoi(line + 5); break; }
+        fclose(f);
+        if (up <= 0) return 0;
+        p = up;
+    }
+    return 0;
+}
+
+/* まだ終わっていないユーザーの処理を数える。
+ *
+ * カーネルスレッドは数えない。あれは SIGTERM で終わらないし、
+ * 終わってもらっても困る。cmdline が空かどうかで見分ける
+ * (カーネルスレッドは argv を持たない)。
+ * 自分自身と PID 1、それに自分の親たちも除く (上のコメント参照)。 */
+static int procs_alive(void)
+{
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    pid_t me = getpid();
+    pid_t parent = getppid();
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        pid_t pid = (pid_t)atoi(e->d_name);
+        if (pid <= 1 || pid == me || pid == parent) continue;
+        if (is_ancestor(pid)) continue;
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)pid);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) continue;                 /* もう消えた */
+        char buf[1];
+        ssize_t got = read(fd, buf, 1);
+        close(fd);
+        if (got > 0) n++;                     /* cmdline がある = ユーザーの処理 */
+    }
+    closedir(d);
+    return n;
+}
+
+/* 全部終わるか、上限に達するまで待つ。戻り値は残った数。 */
+static int wait_for_exit(int max_ms)
+{
+    int waited = 0;
+    int left;
+    while ((left = procs_alive()) > 0 && waited < max_ms) {
+        usleep(100 * 1000);
+        waited += 100;
+    }
+    return left;
+}
 
 int main(int argc, char **argv)
 {
@@ -74,9 +149,23 @@ int main(int argc, char **argv)
 
     /* 2. 動いているものに終わる機会を与える。
      *    ここで X も WM も落ちる。先に落としておかないと、
-     *    書きかけのファイルを抱えたまま電源が切れる。 */
+     *    書きかけのファイルを抱えたまま電源が切れる。
+     *
+     *    **2 秒固定で待っていたのが間違いだった。**
+     *    Firefox は SIGTERM を受けてから、セッション・履歴・cookie を
+     *    書き出して profile の錠を外すまでに、ハードディスクだと
+     *    10 秒近くかかる。2 秒で SIGKILL していたので、
+     *    **毎回 "正常に終了しませんでした" になっていた**。
+     *    Minecraft のランチャーがログイン情報を忘れるのも同じ理由。
+     *    「電源をブチ切りしたから」ではなく、こちらが待たなかったから。
+     *
+     *    数えて待つ。全部終われば即座に進むので、何も動いていない
+     *    ときは今までより速い。終わらない相手が居ても上限で切り上げる。 */
     kill(-1, SIGTERM);
-    sleep(2);
+
+    /* まず X が退くのを待つ。画面を持っている間は下の splash が描けない。
+     * 長くは待たない。X は SIGTERM ですぐ落ちる。 */
+    wait_for_exit(1500);
 
     /* 2.5 終了の画面を出す。
      *     X が居なくなった今なら /dev/fb0 に直接描ける。逆に、これより
@@ -93,15 +182,24 @@ int main(int argc, char **argv)
       if (p > 0) { int st; while (waitpid(p, &st, 0) < 0 && errno == EINTR) { } }
     }
 
-    /* 残っているものを確実に止める。終了の画面を描いたあとにやるのは、
-     * 画面が出るまでの黒い時間を短くするため。SIGTERM から 2 秒あれば
-     * X は落ちているので、この時点でもう描ける。 */
+    /* 画面を出したので、ここからは落ち着いて待てる。
+     * 残っているものが書き終えるまで、最大 15 秒。
+     * 待っている間ずっと "Shutting down..." が出ているので、
+     * 固まったようには見えない。 */
+    int left = wait_for_exit(15000);
+    if (left > 0)
+        fprintf(stderr, "myos-poweroff: %d 個が終わらないので強制します\n",
+                left);
+
+    /* 上限まで粘っても終わらないものは、ここで確実に止める。 */
     kill(-1, SIGKILL);
 
     /* 描いたそばから電源が落ちると、出したことにならない。
      * 実測すると、描いてから reboot まで 0.5 秒しかなく、画面には
-     * ほとんど映らなかった。少し置く。この間に sync も進む。 */
-    sleep(2);
+     * ほとんど映らなかった。少し置く。この間に sync も進む。
+     * (上の待ちで既に時間が経っている場合は、そのぶん短くてよいが、
+     *  SIGKILL した直後の後始末に少しは要る) */
+    sleep(1);
 
     /* 2.7 光学ドライブを開ける。
      *
