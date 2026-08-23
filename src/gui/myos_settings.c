@@ -453,6 +453,19 @@ static void save_all(void)
     save_theme();
     save_filetypes();
     save_java();
+
+    /* 音の出口も、ここで改めて当てる。
+     *
+     * これまで save_all は外観・関連付け・Java しか見ていなかった。
+     * 音は「一覧の行を **選び直した瞬間**」にだけ切り替わる作りで、
+     * すでに選ばれている行をもう一度押しても何も起きず、
+     * OK や 適用 を押しても何も起きなかった。
+     * 「適用を押しても効かない」と言われたのはこれ。
+     *
+     * 選び直しの即時切り替えは残す (音を聞いて確かめたいので)。
+     * ここは「押したのに何も起きない」を無くすための念押し。 */
+    if (snd_loaded && snd_sel >= 0 && snd_sel < n_snd)
+        snd_apply();
 }
 
 static void draw_buttons(void)
