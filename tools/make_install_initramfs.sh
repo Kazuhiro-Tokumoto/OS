@@ -195,8 +195,15 @@ if [ -n "$FWSRC" ] && command -v zstd >/dev/null 2>&1; then
     done
     find "$WORK/lib/firmware" -type f -print0 |
         xargs -0 -r -P "$(nproc 2>/dev/null || echo 1)" -n 8 zstd -q --rm -19
+    # 宙に浮いたリンクは外すだけにする。ここで exit していたせいで、
+    # リンク 1 本で GPU のファームウェアが丸ごと入らなくなっていた
+    # (myos-mkfwinit の頭のコメント参照)。
     dangling="$(find "$WORK/lib/firmware" -xtype l | wc -l)"
-    [ "$dangling" -eq 0 ] || { echo "行き先の無いリンクが $dangling 本" >&2; exit 1; }
+    if [ "$dangling" -ne 0 ]; then
+        echo "  行き先の無いリンクを $dangling 本外します" >&2
+        find "$WORK/lib/firmware" -xtype l >&2
+        find "$WORK/lib/firmware" -xtype l -delete
+    fi
     echo "  $(du -sh "$WORK/lib/firmware" | cut -f1)"
 else
     echo "=== GPU のファームウェアは入れない (見つからない) ==="

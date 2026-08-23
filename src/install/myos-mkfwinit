@@ -93,12 +93,103 @@ for pat in $FWSET; do
         continue
     fi
     for f in $FWSRC/$pat; do
-        [ -e "$f" ] || continue         # 展開できなければ glob のまま来る
+        # -e だけで見ると取りこぼす。regulatory.db は
+        #   regulatory.db -> /etc/alternatives/regulatory.db
+        # という *絶対パス* のリンクで、別のルートを渡された場合
+        # (インストーラは /mnt/target を渡す) 行き先がこちらのルートに
+        # 無いので -e が偽になる。リンクそのものは有るので -L で拾い、
+        # 実体はこの下の「木の外を指すリンク」の処理で連れてくる。
+        [ -e "$f" ] || [ -L "$f" ] || continue
         cp -a "$f" "$WORK/lib/firmware/"
         found=1
     done
 done
 [ "$found" = 1 ] || { echo "myos-mkfwinit: 入れるものがありません" >&2; exit 1; }
+
+# --- 木の外を指すリンクを実体に置き換える ---------------------------------
+# ここが 1.5.x でずっと画面が真っ暗になっていた原因。
+#
+# Debian の wireless-regdb は /lib/firmware/regulatory.db を
+#
+#   regulatory.db      -> /etc/alternatives/regulatory.db
+#   regulatory.db.p7s  -> /etc/alternatives/regulatory.db.p7s
+#
+# という *絶対パスで firmware の木の外* を指すリンクにしている
+# (dpkg の alternatives)。initramfs の中に /etc/alternatives は無いので、
+# このリンクは中で絶対に解決しない。下の「行き先の無いリンク」検査に
+# 引っかかって myos-mkfwinit が exit 1 で落ちる。
+#
+# そしてインストーラは
+#
+#   int have_fw = (run(fwi) == 0) && access(FWINIT, R_OK) == 0;
+#
+# と書いてあり、失敗しても黙って先へ進む。結果、
+# **initramfs が 1 つも入らないまま** 出来上がる。ファームを要る GPU
+# (nouveau / radeon / amdgpu) は probe がルートのマウントより先に走るので、
+# そこで転んで VGA コンソールを取り上げる。画面が真っ暗になる。
+# 実機の dmesg がまさにこれだった:
+#
+#   nouveau 0000:01:00.0: acr: firmware unavailable
+#   nouveau 0000:01:00.0: vgaarb: deactivate vga console
+#   platform regulatory.0: Direct firmware load for regulatory.db failed
+#   (787 行のどこにも "Unpacking initramfs" が無い)
+#
+# NVIDIA 固有の話ではない。regulatory.db 1 本のせいで全部の GPU の
+# ファームウェアが丸ごと落ちていた。
+#
+# 直し方は「リンクを実体にする」。行き先はこちらのルート (SRCROOT) を
+# 基準にして自分で辿る。alternatives はリンクのリンクになっているので
+# (/etc/alternatives/regulatory.db -> /lib/firmware/regulatory.db-debian)、
+# 一段ではなく最後まで辿る。cp -L に任せられないのは、絶対パスを
+# *動いているこの機械の /* から見てしまうため。
+resolve_in_root() {
+    p="$1"; n=0
+    while [ -L "$p" ] && [ "$n" -lt 40 ]; do
+        t="$(readlink "$p")"
+        case "$t" in
+            /*) p="$SRCROOT$t" ;;       # 絶対パスは SRCROOT を根とみなす
+            *)  p="$(dirname "$p")/$t" ;;
+        esac
+        n=$((n + 1))
+    done
+    printf '%s\n' "$p"
+}
+
+# パイプで while を回すとサブシェルになり、中の exit が効かない。
+# 一覧をファイルに落としてから読む。
+LINKS="$WORK/.links"
+find "$WORK/lib/firmware" -type l > "$LINKS"
+while IFS= read -r l; do
+    t="$(readlink "$l")"
+    case "$t" in
+        /*)  ;;                         # 絶対 = 必ず木の外
+        *)   # 相対。木の中に収まっているならそのままでよい。
+             case "$(realpath -m "$(dirname "$l")/$t")" in
+                 "$WORK"/lib/firmware/*) continue ;;
+             esac
+             ;;
+    esac
+
+    # 元の firmware の木の中での位置に戻して、そこから行き先を辿る。
+    rel="${l#$WORK/lib/firmware/}"
+    case "$t" in
+        /*) src="$(resolve_in_root "$SRCROOT$t")" ;;
+        *)  src="$(resolve_in_root "$(dirname "$FWSRC/$rel")/$t")" ;;
+    esac
+
+    if [ -f "$src" ]; then
+        rm -f "$l"
+        cp -a "$src" "$l"
+    else
+        # 拾えないものは黙って捨てる。ここで落とすと、たかが
+        # regulatory.db 1 本で GPU のファームが全部無くなる
+        # (それが今回の原因)。無いなら無いで、その 1 本が読めない
+        # だけで済ませる。
+        echo "myos-mkfwinit: $rel の行き先 ($t) を辿れないので外します" >&2
+        rm -f "$l"
+    fi
+done < "$LINKS"
+rm -f "$LINKS"
 
 # --- 先にシンボリックリンクの行き先を .zst に付け替える -------------------
 # i915/kbl_dmc_ver1.bin -> kbl_dmc_ver1_01.bin のような別名がある。
@@ -130,11 +221,15 @@ find "$WORK/lib/firmware" -type f -print0 |
 # --- 取りこぼしが無いか確かめる -------------------------------------------
 # 宙に浮いたリンクが残っていると、そのファームだけ読めない。
 # 起動してから GPU が動かない理由を探すのは大変なので、ここで落とす。
+# ここで exit 1 にしていたのが 1.5.x の事故だった。1 本でも宙に浮くと
+# initramfs ごと作られず、GPU のファームウェアが全部消える。
+# 宙に浮いたリンクは「そのファームだけ読めない」で済むのだから、
+# それだけ外して残りは渡す。ただし黙ってはやらない。
 dangling="$(find "$WORK/lib/firmware" -xtype l | wc -l)"
 if [ "$dangling" -ne 0 ]; then
-    echo "myos-mkfwinit: 行き先の無いリンクが $dangling 本残っています" >&2
+    echo "myos-mkfwinit: 行き先の無いリンクを $dangling 本外します" >&2
     find "$WORK/lib/firmware" -xtype l >&2
-    exit 1
+    find "$WORK/lib/firmware" -xtype l -delete
 fi
 
 # --- cpio に固める --------------------------------------------------------

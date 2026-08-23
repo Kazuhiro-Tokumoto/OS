@@ -443,12 +443,26 @@ apply)
 
     # ファームウェアの initramfs は、その場で作り直す。
     # 入れたときと同じ中身とは限らない (ファームを足したかもしれない)。
+    #
+    # ここで失敗したら *止まる*。黙って fw="" で進むと、いま起動して
+    # いる機械から initramfs を取り上げることになる。ファームを要る GPU
+    # (nouveau / radeon / amdgpu) は probe がルートのマウントより先に
+    # 走るので、次の再起動で画面が真っ暗になる。
+    # 「カーネルを新しくしたら映らなくなった」の正体がこれ。
     fw=""
     if [ -x /usr/local/bin/myos-mkfwinit ]; then
         echo "ファームウェアをまとめ中"
-        if /usr/local/bin/myos-mkfwinit / "$WORK/fw.cpio.gz" >/dev/null 2>&1; then
+        # パイプに繋ぐと終了状態が tee のものになって、失敗が
+        # 「成功」に化ける。ログはファイルに取ってから出す。
+        if /usr/local/bin/myos-mkfwinit / "$WORK/fw.cpio.gz" \
+                > /var/log/myos-fwinit.log 2>&1; then
             fw="--initrd $WORK/fw.cpio.gz"
         fi
+        cat /var/log/myos-fwinit.log
+        [ -n "$fw" ] && [ -s "$WORK/fw.cpio.gz" ] || die \
+"ファームウェアの initramfs を作れませんでした (/var/log/myos-fwinit.log)。
+このまま書くと、いま映っている画面が次の起動で真っ暗になります。
+カーネルは入れ替えていません。"
     fi
 
     echo "書き込み中 (使っていないほうの置き場へ)"
@@ -579,6 +593,75 @@ apply-system)
     echo "myos-update: 動かなかったら、起動中に R を押しっぱなしにすると"
     echo "myos-update: 前のほうで立ちます。自分のファイル (/home) は"
     echo "myos-update: どちらでも同じものが見えます。"
+
+    # 生領域に GPU のファームウェアが積まれていない機械には、そう言う。
+    # 1.5.x で入れたものは全部この状態になっている (原因は
+    # myos-mkfwinit の頭のコメント)。ルートを入れ替えても、生領域は
+    # 触っていないので直らない。直す口は用意してあるので案内する。
+    if ! /usr/local/bin/myos-writeboot --info "$disk" 2>/dev/null |
+         grep -q "initramfs    : LBA"; then
+        echo
+        echo "myos-update: この機械の生領域には GPU のファームウェアが"
+        echo "myos-update: 積まれていません。NVIDIA / Radeon を挿していると"
+        echo "myos-update: 起動しても画面が出ません (S を押しっぱなしで"
+        echo "myos-update: 立ち上がるのはこれが理由です)。"
+        echo "myos-update: 再起動したあと、こうすると直ります:"
+        echo "myos-update:     sudo myos-update fix-graphics"
+    fi
+    ;;
+
+fix-graphics)
+    # 画面が真っ暗になった機械を、その場で直す口。
+    #
+    # 1.5.x で出したものには、GPU のファームウェアの initramfs が
+    # 1 つも入っていない。原因は myos-mkfwinit が regulatory.db の
+    # リンク 1 本で exit 1 になり、インストーラがそれを黙って
+    # 見逃していたこと (myos-mkfwinit の頭のコメント参照)。
+    # 入れ直さなくても、ここで作って書き足せば直る。
+    #
+    # カーネルには触らない。生領域から取り出して、そのまま書き戻す。
+    # 書き先は使っていないほうの置き場なので、失敗しても
+    # 起動中に R を押せば今までどおりに戻る。
+    boot_info
+    [ "$(id -u)" = "0" ] || die "root で実行してください (sudo myos-update fix-graphics)"
+
+    rm -rf "$WORK"; mkdir -p "$WORK"
+
+    echo "いまのカーネルを取り出し中"
+    "$WRITEBOOT" --dump-kernel "$WORK/bzImage" "$disk" ||
+        die "カーネルを取り出せません"
+
+    echo "ファームウェアをまとめ中"
+    /usr/local/bin/myos-mkfwinit / "$WORK/fw.cpio.gz" \
+        > /var/log/myos-fwinit.log 2>&1 || true
+    cat /var/log/myos-fwinit.log
+    [ -s "$WORK/fw.cpio.gz" ] ||
+        die "ファームウェアの initramfs を作れませんでした (何も書いていません)"
+
+    echo "書き込み中 (使っていないほうの置き場へ)"
+    "$WRITEBOOT" --kernel "$WORK/bzImage" --initrd "$WORK/fw.cpio.gz" \
+        --keep-cmdline "$disk" "$root" "$bootlba" ||
+        die "書き込みに失敗しました"
+
+    # カーネルが 1 バイトも変わっていないことを、書いたあとに確かめる。
+    got=$(local_sha) || die "書いたあとの読み直しに失敗しました"
+    want=$(sha256sum "$WORK/bzImage" | awk '"'"'{print $1}'"'"')
+    [ "$got" = "$want" ] || die "書いたカーネルが合いません"
+
+    rm -rf "$WORK"
+    echo
+    "$WRITEBOOT" --info "$disk"
+    echo
+    echo "myos-update: GPU のファームウェアを積みました。"
+    echo "myos-update: 再起動すると、S を押さなくても画面が出るはずです。"
+    echo "myos-update: 駄目だったら、起動中に R を押しっぱなしにすると"
+    echo "myos-update: 1 つ前 (いまの状態) に戻ります。"
+    ;;
+
+boot-info)
+    # いま生領域に何が書いてあるかを見せるだけ。
+    boot_info
+    "$WRITEBOOT" --info "$disk"
     ;;
 
 rollback-info)
@@ -593,6 +676,6 @@ rollback-info)
     ;;
 
 *)
-    die "使い方: myos-update status|check|apply|apply-system|rollback-info"
+    die "使い方: myos-update status|check|apply|apply-system|rollback-info|fix-graphics|boot-info"
     ;;
 esac

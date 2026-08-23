@@ -285,6 +285,25 @@ EOF
 chroot "$WORK" passwd -l root >/dev/null 2>&1 || \
     sed -i 's|^root:[^:]*:|root:!:|' "$WORK/etc/shadow"
 
+# --- regulatory.db は upstream 署名のほうを選ぶ ----------------------------
+# wireless-regdb は 2 種類入っていて、Debian の既定は -debian のほう。
+#
+#   /lib/firmware/regulatory.db -> /etc/alternatives/regulatory.db
+#                               -> /lib/firmware/regulatory.db-debian
+#
+# ところが CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y で、カーネルに焼いて
+# あるのは upstream の鍵 (sforshee / wens) だけ。Debian の鍵は入って
+# いないので -debian は必ず弾かれる。実測:
+#
+#   cfg80211: loaded regulatory.db is malformed or signature is
+#             missing/invalid
+#
+# 自前でカーネルを作っている以上、Debian の鍵は入らない。だから
+# こちらを upstream に寄せる。無線のチャンネルが world ロックのまま
+# になるのを防ぐため。
+chroot "$WORK" update-alternatives --set regulatory.db \
+    /lib/firmware/regulatory.db-upstream >/dev/null 2>&1 || true
+
 # X を root 以外から起動できるようにする。
 # 起動するのは PID 1 (root) だが、セッションは一般ユーザーに落とすので、
 # ここを開けておかないと Xorg.wrap に弾かれる。

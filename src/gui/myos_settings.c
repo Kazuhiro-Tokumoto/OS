@@ -1321,7 +1321,11 @@ int main(void)
                 if (my >= dy + 22 && my < dy + 42)      ft_field = 0;
                 else if (my >= dy + 50 && my < dy + 70) ft_field = 1;
                 redraw();
-                break;
+                /* ここで break していたので、この面では下の
+                 * OK / 適用 / キャンセルが一切効かなかった。
+                 * ボタンの帯より上を押したときだけ切り上げる。
+                 * (他の面は最初からこう書いてある) */
+                if (my < BTN_Y) break;
             }
 
             if (tab == TAB_BG) {
@@ -1435,7 +1439,9 @@ int main(void)
                     }
                 }
                 redraw();
-                break;
+                /* 上と同じ。ここで break していたので、更新の面でも
+                 * OK / 適用 / キャンセルが死んでいた。 */
+                if (my < BTN_Y) break;
             }
 
             if (tab == TAB_SOUND) {

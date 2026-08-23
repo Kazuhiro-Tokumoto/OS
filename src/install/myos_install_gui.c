@@ -32,6 +32,7 @@
 #include <poll.h>
 #include <sys/wait.h>
 #include <sys/statvfs.h>
+#include <fcntl.h>
 
 #include "x98.h"
 
@@ -47,6 +48,8 @@
 #define SQUASH    "/run/myos/myos.squashfs"
 #define TARGET    "/mnt/target"
 #define FWINIT    "/tmp/myos-fw.cpio.gz"
+/* myos-mkfwinit が言ったことを取っておく場所。 */
+#define FWLOG     "/tmp/myos-fwinit.log"
 
 enum { ST_PREPARE = 0, ST_COLLECT, ST_COPY, ST_RESTART, ST_N };
 
@@ -85,6 +88,10 @@ static int    eta_sec = 0;
 static int    failed = 0;
 /* unsquashfs が最後に吐いた文句。コピーに失敗したときに出す。 */
 static char   copy_err[128] = "";
+/* ファームウェアの initramfs を作れなかったときの一言。
+ * 空でなければ最後の画面に黄色で出す。ここを黙って通していたせいで、
+ * 「入ったのに画面が真っ暗」の原因が誰にも見えなかった。 */
+static char   fw_warn[160] = "";
 
 static char   root_dev[64] = "";
 static char   swap_dev[64] = "";   /* 切れなかったときは空 */
@@ -193,6 +200,13 @@ static void draw_right(void)
                  "Setup could not complete. See the console for details.",
                  x98_rgb24(&x98, 0xFFFF80));
     }
+    if (fw_warn[0]) {
+        x98_text(&x98, win, x, py + 96, fw_warn,
+                 x98_rgb24(&x98, 0xFFFF80));
+        x98_text(&x98, win, x, py + 118,
+                 "The log is kept in /var/log/myos-install.log.",
+                 x98_rgb24(&x98, 0xFFFF80));
+    }
 }
 
 static void redraw(void)
@@ -270,6 +284,55 @@ static int run(char *const argv[])
     int st = 0;
     while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+/* run() と同じだが、子の言ったことをファイルに取る。
+ * 黙って失敗されると原因が追えないので、残せるものは残す。 */
+static int run_logged(char *const argv[], const char *logpath)
+{
+    pid_t p = fork();
+    if (p < 0) return -1;
+    if (p == 0) {
+        int fd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            dup2(fd, 1);
+            dup2(fd, 2);
+            if (fd > 2) close(fd);
+        }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int st = 0;
+    while (waitpid(p, &st, 0) < 0 && errno == EINTR) { }
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+/* ログを入れた先へ写す。追記にするのは、あとで別のものも足せるように。 */
+static void copy_log(const char *from, const char *to)
+{
+    FILE *a = fopen(from, "r");
+    if (!a) return;
+    FILE *b = fopen(to, "a");
+    if (!b) { fclose(a); return; }
+    char buf[1024];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), a)) > 0) fwrite(buf, 1, n, b);
+    fclose(a);
+    fclose(b);
+}
+
+/* 最後の 1 行。画面に出す一言に使う。 */
+static void last_line(const char *path, char *out, size_t n)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char buf[256];
+    while (fgets(buf, sizeof(buf), f)) {
+        size_t l = strlen(buf);
+        while (l && (buf[l - 1] == '\n' || buf[l - 1] == '\r')) buf[--l] = 0;
+        if (l) snprintf(out, n, "%s", buf);
+    }
+    fclose(f);
 }
 
 /* squashfs に入っている中身の合計バイト数。
@@ -487,7 +550,24 @@ static int do_install(void)
      * 何も困らない) ので、ここで失敗しても止めない。 */
     tick(90, "Preparing graphics drivers...");
     char *fwi[] = { "myos-mkfwinit", TARGET, FWINIT, NULL };
-    int have_fw = (run(fwi) == 0) && access(FWINIT, R_OK) == 0;
+    int fw_rc = run_logged(fwi, FWLOG);
+    int have_fw = (fw_rc == 0) && access(FWINIT, R_OK) == 0;
+
+    /* 言ったことは必ず残す。ここを >/dev/null にしていたせいで、
+     * 「initramfs が 1 つも入っていない機械」が出来ても誰も気づけず、
+     * 実機で画面が真っ暗になる理由を探すのに何日もかかった。
+     * ログは入れた先へ持っていく。live 環境は tmpfs なので再起動で消える。 */
+    copy_log(FWLOG, TARGET "/var/log/myos-install.log");
+    if (!have_fw) {
+        char last[96] = "";
+        last_line(FWLOG, last, sizeof(last));
+        snprintf(fw_warn, sizeof(fw_warn),
+                 "Graphics firmware was not prepared%s%s",
+                 last[0] ? ": " : ".", last);
+        tick(90, "Graphics firmware could not be prepared.");
+        /* 読む間を作る。ここを素通りさせると誰も見ない。 */
+        for (int i = 0; i < 30; i++) { tick(-1, NULL); usleep(100000); }
+    }
 
     /* 4. ブートローダーを書いて再起動 */
     cur_step = ST_RESTART;

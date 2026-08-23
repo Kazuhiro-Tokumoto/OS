@@ -185,6 +185,8 @@ def main():
     want_sha = False
     switch_root = None
     safe_gfx = None
+    want_info = False
+    dump_kernel = None
 
     # --kernel を渡すと、起動メディアではなくその bzImage を書く。
     # インストール後にカーネルだけ入れ替えるための口。
@@ -200,6 +202,10 @@ def main():
             keep_cmdline = True; i += 1
         elif a == "--kernel-sha":
             want_sha = True; i += 1
+        elif a == "--info":
+            want_info = True; i += 1
+        elif a == "--dump-kernel" and i + 1 < len(argv):
+            dump_kernel = argv[i + 1]; i += 2
         elif a == "--switch-root" and i + 1 < len(argv):
             switch_root = argv[i + 1]; i += 2
         elif a == "--safe-graphics" and i + 1 < len(argv):
@@ -218,6 +224,73 @@ def main():
         if h is None:
             die("ペイロードテーブルを読めません")
         print(h)
+        return
+
+    # いま起動しているカーネルを、生領域から取り出してファイルに戻す口。
+    #
+    # 「カーネルはそのままで initramfs だけ入れ直したい」ときに要る。
+    # 入れ直しの道は --kernel を渡す 1 本しか無く、そこへ渡す bzImage が
+    # 手元に無いことがある (入れたときの ISO はもう無い)。生領域には
+    # 1 バイトも欠けずに入っているので、そこから戻せばよい。
+    # 切り方は kernel_sha() と同じ。setup 部はセクタ丁度、本体は
+    # バイト数がテーブルに入っている。
+    if dump_kernel:
+        if not rest:
+            die("usage: myos-writeboot --dump-kernel <out> <disk>")
+        t = read_table(rest[0], PTBL_LBA)
+        if t is None:
+            die("ペイロードテーブルを読めません")
+        ks_lba, ks_cnt, kb_lba, _kb_cnt, b_size = struct.unpack_from(
+            "<IIIII", t, 0x08)
+        if not ks_cnt or not b_size:
+            die("カーネルの場所が入っていません")
+        with open(rest[0], "rb") as f:
+            f.seek(ks_lba * SECTOR)
+            setup = f.read(ks_cnt * SECTOR)
+            f.seek(kb_lba * SECTOR)
+            body = f.read(b_size)
+        if len(setup) != ks_cnt * SECTOR or len(body) != b_size:
+            die("生領域を読み切れません")
+        if setup[0x202:0x206] != b"HdrS":
+            die("取り出したものが bzImage に見えません")
+        with open(dump_kernel, "wb") as f:
+            f.write(setup)
+            f.write(body)
+        print(f"myos-writeboot: ok  {dump_kernel}  "
+              f"{(len(setup) + len(body)) // 1048576} MB")
+        return
+
+    # いま何が書いてあるかを、そのまま読んで出す口。
+    #
+    # 「入れたはずのものが入っていない」を疑ったときに、実機で確かめる
+    # 手立てが無かった。dd と od でバイトを数えるしかなく、それでは
+    # 誰も見ない。ここに出しておけば 1 行で分かる。
+    # 特に initramfs の欄が 0 かどうかは大事で、0 なら
+    # 「入れるときに作れなかった」、0 でないのに読めていないなら
+    # 「起動のときに読めていない」と、切り分けが 1 発で付く。
+    if want_info:
+        if not rest:
+            die("usage: myos-writeboot --info <disk>")
+        for name, lba in (("いま使うテーブル", PTBL_LBA),
+                          ("控え (R で戻る)", PTBL_BACKUP_LBA)):
+            t = read_table(rest[0], lba)
+            print(f"--- {name}  (LBA {lba})")
+            if t is None:
+                print("    ありません")
+                continue
+            (ks_lba, ks_cnt, kb_lba, kb_cnt, kb_size,
+             i_lba, i_cnt, i_size) = struct.unpack_from("<IIIIIIII", t, 0x08)
+            cmd = bytes(t[CMDLINE_OFF:0x1F0]).split(b"\x00")[0]
+            print(f"    kernel setup : LBA {ks_lba}  {ks_cnt} sect")
+            print(f"    kernel body  : LBA {kb_lba}  {kb_cnt} sect  "
+                  f"{kb_size} bytes ({kb_size // 1048576} MB)")
+            if i_size:
+                print(f"    initramfs    : LBA {i_lba}  {i_cnt} sect  "
+                      f"{i_size} bytes ({i_size // 1048576} MB)")
+            else:
+                print("    initramfs    : ありません  "
+                      "<- GPU のファームウェアが 1 つも積まれていない")
+            print(f"    cmdline      : {cmd.decode('ascii', 'replace')}")
         return
 
     # ルートだけ差し替える口。カーネルの塊には一切触らない。
