@@ -1184,7 +1184,7 @@ cp "$ROOTDIR/src/gui/myos_wm.c" "$ROOTDIR/src/gui/myos_files.c" \
    "$ROOTDIR/src/gui/myos_shutdown.c" "$ROOTDIR/src/gui/myos_poweroff.c" \
    "$ROOTDIR/src/gui/myos_splash.c" "$ROOTDIR/src/gui/myos_net.c" \
    "$ROOTDIR/src/gui/myos_devmgr.c" "$ROOTDIR/src/gui/myos_taskman.c" \
-   "$ROOTDIR/src/gui/myos_getapps.c" \
+   "$ROOTDIR/src/gui/myos_getapps.c" "$ROOTDIR/src/gui/myos_openwith.c" \
    "$ROOTDIR/src/gui/x98.h" "$ROOTDIR/src/gui/myosconf.h" \
    "$ROOTDIR/src/gui/filetypes.h" "$WORK/usr/local/src/"
 # 起動画面。X はまだ無いので Xlib は使わず、freetype だけを直に叩く。
@@ -1221,6 +1221,10 @@ chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-login \
 # myos-open は X に触らない。端末やスクリプトからも使う。
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-open \
     /usr/local/src/myos_open.c
+# 知らない拡張子を開こうとしたときに出る「アプリケーションから開く」。
+# こちらは窓を出すので Xlib が要る。
+chroot "$WORK" gcc -O2 -I /usr/local/src -I /usr/include/freetype2 \
+    -o /usr/local/bin/myos-openwith /usr/local/src/myos_openwith.c -lX11 -lXft
 chroot "$WORK" gcc -O2 -I /usr/include/freetype2 -o /usr/local/bin/myos-alert \
     /usr/local/src/myos_alert.c -lX11 -lXft
 # 終了の画面と、実際に電源を切るほう。

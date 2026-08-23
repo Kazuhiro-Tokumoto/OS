@@ -505,13 +505,20 @@ static void draw_list(void)
                 x98_text(&x98, win, type_x, ty, type_name(e), fg);
 
             if (!e->is_dir) {
+                /* 大きさの出し方は Windows のエクスプローラに寄せる。
+                 *
+                 * 前は 1KB 未満を「%ld B」で出していたが、実機で
+                 * 「0 と出るのは壊れているのか」と読まれた。Windows は
+                 * KB に切り上げて出すので、中身が 1 バイトでもあれば
+                 * 1 KB になり、0 KB は**本当に空**のときだけになる。
+                 * 数字の意味が 1 つに定まる。 */
                 char sz[32];
-                if (e->size >= 1024 * 1024)
-                    snprintf(sz, sizeof(sz), "%ld MB", e->size / (1024 * 1024));
-                else if (e->size >= 1024)
-                    snprintf(sz, sizeof(sz), "%ld KB", e->size / 1024);
+                long kb = (e->size + 1023) / 1024;
+                if (e->size > 0 && kb == 0) kb = 1;
+                if (kb >= 10000)
+                    snprintf(sz, sizeof(sz), "%ld MB", kb / 1024);
                 else
-                    snprintf(sz, sizeof(sz), "%ld B", e->size);
+                    snprintf(sz, sizeof(sz), "%ld KB", kb);
                 int tw = x98_text_w(&x98, sz);
                 x98_text(&x98, win, lx + lw - 10 - tw, ty, sz, fg);
             }

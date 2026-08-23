@@ -13,7 +13,7 @@
  *   1. ディレクトリ          -> ファイルマネージャ
  *   2. 拡張子が表にある      -> その コマンド
  *   3. 実行属性が付いている  -> そのまま実行
- *   4. それ以外              -> Firefox に渡す (Windows の「不明なファイル」)
+ *   4. それ以外              -> myos-openwith で聞く (Windows の Open With)
  *
  * X には一切触らないので、端末からでもスクリプトからでも使える。
  * ========================================================================== */
@@ -104,7 +104,24 @@ int main(int argc, char **argv)
         run_argv(av);
     }
 
-    if (query) { printf("unknown -> firefox-esr\n"); return 0; }
-    run2("firefox-esr", path);
-    return 127;
+    /* 表に無く、実行属性も無い。
+     *
+     * ここは firefox-esr に投げていた。ところが閲覧ソフトは 1.5.2 から
+     * ディスクに入っていない (使う人が選んで後から入れる)。つまり
+     * 大半の機械では **何も起きなかった**。実機で Xorg のログを開こうと
+     * して詰んだのがこれ。
+     *
+     * Windows と同じで「何で開くか」を聞く。開けないより選べるほうが
+     * いい。X が無いところ (端末やスクリプト) では窓を出しようが
+     * ないので、そうと言って終わる。 */
+    if (query) { printf("unknown -> myos-openwith\n"); return 0; }
+
+    const char *disp = getenv("DISPLAY");
+    if (disp && disp[0]) run2("myos-openwith", path);
+
+    fprintf(stderr, "myos-open: %s: どのアプリで開くか決まっていません\n",
+            path);
+    fprintf(stderr, "myos-open: 拡張子を /etc/myos/filetypes.conf か "
+                    "~/.myos/filetypes.conf に足してください\n");
+    return 1;
 }
