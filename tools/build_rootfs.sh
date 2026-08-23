@@ -62,8 +62,19 @@ fi
 # Java は JRE。JDK は javac のぶん 110MB 増えるので、
 # インストールディスクを CD-R (700MB) に収めるために外している。
 # .jar と .class は動く。.java のコンパイルは出来ない。
+# libopengl0 を明示して入れる。
+#
+# libglvnd は libGL.so.1 (旧来の口) と libOpenGL.so.0 (新しい口) を
+# 別のパッケージに分けている。libgl1 を入れても後者は付いてこない。
+# Minecraft の公式ランチャーはこちらを見に行くので、無いと
+#
+#   minecraft-launcher: error while loading shared libraries:
+#   libOpenGL.so.0: cannot open shared object file
+#
+# で起動すらしない。実機で踏んだ。libglvnd0 / libglx0 / libegl1 /
+# libgles2 は他の依存で入っていて、libopengl0 だけが漏れていた。
 EXTRA="openjdk-17-jre \
-       libgl1-mesa-dri libglx-mesa0 libgl1 mesa-utils \
+       libgl1-mesa-dri libglx-mesa0 libgl1 libopengl0 mesa-utils \
        libxrandr2 libxxf86vm1 libxcursor1 libxi6 libxinerama1 \
        xterm imagemagick \
        sudo passwd python3 \
