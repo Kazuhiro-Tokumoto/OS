@@ -644,9 +644,21 @@ fix-graphics)
         die "書き込みに失敗しました"
 
     # カーネルが 1 バイトも変わっていないことを、書いたあとに確かめる。
+    # ここは書き込みの *あと* なので、合わなくても「何もしていない」
+    # わけではない。そう言わないと、直っているのに直っていないと
+    # 思わせてしまう (実際そうなった)。
     got=$(local_sha) || die "書いたあとの読み直しに失敗しました"
-    want=$(sha256sum "$WORK/bzImage" | awk '"'"'{print $1}'"'"')
-    [ "$got" = "$want" ] || die "書いたカーネルが合いません"
+    want=$(sha256sum "$WORK/bzImage")
+    want=${want%% *}
+    if [ "$got" != "$want" ]; then
+        echo "myos-update: 書いたカーネルの照合が合いませんでした。" >&2
+        echo "myos-update:   読み直し $got" >&2
+        echo "myos-update:   書いたもの $want" >&2
+        echo "myos-update: 書き込み自体は終わっています。中身を見てください:" >&2
+        echo "myos-update:     sudo myos-update boot-info" >&2
+        echo "myos-update: 元に戻すには、起動中に R を押しっぱなしにします。" >&2
+        exit 1
+    fi
 
     rm -rf "$WORK"
     echo

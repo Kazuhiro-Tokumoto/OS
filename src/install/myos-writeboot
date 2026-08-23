@@ -576,8 +576,15 @@ def main():
     subprocess.run(["sync"], check=False)
     fw = f" initrd@{i_lba} ({len(initrd) // 1048576}MB)" if initrd else ""
     back = f" backup@{PTBL_BACKUP_LBA}" if old_tbl else ""
+    # root= は引数ではなく **実際に書いたコマンドライン** から出す。
+    # --keep-cmdline のときは引数のほうを使っていないので、引数を
+    # そのまま出すと嘘になる。実機で
+    #   root=/dev/sda5 で動いている機械に root=/dev/sda3 と表示され、
+    #   「入れ替えが巻き戻された」と読める出方をした。
+    m = re.search(r"root=(\S+)", cmdline)
+    shown = m.group(1) if m else "(root= なし)"
     print(f"myos-writeboot: ok  table@{PTBL_LBA}{back} "
-          f"slot@{slot} setup@{ks_lba} body@{kb_lba}{fw} root={rootdev}")
+          f"slot@{slot} setup@{ks_lba} body@{kb_lba}{fw} root={shown}")
 
 
 if __name__ == "__main__":
