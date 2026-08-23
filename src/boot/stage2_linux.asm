@@ -188,6 +188,17 @@ stage2_start:
         mov     byte [cur_row], 2
         call    sync_hw_cursor
 
+        ; 逃げ道をここに出しておく。
+        ;
+        ; 画面が出ない機械では S、新しいほうが起動しない機械では R が
+        ; 要るが、**どちらも知らなければ押せない**。実機で画面が真っ暗に
+        ; なったとき、押す手があること自体が分からなかった。
+        ; 出口は、詰まる前に見えていないと出口ではない。
+        mov     si, msg_keys
+        call    puts
+        call    newline
+        call    newline
+
         ; ------------------------------------------------------------
         ; 1. ディスクの能力を調べる
         ; ------------------------------------------------------------
@@ -327,18 +338,41 @@ stage2_start:
         ; 5. ペイロードテーブルを読む
         ; ------------------------------------------------------------
 .read_ptbl:
-        ; R が押されていたら、1 つ前のカーネルで起動する。
-        ; INT 16h AH=01h は「あるか見るだけ」で取り出さない。
-        ; 取り出さないので、この先の S (セーフグラフィックス) の判定も
-        ; そのまま動く。
+        ; 押されているキーをここで**全部取り出して**印を立てる。
+        ;
+        ; 前は R と S を別々の場所で AH=01h (あるか見るだけ) で見ていた。
+        ; 取り出さないので、**どちらの判定もバッファの先頭の同じキーを
+        ; 見る**ことになる。R を押していれば S の判定は必ず外れるし、
+        ; その逆も同じ。**両方を指定する道が無かった。**
+        ;
+        ; 「前のほうで起動したいが、画面も出したい」は実際に起きる。
+        ; 新しいほうが起動しないから戻すのであって、そういう機械は
+        ; たいてい画面のほうも怪しい。両方要るのが普通の場面だった。
+        ;
+        ; 取り出しながら最後まで舐めて、出てきたキーごとに印を立てる。
+        ; 順番も押した数も関係なくなる。
         mov     byte [use_backup], 0
+        mov     byte [safe_gfx], 0
+.scan_keys:
         mov     ah, 0x01
         int     0x16
-        jz      .no_rollback
+        jz      .scan_done              ; ZF=1 なら空
+        xor     ah, ah
+        int     0x16                    ; 取り出す
         and     al, 0xDF                ; 小文字を大文字に寄せる
         cmp     al, 'R'
-        jne     .no_rollback
+        jne     .scan_not_r
         mov     byte [use_backup], 1
+.scan_not_r:
+        cmp     al, 'S'
+        jne     .scan_not_s
+        mov     byte [safe_gfx], 1
+.scan_not_s:
+        jmp     .scan_keys
+.scan_done:
+
+        cmp     byte [use_backup], 0
+        je      .no_rollback
         mov     ah, ATTR_WARN
         mov     si, msg_rollback
         call    puts_attr
@@ -550,16 +584,10 @@ stage2_start:
         mov     byte [cur_attr], ATTR_NORMAL
         mov     si, msg_vbe
         call    puts
-        ; S が押されていればセーフグラフィックスにする。
-        ; INT 16h AH=01h は「キーがあるか見るだけ」で待たない。
-        ; 押しっぱなしにしていれば BIOS のバッファに溜まっている。
-        mov     ah, 0x01
-        int     0x16
-        jz      .no_safe_key            ; ZF=1 なら何も来ていない
-        and     al, 0xDF                ; 小文字を大文字に寄せる
-        cmp     al, 'S'
-        jne     .no_safe_key
-        mov     byte [safe_gfx], 1
+        ; S の印は上の .scan_keys で立ててある。ここでは知らせるだけ。
+        ; (ここでもう一度キーを見ると、R と両立しなくなる)
+        cmp     byte [safe_gfx], 0
+        je      .no_safe_key
         mov     ah, ATTR_WARN
         mov     si, msg_safe_gfx
         call    puts_attr
@@ -1110,6 +1138,8 @@ get_ticks:
 
 ; --- 文字列 ----------------------------------------------------------------
 msg_title:      db 'myOS Stage2  -  Phase2-B: Linux Boot Protocol loader', 0
+msg_keys:       db 'Hold  S = safe graphics (no GPU driver)   '
+                db 'R = previous system', 0
 msg_disk:       db 'Disk        : ', 0
 msg_edd_yes:    db 'INT 13h extensions (LBA) available ', 0
 msg_edd_no:     db 'no extensions, using CHS ', 0
