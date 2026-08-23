@@ -184,6 +184,7 @@ def main():
     keep_cmdline = False
     want_sha = False
     switch_root = None
+    safe_gfx = None
 
     # --kernel を渡すと、起動メディアではなくその bzImage を書く。
     # インストール後にカーネルだけ入れ替えるための口。
@@ -201,6 +202,8 @@ def main():
             want_sha = True; i += 1
         elif a == "--switch-root" and i + 1 < len(argv):
             switch_root = argv[i + 1]; i += 2
+        elif a == "--safe-graphics" and i + 1 < len(argv):
+            safe_gfx = argv[i + 1]; i += 2
         else:
             rest.append(a); i += 1
 
@@ -227,9 +230,10 @@ def main():
     # 控えは今までどおり LBA 21 へ写す。だから **起動中に R を押せば
     # 古いテーブルで立ち、古いルートに戻る**。カーネルのために作った
     # 戻り道が、そのままルートにも効く。新しい仕掛けは要らない。
-    if switch_root:
+    if switch_root or safe_gfx:
         if not rest:
-            die("usage: myos-writeboot --switch-root <rootdev> <disk>")
+            die("usage: myos-writeboot --switch-root <rootdev> <disk>\n"
+                "       myos-writeboot --safe-graphics on|off <disk>")
         disk = rest[0]
         cur = read_table(disk, PTBL_LBA)
         if cur is None:
@@ -237,9 +241,26 @@ def main():
 
         prev = bytes(cur[CMDLINE_OFF:0x1F0]).split(b"\x00")[0]
         line = prev.decode("ascii", "replace")
-        if "root=" not in line:
-            die(f"いまのコマンドラインに root= がありません: {line!r}")
-        new_line = re.sub(r"root=\S+", f"root={switch_root}", line)
+
+        if switch_root:
+            if "root=" not in line:
+                die(f"いまのコマンドラインに root= がありません: {line!r}")
+            new_line = re.sub(r"root=\S+", f"root={switch_root}", line)
+            what = (f"root {line.split('root=')[1].split()[0]} "
+                    f"-> {switch_root}")
+        else:
+            # セーフグラフィックスを覚えさせる。
+            #
+            # 起動中に S を押せば同じことができるが、**画面が出ない機械
+            # では毎回押すことになる**。それは使い物にならない。
+            # コマンドラインに書いておけば、次からは押さなくていい。
+            if safe_gfx not in ("on", "off"):
+                die("usage: myos-writeboot --safe-graphics on|off <disk>")
+            words = [w for w in line.split() if w != "nomodeset"]
+            if safe_gfx == "on":
+                words.append("nomodeset")
+            new_line = " ".join(words)
+            what = f"safe graphics -> {safe_gfx}"
 
         cmd = new_line.encode("ascii", "replace")
         if len(cmd) >= CMDLINE_MAX:
@@ -265,8 +286,7 @@ def main():
         got = read_table(disk, PTBL_LBA)
         if got is None or bytes(got[CMDLINE_OFF:0x1F0]).split(b"\x00")[0] != cmd:
             die("書き込みを確認できませんでした")
-        print(f"myos-writeboot: ok  root {line.split('root=')[1].split()[0]} "
-              f"-> {switch_root}  (控えは LBA {PTBL_BACKUP_LBA})")
+        print(f"myos-writeboot: ok  {what}  (控えは LBA {PTBL_BACKUP_LBA})")
         return
 
     if len(rest) < 3:

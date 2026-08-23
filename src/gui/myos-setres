@@ -18,12 +18,14 @@
 import os
 import re
 import struct
+import subprocess
 import sys
 
 SECTOR = 512
 PTBL_LBA = 20
 MAGIC = b"MYOSPLD2"
 OFF_W, OFF_H, OFF_BPP = 0x1F0, 0x1F2, 0x1F4
+CMDLINE_OFF = 0x28              # Stage2 の PT_CMDLINE と同じ
 
 # 出せる見込みのあるものだけ並べる。VBE の標準的なモード。
 CHOICES = [(640, 480), (800, 600), (1024, 768), (1152, 864),
@@ -80,6 +82,32 @@ def read_table(disk):
     return tbl
 
 
+def cmdline_of(tbl):
+    return bytes(tbl[CMDLINE_OFF:0x1F0]).split(b"\x00")[0].decode(
+        "ascii", "replace")
+
+
+def safe_now(tbl):
+    """いまセーフグラフィックスが焼いてあるか。"""
+    return "nomodeset" in cmdline_of(tbl).split()
+
+
+def set_safe(disk, want):
+    """セーフグラフィックスを覚えさせる / やめさせる。
+
+    起動中に S を押しても同じことができるが、**画面が出ない機械では
+    毎回押すことになる**。それは使い物にならない。コマンドラインに
+    書いておけば、次からは押さなくていい。
+
+    書き込みは myos-writeboot に任せる。あちらは差し替える前に控えを
+    LBA 21 へ写すので、**外したときに起動中の R で戻れる**。同じ用心を
+    ここで書き直す理由が無い。
+    """
+    r = subprocess.run(["myos-writeboot", "--safe-graphics", want, disk])
+    if r.returncode != 0:
+        die("セーフグラフィックスを書けませんでした")
+
+
 def show(tbl):
     w = struct.unpack_from("<H", tbl, OFF_W)[0]
     h = struct.unpack_from("<H", tbl, OFF_H)[0]
@@ -88,6 +116,7 @@ def show(tbl):
         print("current: auto")
     else:
         print(f"current: {w}x{h}" + (f" {b}bpp" if b else ""))
+    print("safe:", "yes" if safe_now(tbl) else "no")
 
 
 def main():
@@ -98,6 +127,27 @@ def main():
     if not args:
         show(tbl)
         print("available:", ", ".join(f"{w}x{h}" for w, h in CHOICES))
+        return
+
+    if args[0] == "safe":
+        if len(args) < 2 or args[1] not in ("on", "off"):
+            die("usage: myos-setres safe on|off")
+        set_safe(disk, args[1])
+        # 控えを更新する。設定の画面は root で無いのでテーブルを
+        # 読めない。ここが唯一の窓口になる。
+        tbl = read_table(disk)
+        w = struct.unpack_from("<H", tbl, OFF_W)[0]
+        h = struct.unpack_from("<H", tbl, OFF_H)[0]
+        try:
+            os.makedirs("/etc/myos", exist_ok=True)
+            with open("/etc/myos/display.conf", "w") as f:
+                f.write("# myOS: 次に起動するときの画面の設定。"
+                        "myos-setres が書く。\n")
+                f.write("mode = %s\n" % ("auto" if w == 0 else f"{w}x{h}"))
+                f.write("safe = %s\n" % ("yes" if safe_now(tbl) else "no"))
+        except OSError:
+            pass
+        print("takes effect after a restart.")
         return
 
     if args[0] == "auto":
@@ -149,6 +199,7 @@ def main():
                     "myos-setres が書く。\n")
             f.write("# 本物はペイロードテーブル。これは表示用の控え。\n")
             f.write("mode = %s\n" % ("auto" if w == 0 else f"{w}x{h}"))
+            f.write("safe = %s\n" % ("yes" if safe_now(tbl) else "no"))
     except OSError:
         pass                      # 控えられなくても、書き込み自体は済んでいる
 

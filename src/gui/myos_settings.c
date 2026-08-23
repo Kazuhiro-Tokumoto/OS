@@ -545,6 +545,10 @@ static const struct { int w, h; } resolutions[] = {
 #define N_RES ((int)(sizeof(resolutions) / sizeof(resolutions[0])))
 
 static int res_sel = -1;            /* -1 = おまかせ */
+/* GPU のドライバを使わずに起動する (nomodeset)。
+ * 起動中に S を押すのと同じだが、こちらは覚える。画面が出ない機械で
+ * 毎回押させるのは、逃げ道として成立していない。 */
+static int res_safe = 0;
 static char res_now[64] = "";       /* いま書かれている値 */
 static char res_msg[128] = "";      /* 直近の結果 */
 
@@ -575,6 +579,7 @@ static void res_set_from(int w, int h)
 static void res_load(void)
 {
     res_sel = -1;
+    res_safe = 0;
     snprintf(res_now, sizeof(res_now), "auto");
 
     FILE *c = fopen("/etc/myos/display.conf", "r");
@@ -584,16 +589,17 @@ static void res_load(void)
             int w, h;
             char *v = strchr(line, '=');
             if (!v) continue;
-            if (sscanf(v + 1, " %dx%d", &w, &h) == 2) {
-                res_set_from(w, h);
-                fclose(c);
-                return;
+            if (!strncmp(line, "safe", 4)) {
+                res_safe = (strstr(v, "yes") != NULL);
+                continue;
             }
-            /* mode = auto。既定のままなので何もしない。 */
-            fclose(c);
-            return;
+            if (sscanf(v + 1, " %dx%d", &w, &h) == 2)
+                res_set_from(w, h);
+            /* mode = auto はそのまま (既定が -1)。
+             * safe の行が後ろにあるので、ここでは読み終えない。 */
         }
         fclose(c);
+        return;
     }
 
     FILE *f = popen("myos-setres 2>/dev/null", "r");
@@ -629,6 +635,26 @@ static void res_apply(void)
                  "Saved. The new size is used the next time you start myOS.");
         res_load();
     } else {
+        snprintf(res_msg, sizeof(res_msg),
+                 "Could not save. Administrator rights are needed.");
+    }
+}
+
+static void res_safe_apply(void)
+{
+    char cmd[160];
+    snprintf(cmd, sizeof(cmd), "myos-runas myos-setres safe %s",
+             res_safe ? "on" : "off");
+    void (*old_chld)(int) = signal(SIGCHLD, SIG_DFL);
+    int rc = system(cmd);
+    signal(SIGCHLD, old_chld);
+
+    if (rc == 0) {
+        snprintf(res_msg, sizeof(res_msg),
+                 "Saved. It takes effect the next time you start myOS.");
+        res_load();
+    } else {
+        res_safe = !res_safe;          /* 効かなかったので戻す */
         snprintf(res_msg, sizeof(res_msg),
                  "Could not save. Administrator rights are needed.");
     }
@@ -841,6 +867,31 @@ static void draw_display(void)
     if (!res_msg[0])
         x98_text(&x98, win, 132, ry + 20,
                  "myOS falls back to one that works.", x98.shadow);
+
+    /* セーフグラフィックス。
+     *
+     * 起動中に S を押すのと同じことを、覚えさせる。画面が出ない機械で
+     * **毎回押させるのは逃げ道として成立していない**。ここで入れて
+     * おけば、次からは押さなくていい。 */
+    int sy = ry + 44;
+    x98_text(&x98, win, 16, sy, "If the screen stays black", x98.text);
+
+    int cy = sy + 22;
+    x98_bevel(&x98, win, 32, cy, 13, 13, 0);
+    x98_fill(&x98, win, 34, cy + 2, 9, 9, x98.white);
+    if (res_safe) {
+        XSetForeground(dpy, x98.gc, x98.text);
+        XDrawLine(dpy, win, x98.gc, 35, cy + 6, 37, cy + 9);
+        XDrawLine(dpy, win, x98.gc, 37, cy + 9, 42, cy + 3);
+    }
+    x98_text(&x98, win, 54, cy + (13 - x98_text_h(&x98)) / 2 - 1,
+             "Do not use the graphics driver (safe graphics)", x98.text);
+    x98_text(&x98, win, 54, cy + 20,
+             "    Same as holding S while starting, but remembered.",
+             x98.shadow);
+    x98_text(&x98, win, 54, cy + 36,
+             "    The picture always appears, but 3D becomes slow.",
+             x98.shadow);
 }
 
 /* --- 更新 ----------------------------------------------------------------
@@ -1317,6 +1368,16 @@ int main(void)
                 int by = RES_Y + (N_RES + 1) * RES_ROW + 10;
                 if (my >= by && my < by + 22 && mx >= 32 && mx < 122) {
                     res_apply();
+                    redraw();
+                }
+                /* セーフグラフィックスのチェック。draw_display と
+                 * 同じ積み方でなければならない。 */
+                int scy = by + 44 + 22;
+                if (my >= scy - 2 && my < scy + 15 &&
+                    mx >= 32 && mx < WIN_W - 32) {
+                    res_safe = !res_safe;
+                    redraw(); XFlush(dpy);
+                    res_safe_apply();
                     redraw();
                 }
                 if (my < BTN_Y) break;
