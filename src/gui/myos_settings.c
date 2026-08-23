@@ -161,7 +161,7 @@ static int tab = TAB_LOOK;
  * 拾うか、繋がっていないものをどう落とすか) が地味に込み入っていて、
  * 画面の都合と混ぜたくないから。あちらは単体で試せる。
  */
-#define MAX_SNK 12
+#define MAX_SNK 14
 #define SNK_ROW 22
 static struct {
     char id[192];
@@ -210,7 +210,15 @@ static void snd_load(void)
         if (snd[n_snd].active) snd_sel = n_snd;
         n_snd++;
     }
+    /* 入り切らなかったことを黙らない。実機で 12 個ちょうど並んで、
+     * それが「全部」なのか「打ち切られた」のか画面から読めなかった。
+     * 隠した事実は必ず言う。 */
+    int over = (n_snd >= MAX_SNK && fgets(line, sizeof(line), f)) ? 1 : 0;
     pclose(f);
+
+    if (over)
+        snprintf(snd_msg, sizeof(snd_msg),
+                 "Only the first %d outputs are shown.", MAX_SNK);
 
     if (n_snd == 0)
         snprintf(snd_msg, sizeof(snd_msg),
@@ -235,11 +243,24 @@ static void snd_apply(void)
     int rc = system(cmd);
     signal(SIGCHLD, old_chld);
 
-    if (rc != 0)
-        snprintf(snd_msg, sizeof(snd_msg),
-                 "Could not switch to that output.");
-    else
+    if (rc != 0) {
+        /* 「切り替えられません」だけでは、何をすればいいのか分からない。
+         * 繋がっていないと出ているものを選んだのなら、理由はほぼそれ。
+         *
+         * HDMI は特に紛らわしい。音の出口は画面のカードの中にあるが、
+         * 「画面が繋がっているか」は画面のドライバ (nouveau / i915 /
+         * amdgpu) が教える。セーフグラフィックスで起動していると
+         * ドライバが載っていないので、ケーブルを挿していても
+         * 「繋がっていない」と見える。 */
+        if (snd[snd_sel].unplugged)
+            snprintf(snd_msg, sizeof(snd_msg),
+                     "Not connected. HDMI also needs the graphics driver.");
+        else
+            snprintf(snd_msg, sizeof(snd_msg),
+                     "Could not switch to that output.");
+    } else {
         snd_msg[0] = 0;
+    }
 }
 
 /* --- ファイルの種類 ------------------------------------------------------ */
