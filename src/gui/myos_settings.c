@@ -986,10 +986,13 @@ static void draw_update(void)
              "    The new kernel goes to the spare half of the boot area,",
              x98.shadow);
     x98_text(&x98, win, 16, y + 36,
-             "    the new system to the spare root. myOS switches over only",
+             "    the new system to the spare root. Your files (/home) and",
              x98.shadow);
+    /* 入れたアプリが消えることは、先に言っておかないと事故になる。
+     * ルートを入れ替えるのだから apt で入れたものは付いてこない。
+     * 「消えた」と気づくのは、次に使おうとしたときで、もう遅い。 */
     x98_text(&x98, win, 16, y + 52,
-             "    after the write finishes, so losing power changes nothing.",
+             "    accounts are kept. Programs you added need adding again.",
              x98.shadow);
     x98_text(&x98, win, 16, y + 72,
              "    If the new one does not start, hold R while booting",

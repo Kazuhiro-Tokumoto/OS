@@ -56,6 +56,74 @@ WRITEBOOT=/usr/local/bin/myos-writeboot
 
 die() { echo "myos-update: $1" >&2; exit 1; }
 
+# --- 使う人を新しいルートへ連れて行く ---------------------------------------
+#
+# squashfs は**作った人の機械のもの**なので、/etc/passwd も /etc/shadow も
+# 「まだ誰も居ない」状態で入っている。ここを写さないと、入れ替えた瞬間に
+# 自分のパスワードで入れなくなる。実機で踏んだ。
+#
+# 丸ごと写すのは採らない。新しい版でパッケージが増えていると、そちらが
+# 作ったシステム用の利用者 (pulse, messagebus など) を消してしまう。
+# **人間ぶん (UID >= 1000) だけ**を、新しい側に無ければ足す。
+#
+# 副グループも要る。sudo を落とすと「入れ替えたら管理者権限が消えた人」が
+# 出来上がる。パスワードで入れないのと同じくらい困る。
+#
+# 引数で根を受けるのは、手元で試せるようにするため。本番は ("" 新しい根)。
+carry_users() {
+    cu="$1"      # いまの根 (空文字 = /)
+    nw="$2"      # 新しい根
+
+    # 新しい側のグループ行に、その人を足す。
+    # group も gshadow も所属は 4 つ目の欄なので、同じ処理で両方いける。
+    # 片方だけ直すと usermod や grpck が食い違いを言い出す。
+    _add_member() {   # $1 = ファイル, $2 = グループ名, $3 = 使う人
+        [ -f "$1" ] || return 0
+        grep -q "^$2:" "$1" || return 0
+        awk -F: -v g="$2" -v u="$3" 'BEGIN{OFS=":"}
+            $1 == g {
+                n = split($4, m, ",")
+                for (i = 1; i <= n; i++) if (m[i] == u) { print; next }
+                $4 = ($4 == "" ? u : $4 "," u)
+            }
+            { print }' "$1" > "$1.new" && cat "$1.new" > "$1"
+        rm -f "$1.new"
+    }
+
+    for u in $(awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' "$cu/etc/passwd"); do
+        grep -q "^$u:" "$nw/etc/passwd" ||
+            grep "^$u:" "$cu/etc/passwd" >> "$nw/etc/passwd"
+        grep -q "^$u:" "$nw/etc/shadow" ||
+            grep "^$u:" "$cu/etc/shadow" >> "$nw/etc/shadow"
+
+        # 主グループ。同じ名前が無ければ行ごと写す。
+        gid=$(awk -F: -v n="$u" '$1 == n {print $4}' "$cu/etc/passwd")
+        gname=$(awk -F: -v g="$gid" '$3 == g {print $1; exit}' "$cu/etc/group")
+        if [ -n "$gname" ] && ! grep -q "^$gname:" "$nw/etc/group"; then
+            grep "^$gname:" "$cu/etc/group" >> "$nw/etc/group"
+            grep "^$gname:" "$cu/etc/gshadow" >> "$nw/etc/gshadow" 2>/dev/null
+        fi
+
+        # 副グループ (sudo / audio / video / plugdev ...)
+        for g in $(awk -F: -v n="$u" '{ split($4, m, ",")
+                                        for (i in m) if (m[i] == n) print $1 }' \
+                       "$cu/etc/group"); do
+            _add_member "$nw/etc/group"   "$g" "$u"
+            _add_member "$nw/etc/gshadow" "$g" "$u"
+        done
+    done
+
+    # root の状態も連れて行く。セットアップが passwd -l で施錠しているので、
+    # 写さないと**施錠前の状態に戻る**。
+    rootline=$(grep "^root:" "$cu/etc/shadow" 2>/dev/null)
+    if [ -n "$rootline" ]; then
+        grep -v "^root:" "$nw/etc/shadow" > "$nw/etc/shadow.new" &&
+            printf '%s\n' "$rootline" >> "$nw/etc/shadow.new" &&
+            cat "$nw/etc/shadow.new" > "$nw/etc/shadow"
+        rm -f "$nw/etc/shadow.new"
+    fi
+}
+
 conf_get() {
     sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$CONF" 2>/dev/null | head -1
 }
@@ -287,6 +355,16 @@ apply-system)
             cp -a "/$keep" "$WORK/mnt/$keep" 2>/dev/null || true
         fi
     done
+    # 無線の合言葉も機械のもの。写さないと網に繋がらなくなる。
+    for w in /etc/myos/wpa-*.conf; do
+        [ -e "$w" ] || continue
+        cp -a "$w" "$WORK/mnt/etc/myos/" 2>/dev/null || true
+    done
+
+    # 使う人。ここを落とすと、入れ替えた瞬間に自分のパスワードで
+    # 入れなくなる。
+    carry_users "" "$WORK/mnt"
+
     # 入れ直しの扱いにしない。使う人を作り直させると、home の中身と
     # 食い違って別人になってしまう。
     : > "$WORK/mnt/etc/myos/setup-done" 2>/dev/null || true
