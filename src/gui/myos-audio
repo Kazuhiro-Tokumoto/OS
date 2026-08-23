@@ -255,33 +255,82 @@ def default_sink():
     return (pactl("get-default-sink") or "").strip()
 
 
-def sink_of_card(card_name):
-    """そのカードが持っている sink の名前。無ければ None。"""
-    cards = parse_cards(pactl("list", "cards"))
-    idx = None
-    for c in cards:
-        if c["name"] == card_name:
-            idx = c["index"]
-            break
+def sink_for(card_name, port_name=None):
+    """その出口を持っている sink の名前。無ければ None。
+
+    **ここが長いこと壊れていた。**
+
+    元は `pactl list sinks` の中から "Card:" の行を探して、カードの
+    番号と突き合わせていた。ところが pactl は **sink の情報にカードの
+    番号を出さない**。実物 (pulseaudio-utils 16.1) の書式文字列を
+    読んで確かめた。sink に出るのはこれだけ:
+
+      Sink #%u / State / Name / Description / Driver /
+      Sample Specification / Channel Map / Owner Module / Mute /
+      Volume / Base Volume / Monitor Source / Latency / Flags /
+      Properties / Ports / Active Port / Formats
+
+    "Card:" はどこにも無い。つまりこの関数は **常に None を返して
+    いた**。おかげで
+
+      - Sound タブで出口を選ぶと必ず
+        「出口はできましたが sink が見つかりません」で失敗し、
+        選択が元に戻る (画面には Could not switch to that output.)
+      - myos-audio list の「いま使っている」印が全部 - のまま
+
+    という状態だった。実機で HDMI に切り替えられなかったのはこれ。
+
+    ポート名で引く。欲しいのは「この出口を持っている sink」そのもの
+    なので、カードを経由せずポートで探すのが一番短い。
+    """
     text = pactl("list", "sinks")
     name = None
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("Name:"):
-            name = line.split(":", 1)[1].strip()
-        elif line.startswith("Card:") and name:
-            try:
-                if int(line.split(":", 1)[1].strip().lstrip("#")) == idx:
+    in_ports = False
+
+    if port_name:
+        for raw in text.splitlines():
+            line = raw.strip()
+            if raw.startswith("Sink #"):
+                name = None
+                in_ports = False
+                continue
+            if line.startswith("Name:"):
+                name = line.split(":", 1)[1].strip()
+                continue
+            if line == "Ports:":
+                in_ports = True
+                continue
+            if in_ports:
+                # Ports: の並びは次の見出しで終わる。
+                if line.startswith(("Active Port:", "Formats:", "Properties:")):
+                    in_ports = False
+                    continue
+                # 例: hdmi-output-0: HDMI / DisplayPort
+                #       (type: HDMI, priority: 5900, available)
+                m = re.match(r"^([A-Za-z0-9_.:+-]+): ", line)
+                if m and name and m.group(1) == port_name:
                     return name
-            except ValueError:
-                pass
+
+    # ポートで見つからないとき (プロファイルを切り替えた直後など) は
+    # 名前の作りから当てる。PulseAudio は同じ機器を
+    #   カード  alsa_card.pci-0000_00_03.0
+    #   sink    alsa_output.pci-0000_00_03.0.hdmi-stereo
+    # と名付けるので、頭を差し替えれば対応が取れる。
+    if card_name.startswith("alsa_card."):
+        want = "alsa_output." + card_name[len("alsa_card."):] + "."
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("Name:"):
+                n = line.split(":", 1)[1].strip()
+                if n.startswith(want):
+                    return n
     return None
 
 
 def cmd_list(all_ports=False):
     cur = default_sink()
     for o in outputs(all_ports):
-        sink = sink_of_card(o["card"])
+        sink = sink_for(o["card"], o["port"])
         mark = "*" if (o["active"] and sink and sink == cur) else "-"
         print(f"{mark}\t{o['id']}\t{o['label']}\t{o['avail']}")
 
@@ -301,11 +350,11 @@ def cmd_set(target):
             return 1
         # sink が生えるまで少し待つ。すぐには出てこない。
         for _ in range(20):
-            if sink_of_card(o["card"]):
+            if sink_for(o["card"], o["port"]):
                 break
             time.sleep(0.1)
 
-    sink = sink_of_card(o["card"])
+    sink = sink_for(o["card"], o["port"])
     if not sink:
         print("myos-audio: 出口はできましたが sink が見つかりません",
               file=sys.stderr)
