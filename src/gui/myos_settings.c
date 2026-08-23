@@ -530,23 +530,58 @@ static char res_msg[128] = "";      /* 直近の結果 */
 #define RES_Y (TAB_H + 92)
 #define RES_ROW 20
 
+/* いま何が選ばれているかを読む。
+ *
+ * 本物はペイロードテーブルだが、**あれを読むには root が要る** (生の
+ * ディスクを開くので当然)。この画面は一般ユーザーで動くので覗けない。
+ * そのせいで実機では「Currently set to: auto」しか出ず、選び直した
+ * 直後もラジオが「おまかせ」に戻っていた。選んだのに選んだことに
+ * なっていない画面は、使う人には壊れて見える。
+ *
+ * 読むためだけにパスワードを聞くのは筋が悪いので、myos-setres が
+ * 置く控え (/etc/myos/display.conf) を見る。無ければ myos-setres を
+ * 呼ぶ (root で動かしているときはこちらが通る)。 */
+static void res_set_from(int w, int h)
+{
+    snprintf(res_now, sizeof(res_now), "%dx%d", w, h);
+    for (int i = 0; i < N_RES; i++)
+        if (resolutions[i].w == w && resolutions[i].h == h) {
+            res_sel = i;
+            return;
+        }
+}
+
 static void res_load(void)
 {
     res_sel = -1;
     snprintf(res_now, sizeof(res_now), "auto");
+
+    FILE *c = fopen("/etc/myos/display.conf", "r");
+    if (c) {
+        char line[128];
+        while (fgets(line, sizeof(line), c)) {
+            int w, h;
+            char *v = strchr(line, '=');
+            if (!v) continue;
+            if (sscanf(v + 1, " %dx%d", &w, &h) == 2) {
+                res_set_from(w, h);
+                fclose(c);
+                return;
+            }
+            /* mode = auto。既定のままなので何もしない。 */
+            fclose(c);
+            return;
+        }
+        fclose(c);
+    }
+
     FILE *f = popen("myos-setres 2>/dev/null", "r");
     if (!f) return;
     char line[128];
     if (fgets(line, sizeof(line), f)) {
         int w, h;
-        if (sscanf(line, "current: %dx%d", &w, &h) == 2) {
-            snprintf(res_now, sizeof(res_now), "%dx%d", w, h);
-            for (int i = 0; i < N_RES; i++)
-                if (resolutions[i].w == w && resolutions[i].h == h) {
-                    res_sel = i;
-                    break;
-                }
-        }
+        if (sscanf(line, "current: %dx%d", &w, &h) == 2)
+            res_set_from(w, h);
     }
     pclose(f);
 }

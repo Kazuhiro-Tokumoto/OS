@@ -130,6 +130,28 @@ def main():
     if back[OFF_W:OFF_BPP + 1] != tbl[OFF_W:OFF_BPP + 1]:
         die("書き込みを確認できませんでした")
 
+    # 選んだ値を誰でも読める形でも残す。
+    #
+    # ペイロードテーブルが本物で、起動時にそれを読むのはブートローダー。
+    # だが**読むのに root が要る**。生のディスクを開くので当然で、
+    # 一般ユーザーで動く設定の画面はここを覗けない。
+    #
+    # そのせいで設定の Display は「Currently set to: auto」しか出せず、
+    # 選び直した直後もラジオが「おまかせ」に戻っていた。選んだのに
+    # 選んだことになっていない画面は、使う人には壊れて見える。
+    #
+    # 読むためだけに root を要求する (毎回パスワードを聞く) のは筋が
+    # 悪いので、控えを 1 行置く。判断には使わない。本物はテーブル。
+    try:
+        os.makedirs("/etc/myos", exist_ok=True)
+        with open("/etc/myos/display.conf", "w") as f:
+            f.write("# myOS: 次に起動するときの画面の大きさ。"
+                    "myos-setres が書く。\n")
+            f.write("# 本物はペイロードテーブル。これは表示用の控え。\n")
+            f.write("mode = %s\n" % ("auto" if w == 0 else f"{w}x{h}"))
+    except OSError:
+        pass                      # 控えられなくても、書き込み自体は済んでいる
+
     show(back)
     print("takes effect after a restart.")
 

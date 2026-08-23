@@ -169,6 +169,34 @@ def parse_cards(text):
     return cards
 
 
+def output_profiles(profiles):
+    """そのポートが「出口」として属しているプロファイルだけを返す。
+
+    最初は名前が output: で始まるかだけを見ていた。**これでは足りない。**
+    実機で入力のポート (マイク、ライン入力) まで一覧に並んだ。
+
+    プロファイルは足し算で書かれる。
+
+        output:analog-stereo                     出すだけ
+        input:analog-stereo                      録るだけ
+        output:analog-stereo+input:analog-stereo 両方              <- これ
+
+    マイクは 3 つ目にも属している。頭が output: なので素通りしていた。
+    足し算の中に input: が居るなら、そのプロファイルは「出す口」の
+    証拠にならない。
+
+    **出しかしないプロファイル**に 1 つでも属していれば出口、と決める。
+    マイクはそういうプロファイルを持たないので落ちる。
+    """
+    got = []
+    for name in profiles:
+        parts = name.split("+")
+        if any(x.startswith("output:") for x in parts) and \
+           not any(x.startswith("input:") for x in parts):
+            got.append(name)
+    return got
+
+
 def outputs(all_ports=False):
     """選ばせてよい出口を並べる。
 
@@ -190,7 +218,7 @@ def outputs(all_ports=False):
         out = []
         for c in cards:
             for p in c["ports"]:
-                outp = [x for x in p["profiles"] if x.startswith("output:")]
+                outp = output_profiles(p["profiles"])
                 if not outp:
                     continue
                 if skip_unavailable and p["avail"] == "no":
