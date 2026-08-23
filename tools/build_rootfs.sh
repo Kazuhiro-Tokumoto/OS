@@ -673,6 +673,28 @@ if [ -x /usr/sbin/ufw ]; then
     echo "[myos-init] firewall: $(/usr/sbin/ufw status 2>&1 | head -1)"
 fi
 
+# --- apt の一覧を作り直す -------------------------------------------------
+# ISO を小さくするために /var/lib/apt/lists を空にして配っている。
+# 「apt-get update でいつでも作り直せる」つもりだったが、**誰も
+# 作り直さない**。入れたばかりの機械で apt install をやると、
+# リポジトリに有るものまで
+#
+#   libvlc-bin:
+#     インストールされているバージョン: (なし)
+#     候補:                             (なし)
+#     バージョンテーブル:               (空)
+#
+# になり、依存が全部「インストールすることができません」で埋まる。
+# 実機で VLC を入れようとして刺さった。壊れているように見えるが、
+# 実際には一覧が空なだけ。
+#
+# なので、入れたあと (と、根を入れ替えたあと) の最初の起動で、
+# こちらから 1 回だけ作り直す。印は /etc/myos/apt-refresh。
+# 背景でやる。起動を待たせる理由が無いし、網が無い機械もある。
+if [ -f /etc/myos/apt-refresh ] && [ -x /usr/local/bin/myos-apt-refresh ]; then
+    /usr/local/bin/myos-apt-refresh >/dev/null 2>&1 &
+fi
+
 # 時刻合わせ。網が上がったあとに始める。
 # 繋がっていない機械では黙って諦めるだけなので、失敗しても構わない。
 # 合わせた結果は終了するときに myos-poweroff が本体の時計へ書き戻す。
@@ -2236,6 +2258,64 @@ nameserver 1.0.0.1
 RESOLV
 
 # --- 入れ替えたあとに、前のアプリを入れ直す --------------------------------
+# --- apt の一覧を作り直す道具 ---------------------------------------------
+# 起動のたびに走るものではない。/etc/myos/apt-refresh がある間だけ。
+cat > "$WORK/usr/local/bin/myos-apt-refresh" <<'EOF'
+#!/bin/sh
+# ============================================================================
+# myos-apt-refresh  -  apt のパッケージ一覧を作り直す (入れた直後に 1 回)
+#
+# ISO を小さくするために /var/lib/apt/lists を空にして配っている。
+# そのままだと apt install が「候補: (なし)」で全部失敗する。
+# 網が上がるのを少し待ってから apt-get update をかけ、ついでに
+# 途中で止まっているパッケージがあれば直す。
+#
+# 起動を止めない。失敗しても黙って諦める (網の無い機械もある)。
+# やったことは /var/log/myos-apt-refresh.log に残す。
+# ============================================================================
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+export DEBIAN_FRONTEND=noninteractive
+
+MARK=/etc/myos/apt-refresh
+LOG=/var/log/myos-apt-refresh.log
+
+[ "$(id -u)" = "0" ] || exit 1
+[ -f "$MARK" ] || exit 0
+
+exec >>"$LOG" 2>&1
+echo "=== $(date) myos-apt-refresh ==="
+
+# 網を待つ。DHCP が終わるまで少しかかる。
+# 3 秒ずつ、最大 90 秒。繋がらない機械はここで諦める
+# (印は消さないので、次の起動でまた試す)。
+n=0
+while [ "$n" -lt 30 ]; do
+    if getent hosts deb.debian.org >/dev/null 2>&1; then
+        break
+    fi
+    sleep 3
+    n=$((n + 1))
+done
+if [ "$n" -ge 30 ]; then
+    echo "網が上がらないので今回はやめます (次の起動でまた試します)"
+    exit 0
+fi
+
+echo "--- apt-get update"
+apt-get update || { echo "update に失敗。印は残します"; exit 0; }
+
+# 途中で止まっているものがあれば直す。無ければ何もしない。
+# 入れ替えたり消したりはしない。あくまで「止まっているものを進める」だけ。
+echo "--- dpkg --configure -a"
+dpkg --configure -a || true
+echo "--- apt-get -f install"
+apt-get -f install -y || true
+
+rm -f "$MARK"
+echo "=== 終わり ($(date))"
+EOF
+
 cat > "$WORK/usr/local/bin/myos-restore-apps" <<'EOF'
 #!/bin/sh
 # ルートを入れ替えると、apt で入れたものは付いてこない (新しい squashfs
@@ -2295,6 +2375,13 @@ else
 fi
 EOF
 chmod 755 "$WORK/usr/local/bin/myos-restore-apps"
+chmod 755 "$WORK/usr/local/bin/myos-apt-refresh"
+
+# 入れたあとの最初の起動で apt の一覧を作り直させる印。
+# 一覧は下の掃除で空にして配るので、これが無いと
+# 「apt install が全部 候補:(なし) で失敗する機械」が出来上がる。
+mkdir -p "$WORK/etc/myos"
+: > "$WORK/etc/myos/apt-refresh"
 
 # --- 出荷時の姿を記録する --------------------------------------------------
 #

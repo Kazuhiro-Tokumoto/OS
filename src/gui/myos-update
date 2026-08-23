@@ -581,6 +581,11 @@ apply-system)
     printf '# myOS: 入れたときの ISO の版。\nversion = %s\n' "$new" \
         > "$WORK/mnt/etc/myos/version.conf" 2>/dev/null || true
 
+    # 新しい根の apt の一覧は空 (ISO を小さくするために消してある)。
+    # 入れ替えた最初の起動で作り直させる。これを置き忘れると
+    # 「更新したら apt install が全部 候補:(なし) になった」になる。
+    : > "$WORK/mnt/etc/myos/apt-refresh" 2>/dev/null || true
+
     sync
     umount "$WORK/sq"; umount "$WORK/mnt"
 
