@@ -280,6 +280,7 @@ apply-system)
     # ものなので、そのままだと fstab も boot.conf も合わない。
     for keep in etc/fstab etc/myos/boot.conf etc/myos/version.conf \
                 etc/adjtime etc/localtime etc/timezone \
+                etc/myos/display.conf \
                 etc/default/keyboard etc/X11/xorg.conf.d/10-keyboard.conf; do
         if [ -e "/$keep" ]; then
             mkdir -p "$WORK/mnt/$(dirname "$keep")"
