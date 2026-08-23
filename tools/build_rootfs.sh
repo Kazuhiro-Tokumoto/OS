@@ -771,6 +771,9 @@ cat > "$WORK/myos-session" <<'EOF'
 # ここで「セットアップ -> ログオン -> 一般ユーザーへ降りる」を通す。
 xset -dpms s off 2>/dev/null
 xsetroot -solid teal 2>/dev/null
+# 根の窓に矢印を設定する。これをしないと、ウィンドウマネージャより前に
+# 出る画面 (初回セットアップ・ログオン) でカーソルが出ない。
+xsetroot -cursor_name left_ptr 2>/dev/null
 
 # キーボード配列。ログオン画面でパスワードを打つ時点でもう要る。
 kl=$(sed -n 's/^XKBLAYOUT="\(.*\)"$/\1/p' /etc/default/keyboard 2>/dev/null | head -1)
@@ -906,6 +909,13 @@ if [ ! -e "$HOME/.myos/getapps-done" ]; then
         touch "$HOME/.myos/getapps-done"
         /usr/local/bin/myos-getapps --need-browser >/dev/null 2>&1 &
     fi
+fi
+
+# システムを入れ替えた直後なら、前に入れていたものを入れ直すか聞く。
+# 一覧が残っている間だけ出る (入れ直すか、断って消せば出なくなる)。
+if [ -s /etc/myos/packages.extra ] && \
+   [ -x /usr/local/bin/myos-restore-apps ]; then
+    /usr/local/bin/myos-term sudo /usr/local/bin/myos-restore-apps &
 fi
 
 # 入っているアプリをスタートメニューに拾い直す。
@@ -2140,6 +2150,97 @@ cat > "$WORK/etc/resolv.conf" <<'RESOLV'
 nameserver 1.1.1.1
 nameserver 1.0.0.1
 RESOLV
+
+# --- 入れ替えたあとに、前のアプリを入れ直す --------------------------------
+cat > "$WORK/usr/local/bin/myos-restore-apps" <<'EOF'
+#!/bin/sh
+# ルートを入れ替えると、apt で入れたものは付いてこない (新しい squashfs
+# にはそもそも入っていない)。myos-update が「何が入っていたか」を
+# /etc/myos/packages.extra に残すので、それを見て入れ直す。
+#
+# 黙って入れ直さない。数百 MB を勝手に落とし始めるのは乱暴だし、
+# もう要らないものまで戻ってくる。聞いてから入れる。
+LIST=/etc/myos/packages.extra
+
+[ -s "$LIST" ] || { echo "入れ直すものはありません。"; exit 0; }
+if [ "$(id -u)" != "0" ]; then
+    echo "myos-restore-apps: 管理者で動かしてください (sudo)" >&2
+    exit 1
+fi
+
+n=$(wc -l < "$LIST")
+echo "システムを入れ替える前に、次の $n 個を自分で入れていました。"
+echo
+sed 's/^/    /' "$LIST"
+echo
+printf '入れ直しますか? [Y/n] '
+read -r ans
+case "$ans" in
+    [Nn]*)
+        echo "やめました。あとで sudo myos-restore-apps でやり直せます。"
+        echo "(要らないなら sudo rm $LIST で二度と聞かれなくなります)"
+        exit 0 ;;
+esac
+
+echo "一覧を取り直しています"
+apt-get update || { echo "網に繋がっていないようです。網に繋いでからもう一度。"; exit 1; }
+
+# まとめて入れる。1 つでも無いものがあると全部止まるので、そのときは
+# 1 つずつやり直して、入らなかったものだけを報告する。
+if xargs -a "$LIST" apt-get install -y; then
+    rm -f "$LIST"
+    echo "入れ直しました。"
+    exit 0
+fi
+
+echo
+echo "まとめては入りませんでした。1 つずつ試します。"
+fail=""
+while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    apt-get install -y "$p" >/dev/null 2>&1 || fail="$fail $p"
+done < "$LIST"
+
+if [ -n "$fail" ]; then
+    echo "入らなかったもの:$fail"
+    echo "名前が変わったか、この版の Debian には無いものです。"
+    printf '%s\n' $fail | sort -u > "$LIST"
+else
+    rm -f "$LIST"
+    echo "入れ直しました。"
+fi
+EOF
+chmod 755 "$WORK/usr/local/bin/myos-restore-apps"
+
+# --- 出荷時の姿を記録する --------------------------------------------------
+#
+# ルートを A/B で入れ替えるとき、**この機械で手が入ったものだけ**を
+# 新しいほうへ連れて行きたい。そのためには「手が入っていない姿」が
+# 分かっている必要がある。それをここで焼き込む。
+#
+# 今までは連れて行くものを myos-update に手で並べていた。並べ忘れると
+# 黙って消える。実際、アカウント (/etc/passwd, /etc/shadow) を並べ
+# 忘れて、入れ替えた瞬間に誰も入れない機械が出来た。**手で並べる方式
+# そのものが間違い**で、機械に数えさせるべきだった。
+#
+# 注意: ここは全ての /etc の編集より後でなければならない。
+find "$WORK/etc" -name etc.sums -delete 2>/dev/null || true
+{
+    ( cd "$WORK/etc" && find . -type f ! -path ./myos/etc.sums \
+          -exec sha256sum {} + | sed 's/^/F /' )
+    ( cd "$WORK/etc" && find . -type l -printf 'L %l %p\n' )
+} > "$WORK/etc/myos/etc.sums"
+echo "  出荷時の /etc: $(wc -l < "$WORK/etc/myos/etc.sums") 個"
+
+# 入っているパッケージの一覧。これと見比べれば「あとから入れたもの」が
+# 分かる。ルートを入れ替えると apt で入れたものは付いてこないので、
+# せめて**何を入れ直せばいいか**は分かるようにしておく。
+# 依存で入ったものまで並べると数百行になって読めない。「自分で入れた
+# もの」だけを数える。あとで入れ直すときも、これだけ入れれば依存は
+# apt が連れてくる。
+chroot "$WORK" apt-mark showmanual 2>/dev/null |
+    sort -u > "$WORK/etc/myos/packages.base"
+echo "  出荷時のパッケージ: $(wc -l < "$WORK/etc/myos/packages.base") 個"
 
 echo "=== 完成 ==="
 du -sh "$WORK"

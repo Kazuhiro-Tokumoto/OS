@@ -26,6 +26,7 @@
  * ========================================================================== */
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -639,6 +640,11 @@ int main(void)
                         CopyFromParent, InputOutput, CopyFromParent,
                         CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
     XStoreName(dpy, win, "myOS Setup");
+
+    /* 矢印を出す。ここもウィンドウマネージャより前なので、指定しないと
+     * カーソルが出ない (ログオン画面で実機に踏まれた)。 */
+    XDefineCursor(dpy, win, XCreateFontCursor(dpy, XC_left_ptr));
+
     XMapRaised(dpy, win);
 
     /* 窓が出てから入力文脈を作る。窓より先に作ると

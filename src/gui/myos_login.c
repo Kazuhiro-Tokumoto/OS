@@ -22,6 +22,7 @@
 #define _GNU_SOURCE
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,6 +186,15 @@ int main(void)
                         CopyFromParent, InputOutput, CopyFromParent,
                         CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
     XStoreName(dpy, win, "myOS Logon");
+
+    /* 矢印を出す。
+     *
+     * ここはウィンドウマネージャより前に出る画面なので、誰も根の窓に
+     * カーソルを設定していない。**何も指定しないと矢印が出ない**ので、
+     * 実機では「マウスが効かない」ように見えた。実際は動いているのに、
+     * どこを指しているか分からないだけ。押せない釦と変わらない。 */
+    XDefineCursor(dpy, win, XCreateFontCursor(dpy, XC_left_ptr));
+
     XMapRaised(dpy, win);
 
     /* 窓が出てから入力文脈を作る。窓より先に作ると
@@ -244,9 +254,16 @@ int main(void)
                 } else if (mx >= PANEL_W - BTN_W - 16 &&
                            mx <  PANEL_W - 16) {
                     /* 電源を切る。ログオンしていないので、
-                     * ここから出来ることはこれくらいしかない。 */
-                    execlp("poweroff", "poweroff", (char *)NULL);
-                    _exit(0);
+                     * ここから出来ることはこれくらいしかない。
+                     *
+                     * poweroff を呼んでいたが、**systemd を使っていない
+                     * ので入っていない**。押しても何も起きなかった。
+                     * メニューの Shut Down で 1.3.1 に直した穴と同じ
+                     * ものが、ここに残っていた。この画面は root で動く
+                     * (/etc/shadow を読むため) ので sudo は要らない。 */
+                    execl("/usr/local/bin/myos-poweroff",
+                          "myos-poweroff", (char *)NULL);
+                    _exit(127);
                 }
             } else if (my >= 72 && my < 92) {
                 field = 0;

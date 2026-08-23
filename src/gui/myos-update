@@ -56,6 +56,95 @@ WRITEBOOT=/usr/local/bin/myos-writeboot
 
 die() { echo "myos-update: $1" >&2; exit 1; }
 
+# --- 手が入った設定を新しいルートへ連れて行く -------------------------------
+#
+# 連れて行くものを手で並べる方式をやめた。**並べ忘れると黙って消える。**
+# 実際、アカウント (/etc/passwd, /etc/shadow) を並べ忘れて、入れ替えた
+# 瞬間に誰も入れない機械が出来た。手で並べる方式そのものが間違いで、
+# 機械に数えさせるべきだった。
+#
+# 出荷時の /etc の姿は etc.sums に焼いてある (build_rootfs.sh)。いまの
+# /etc と見比べれば、**この機械で手が入ったものだけ**が機械的に出る。
+#
+# 触っていないものは写さない。新しい版で直っているかもしれないので、
+# 出荷時のままのものは新しい側のものを使うのが正しい。
+#
+# 名前に空白の入ったファイルは扱えない。/etc には無いものとする。
+carry_etc() {
+    cu="$1"; nw="$2"
+    base="$cu/etc/myos/etc.sums"
+    if [ ! -f "$base" ]; then
+        echo "myos-update: 出荷時の記録がありません (古い版から上げた?)"
+        echo "myos-update: 設定は主なものだけ写します"
+        return 1
+    fi
+
+    grep '^F ' "$base" | awk '{print $3, $2}' | sort > "$WORK/etc.base"
+    ( cd "$cu/etc" && find . -type f -exec sha256sum {} + 2>/dev/null ) |
+        awk '{print $2, $1}' | sort > "$WORK/etc.cur"
+    awk 'NR==FNR { h[$1] = $2; next }
+         (!($1 in h)) || h[$1] != $2 { print $1 }' \
+        "$WORK/etc.base" "$WORK/etc.cur" > "$WORK/etc.changed"
+
+    grep '^L ' "$base" | awk '{print $3, $2}' | sort > "$WORK/link.base"
+    ( cd "$cu/etc" && find . -type l -printf '%p %l\n' 2>/dev/null ) |
+        sort > "$WORK/link.cur"
+    awk 'NR==FNR { t[$1] = $2; next }
+         (!($1 in t)) || t[$1] != $2 { print $1 }' \
+        "$WORK/link.base" "$WORK/link.cur" >> "$WORK/etc.changed"
+
+    n=0
+    while IFS= read -r rel; do
+        rel=${rel#./}
+        case "$rel" in
+            # 使う人は carry_users が丁寧に混ぜる。丸ごと写すと、
+            # 新しい版が増やしたシステム用の利用者を消してしまう。
+            passwd|shadow|group|gshadow|passwd-|shadow-|group-|gshadow-)
+                continue ;;
+            # 入っているライブラリと対になって作られるもの。古いものを
+            # 新しい根に置くと、無い .so を指したままになる。
+            ld.so.cache|mtab)
+                continue ;;
+            # dpkg が管理する。古い行き先は新しい根に無いことがある。
+            alternatives/*)
+                continue ;;
+            # 起動のたびに dhclient が書く。写す意味が無い。
+            resolv.conf)
+                continue ;;
+            # この仕組み自身のもの。版は下で新しいものに書き換える。
+            myos/etc.sums|myos/packages.base|myos/version.conf)
+                continue ;;
+        esac
+        d=$(dirname "$rel")
+        [ "$d" = "." ] || mkdir -p "$nw/etc/$d" 2>/dev/null
+        cp -a "$cu/etc/$rel" "$nw/etc/$rel" 2>/dev/null && n=$((n + 1))
+    done < "$WORK/etc.changed"
+    echo "myos-update: 手が入った設定を $n 個引き継ぎました"
+    return 0
+}
+
+# --- あとから入れたものを数える ---------------------------------------------
+#
+# ルートを丸ごと入れ替えるので、apt で入れたものは付いてこない。これは
+# A/B の性質上どうにもならない。**せめて何を入れ直せばいいかは残す。**
+# 黙って消えて、次に使おうとしたときに気づくのが一番困る。
+carry_apps() {
+    cu="$1"; nw="$2"
+    base="$cu/etc/myos/packages.base"
+    [ -f "$base" ] || return 0
+
+    apt-mark showmanual 2>/dev/null | sort -u > "$WORK/pkg.now"
+    comm -13 "$base" "$WORK/pkg.now" > "$nw/etc/myos/packages.extra" 2>/dev/null
+
+    n=$(wc -l < "$nw/etc/myos/packages.extra" 2>/dev/null || echo 0)
+    if [ "$n" -gt 0 ]; then
+        echo "myos-update: あとから入れたもの $n 個は付いてきません。"
+        echo "myos-update: 新しいほうで最初に起動したときに入れ直せます。"
+    else
+        rm -f "$nw/etc/myos/packages.extra"
+    fi
+}
+
 # --- 使う人を新しいルートへ連れて行く ---------------------------------------
 #
 # squashfs は**作った人の機械のもの**なので、/etc/passwd も /etc/shadow も
@@ -355,6 +444,10 @@ apply-system)
             cp -a "/$keep" "$WORK/mnt/$keep" 2>/dev/null || true
         fi
     done
+    # 手が入った設定を丸ごと引き継ぐ。下の決め打ちの一覧より先に
+    # やる (etc.sums が無い古い版から上げたときは、下だけが効く)。
+    carry_etc "" "$WORK/mnt"
+
     # 無線の合言葉も機械のもの。写さないと網に繋がらなくなる。
     for w in /etc/myos/wpa-*.conf; do
         [ -e "$w" ] || continue
@@ -362,8 +455,13 @@ apply-system)
     done
 
     # 使う人。ここを落とすと、入れ替えた瞬間に自分のパスワードで
-    # 入れなくなる。
+    # 入れなくなる。carry_etc のあとにやること (あちらは passwd を
+    # 避けて通るので、混ぜるのはこちらの仕事)。
     carry_users "" "$WORK/mnt"
+
+    # あとから入れたものの一覧を置いておく。新しいほうの初回起動で
+    # 入れ直しを勧める。
+    carry_apps "" "$WORK/mnt"
 
     # 入れ直しの扱いにしない。使う人を作り直させると、home の中身と
     # 食い違って別人になってしまう。
