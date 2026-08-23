@@ -458,6 +458,14 @@ fi
 # ここへ戻して理由を画面に出す。黙って真っ黒のまま止まるのが一番困る。
 BOOTLOG=/var/log/bootlog.txt
 mkdir -p /var/log
+
+# 前回のぶんを残す。98 の BOOTLOG.PRV と同じ役。
+#
+# 毎回まっさらにしていたので、**起動に失敗した回のログが、次の起動で
+# 消えていた**。困って調べようとした時点では、もう証拠が無い。
+# 実機で X が固まったとき、これで手掛かりを 1 つ失っている。
+[ -f "$BOOTLOG" ] && mv -f "$BOOTLOG" /var/log/bootlog.prv
+
 exec 3>&1 4>&2
 : > "$BOOTLOG"
 exec >>"$BOOTLOG" 2>&1
@@ -655,6 +663,18 @@ fi
 # ドライバが無い) で永久に画面が明滅するだけになる。すぐ死んだ場合だけを
 # 「失敗」と数えて、3 回続いたら諦めてシェルを出す。
 # 一度でも長く動いていれば数え直す (使っている最中の事故は何度でも直す)。
+# カーネルの言い分を残してから X を上げる。
+#
+# X が固まると、そのあと何も実行できない。dmesg も読めない。**一番
+# 知りたい「ドライバが何を言ったか」が、一番取れない場面で取れない。**
+# 実機の nouveau がまさにそれだった。
+#
+# X より前に落としておけば、固まっても次の起動で読める (前回のぶんは
+# .prv に残る)。probe はルートのマウントより先に済んでいるので、
+# GPU のドライバの言い分はこの時点で出揃っている。
+[ -f /var/log/dmesg.txt ] && mv -f /var/log/dmesg.txt /var/log/dmesg.prv
+dmesg > /var/log/dmesg.txt 2>/dev/null
+
 X_FAILS=0
 while :; do
     X_START=$(cut -d. -f1 /proc/uptime)
@@ -681,6 +701,10 @@ while :; do
     fi
 
     echo "[myos-init] the desktop exited with $rc after ${X_LIVED}s; restarting"
+    # 落ちた直後の言い分も足す。X を開けてからドライバが転ぶことが
+    # あるので、上の「X より前」だけでは足りない。
+    echo "[myos-init] --- dmesg after the desktop exited ---"
+    dmesg | tail -30
     printf '\033[2J\033[H' >&3 2>/dev/null
     printf '\n  The desktop stopped. Starting it again...\n' >&3 2>/dev/null
     sleep 1
@@ -1046,6 +1070,15 @@ Section "ServerFlags"
     Option "AutoAddDevices" "true"
     Option "DontVTSwitch"   "true"
     Option "BlankTime"      "0"
+    # ログを 1 行ごとに書き出す。
+    #
+    # 既定の Xorg はログを溜めてから書く。**固まったときに何も残らない。**
+    # 実機で X がハングして、Xorg.0.log.old が 0 バイトだった。一番知り
+    # たい故障で、必ず証拠が消える作りになっていた。
+    #
+    # 毎行書くぶん遅くなるが、起動時に数百行書くだけなので体感には出ない。
+    # 遅さより「落ちた理由が分かること」を取る。
+    Option "Log"            "flush"
 EndSection
 
 # ドライバは決め打ちにしない。
@@ -1637,7 +1670,7 @@ cat > "$WORK/etc/myos/filetypes.conf" <<'EOF'
 # ここを直せば挙動が変わる。~/.myos/filetypes.conf に置くと自分の分だけ変わる。
 
 # --- 文書 -------------------------------------------------------------------
-txt,log,md,ini,cfg,conf,inc,csv|Text Document|file|myos-notepad %1|
+txt,log,md,ini,cfg,conf,inc,csv,prv,old|Text Document|file|myos-notepad %1|
 html,htm,xhtml|HTML Document|globe|myos-browser %1|myos-notepad %1
 pdf|PDF Document|globe|myos-browser %1|
 
