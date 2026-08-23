@@ -82,7 +82,7 @@ APPS="gtk2-engines-pixbuf libgtk-3-0 libgtk2.0-0 libcanberra-gtk3-module \
       libxkbcommon0 libsecret-1-0 libnotify4 libvulkan1 \
       libfuse2 fuse3 desktop-file-utils shared-mime-info xdg-utils \
       unzip zip xz-utils p7zip-full \
-      dbus-x11 at-spi2-core \
+      dbus-x11 dbus-system-bus-common at-spi2-core \
       fonts-dejavu fonts-liberation \
       ca-certificates wget curl"
 
@@ -181,9 +181,15 @@ echo "=== 追加パッケージ ==="
 cp /etc/resolv.conf "$WORK/etc/resolv.conf"
 mount --bind /proc "$WORK/proc" 2>/dev/null || true
 # non-free-firmware を有効にする (Debian 12 から独立した component)
+# -security を必ず入れる。Debian は安定版の修正をここへ出すので、
+# これが無いと **入れたその日から一切セキュリティ修正が来ない**。
+# (点リリースのたびに本体側にも取り込まれるので、日常の apt install が
+#  すぐ壊れるわけではない。壊れるのは修正が出てから次の点リリースまでの
+#  あいだ。それでも数か月あるので、無いのは単純にまずい)
 cat > "$WORK/etc/apt/sources.list" <<EOF
 deb $MIRROR $SUITE main contrib non-free-firmware
 deb $MIRROR $SUITE-updates main contrib non-free-firmware
+deb http://security.debian.org/debian-security $SUITE-security main contrib non-free-firmware
 EOF
 chroot "$WORK" sh -c "apt-get update -qq && \
     apt-get install -y --no-install-recommends $EXTRA >/dev/null && \
@@ -552,6 +558,27 @@ if [ -x /lib/systemd/systemd-udevd ]; then
     /lib/systemd/systemd-udevd --daemon
     udevadm trigger --action=add >/dev/null 2>&1
     udevadm settle --timeout=10 >/dev/null 2>&1
+fi
+say .
+
+# --- D-Bus のシステムバスを上げる -----------------------------------------
+# systemd を使っていないので、誰も立てない。立っていないと Xorg の
+# dbus-core が 10 秒おきに繋ぎに行っては失敗し、ログをこれで埋める。
+#
+#   (EE) dbus-core: error connecting to system bus:
+#        org.freedesktop.DBus.Error.FileNotFound
+#        (Failed to connect to socket /run/dbus/system_bus_socket:
+#         No such file or directory)
+#
+# 実機の Xorg.0.log が 10 秒ごとのこの 3 行で埋まっていた。X が固まった
+# ときに本当に読みたい行が、この繰り返しに押し流される。
+# 一般の Linux アプリ (システムバスを使うもの) も繋がらないままになる。
+#
+# セッションバスのほうは myos-session が dbus-launch で立てている。
+# こちらはシステム全体で 1 つなので、PID 1 のここで立てるのが筋。
+if [ -x /usr/bin/dbus-daemon ] && [ -f /usr/share/dbus-1/system.conf ]; then
+    mkdir -p /run/dbus
+    dbus-daemon --system --fork 2>/dev/null
 fi
 say .
 
