@@ -217,6 +217,12 @@ def outputs(all_ports=False):
     def collect(skip_unavailable):
         out = []
         for c in cards:
+            # 試験用の Dummy は出さない。CONFIG_SND_DUMMY=y のせいで
+            # 実機にもカード 0 として出てきて、選ぶと黙って無音になる。
+            # udev の PULSE_IGNORE でも隠しているが、そちらが効かない
+            # 機械でも並ばないようにしておく。
+            if "snd_dummy" in c["name"] or c["desc"].startswith("Dummy"):
+                continue
             for p in c["ports"]:
                 outp = output_profiles(p["profiles"])
                 if not outp:

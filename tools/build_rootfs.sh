@@ -116,7 +116,11 @@ NET="iproute2 isc-dhcp-client $WIFI"
 # 「音が出ない = 壊れている」と誤解される。
 # pulseaudio は Firefox とゲームがまず前提にしているので入れる。
 # pulseaudio-utils は pactl のため。出口の選び直しに使う。
-SOUND="alsa-utils pulseaudio pulseaudio-utils libopenal1"
+# libasound2-plugins は ALSA を直接叩くアプリを pulseaudio へ
+# 流すのに要る (下の /etc/asound.conf)。無いと "default" が
+# カード 0 に落ち、そこが Dummy だと黙って無音になる。
+SOUND="alsa-utils pulseaudio pulseaudio-utils libopenal1 \
+       libasound2-plugins"
 
 # 時刻合わせ。
 # 本体の時計 (RTC) は放っておくと月に何分もずれる。ずれた時計は
@@ -303,6 +307,40 @@ chroot "$WORK" passwd -l root >/dev/null 2>&1 || \
 # になるのを防ぐため。
 chroot "$WORK" update-alternatives --set regulatory.db \
     /lib/firmware/regulatory.db-upstream >/dev/null 2>&1 || true
+
+# --- 音の既定を pulseaudio に寄せる ----------------------------------------
+# .ko を全て =y にしてある副作用で CONFIG_SND_DUMMY まで入っており、
+# 実機ではこれがカード 0 を取る。実測 (GTX 1060 の機械):
+#
+#   ALSA device list:
+#     #0: Dummy 1                       <- 音を捨てる偽物
+#     #1: HDA Intel PCH at 0xd3310000   <- 本物 (ALC662)
+#     #2: HDA NVidia at 0xd3080000      <- 本物 (HDMI/DP)
+#
+# ALSA を直接叩くアプリの "default" はカード 0 なので、そのまま
+# 何も鳴らない場所へ流れる。pulseaudio 経由にすれば番号は関係なく
+# なり、設定の Sound タブで選んだ出口が全部のアプリに効く。
+#
+# (根っこの直しは CONFIG_SND_DUMMY を切ること。あれは音を捨てる
+#  試験用の作りもので、実機に要る場面が無い。ただしカーネルを
+#  作り直すことになるので、次にカーネルへ触るときにやる)
+cat > "$WORK/etc/asound.conf" <<'EOF'
+# myOS: ALSA を直接叩くアプリも pulseaudio へ通す。
+# カード番号に依存しなくなるので、Dummy がカード 0 を取っていても
+# 音は本物の出口から出る。
+pcm.!default { type pulse }
+ctl.!default { type pulse }
+EOF
+
+# Dummy は pulseaudio にも見せない。出口の一覧に「Dummy Output」が
+# 並ぶと、選べてしまうし、既定に選ばれると無音になる。
+# PULSE_IGNORE は module-udev-detect が見る印。
+mkdir -p "$WORK/etc/udev/rules.d"
+cat > "$WORK/etc/udev/rules.d/90-myos-no-dummy-sound.rules" <<'EOF'
+# myOS: 試験用の Dummy サウンドカードを pulseaudio から隠す。
+# CONFIG_SND_DUMMY=y のせいで実機にも出てくる。
+SUBSYSTEM=="sound", KERNEL=="card*", ATTR{id}=="Dummy", ENV{PULSE_IGNORE}="1"
+EOF
 
 # X を root 以外から起動できるようにする。
 # 起動するのは PID 1 (root) だが、セッションは一般ユーザーに落とすので、
