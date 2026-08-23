@@ -116,6 +116,26 @@ Click the program you want to use to open
   [x] Always use this program for .old files
 ```
 
+一覧に無いものも指せる。**こちらが並べたものしか選べない窓は、Windows
+と同じではない。** Windows の Open With には「参照」があって、どの
+プログラムでも選べる。myOS にはファイル選択の窓がまだ無いので、
+代わりに名前を打つ欄を置いた。
+
+```
+Or type another program:
+[ myos-term less            ]
+```
+
+`apt` で入れたものも、自分で置いたものも、これで指せる。無い名前を
+打ったときは、そう言って窓を開けたままにする。
+
+```
+"hexedit" was not found.
+```
+
+**無いものを exec して窓が消えるだけ、というのは今回直している症状
+そのもの**なので、先に見る。
+
 チェックを入れると `~/.myos/filetypes.conf` に 1 行足して、次から
 覚える。システムの表 (`/etc/myos`) は触らない。**書けるのは自分のぶん
 だけ**という myOS の決めのとおり。

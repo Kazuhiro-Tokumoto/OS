@@ -17,6 +17,11 @@
  * その場で選べて、必要なら次から覚える。**開けないより、選べるほうが
  * いい**という考え方は、音の出口を隠して詰んだときと同じ。
  *
+ * 一覧に無いものも指せる。Windows の Open With に「参照」があるのと同じで、
+ * **こちらが並べたものしか選べない窓は、Windows と同じではない**。
+ * myOS にはファイル選択の窓がまだ無いので、代わりに名前を打つ欄にした。
+ * apt で入れたものも、自分で置いたものも、これで指せる。
+ *
  * 「次からこれで開く」を入れると ~/.myos/filetypes.conf に 1 行足す。
  * システムの表 (/etc/myos) は触らない。書けるのは自分のぶんだけ、
  * という myOS の決めのとおり。
@@ -81,7 +86,12 @@ static int  avail[N_PROG];        /* 実体があるものの添字 */
 static int  n_avail = 0;
 static int  sel = 0;
 static int  remember = 0;
-static int  focus = 0;            /* 0=一覧 1=チェック 2=OK 3=Cancel */
+/* 0=一覧 1=名前を打つ欄 2=チェック 3=OK 4=Cancel */
+static int  focus = 0;
+#define N_FOCUS 5
+
+static X98Edit other;             /* 一覧に無いものを指すとき */
+static char    err[128] = "";
 
 /* --- 画面 ---------------------------------------------------------------- */
 static void focus_rect(int x, int y, int w, int h)
@@ -123,8 +133,14 @@ static void redraw(void)
                  i == sel ? x98.white : x98.text);
     }
 
+    /* 一覧に無いものを指す欄。Windows の「参照」にあたる。 */
+    int oy = LIST_Y + lh + 12;
+    x98_text(&x98, win, PAD, oy, "Or type another program:", x98.text);
+    x98_edit_draw(&x98, win, PAD, oy + 18, WIN_W - 2 * PAD, 20,
+                  &other, focus == 1);
+
     /* 「次からこれで開く」。拡張子が無いものは覚えようが無いので出さない。 */
-    int cy = LIST_Y + lh + 14;
+    int cy = oy + 46;
     if (ext[0]) {
         x98_bevel(&x98, win, PAD, cy, 13, 13, 0);
         x98_fill(&x98, win, PAD + 2, cy + 2, 9, 9, x98.white);
@@ -136,16 +152,18 @@ static void redraw(void)
         snprintf(b, sizeof(b), "Always use this program for .%s files", ext);
         x98_text(&x98, win, PAD + 20, cy + (13 - x98_text_h(&x98)) / 2 - 1,
                  b, x98.text);
-        if (focus == 1)
+        if (focus == 2)
             focus_rect(PAD + 17, cy - 2, x98_text_w(&x98, b) + 6, 17);
     }
+
+    if (err[0]) x98_text(&x98, win, PAD, cy + 22, err, x98.text);
 
     int by = win_h - BTN_H - PAD;
     int ox = WIN_W - 2 * BTN_W - PAD - 8;
     x98_button(&x98, win, ox, by, BTN_W, BTN_H, "OK", 0);
-    if (focus == 2) focus_rect(ox + 4, by + 4, BTN_W - 8, BTN_H - 8);
+    if (focus == 3) focus_rect(ox + 4, by + 4, BTN_W - 8, BTN_H - 8);
     x98_button(&x98, win, WIN_W - BTN_W - PAD, by, BTN_W, BTN_H, "Cancel", 0);
-    if (focus == 3)
+    if (focus == 4)
         focus_rect(WIN_W - BTN_W - PAD + 4, by + 4, BTN_W - 8, BTN_H - 8);
 }
 
@@ -167,16 +185,68 @@ static void remember_choice(const char *cmd)
     fclose(f);
 }
 
-/* 選んだもので開く。%1 をパスに差し替えて exec する。 */
-static void launch(void)
+/* その名前のプログラムが実際にあるか。
+ * 無いものを exec しても、窓が消えて何も起きないだけになる。
+ * それは今回直している症状そのものなので、先に見る。 */
+static int have_program(const char *name)
 {
-    const char *cmd = progs[avail[sel]].cmd;
+    if (strchr(name, '/')) return access(name, X_OK) == 0;
+
+    const char *p = getenv("PATH");
+    if (!p || !p[0]) p = "/usr/local/bin:/usr/bin:/bin";
+    while (*p) {
+        const char *e = strchr(p, ':');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        char full[PATH_MAX];
+        if (n > 0 && n < sizeof(full) - strlen(name) - 2) {
+            snprintf(full, sizeof(full), "%.*s/%s", (int)n, p, name);
+            if (access(full, X_OK) == 0) return 1;
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* 開く。打った名前があればそちらが勝つ (Windows の「参照」にあたる)。
+ * 戻り値 0 = 窓を閉じてよい。1 = 開けなかったので開いたまま直させる。 */
+static int launch(void)
+{
+    char user_cmd[FT_CMD];
+    const char *cmd;
+
+    char *typed = myos_trim(other.buf);
+    if (typed[0]) {
+        /* 打った名前をそのまま argv[0] にする。%1 は自分で足す。
+         * 引数まで打たれていたら、そこへパスを付け足す形にする。 */
+        if (strstr(typed, "%1"))
+            snprintf(user_cmd, sizeof(user_cmd), "%s", typed);
+        else
+            snprintf(user_cmd, sizeof(user_cmd), "%s %%1", typed);
+
+        char first[PATH_MAX];
+        snprintf(first, sizeof(first), "%s", typed);
+        char *sp = strchr(first, ' ');
+        if (sp) *sp = 0;
+
+        if (!have_program(first)) {
+            snprintf(err, sizeof(err), "\"%.60s\" was not found.", first);
+            return 1;
+        }
+        cmd = user_cmd;
+    } else {
+        cmd = progs[avail[sel]].cmd;
+    }
+
     if (remember) remember_choice(cmd);
 
     char store[FT_CMD + PATH_MAX + 64];
     char *av[FT_ARGV];
     int na = ft_argv(cmd, path, av, FT_ARGV, store, sizeof(store));
-    if (na <= 0) return;
+    if (na <= 0) {
+        snprintf(err, sizeof(err), "That command could not be used.");
+        return 1;
+    }
 
     XCloseDisplay(dpy);
     execvp(av[0], av);
@@ -213,8 +283,12 @@ int main(int argc, char **argv)
 
     /* 窓の背は中身で決める。決め打ちにすると、一覧が短いときに
      * 下が間延びして「まだ何かあるのか」と読まれる。 */
-    win_h = LIST_Y + (n_avail * ROW_H + 8) + 14 + (ext[0] ? 20 : 0)
-            + 14 + BTN_H + PAD;
+    win_h = LIST_Y + (n_avail * ROW_H + 8)
+            + 12 + 18 + 20            /* 「別のプログラム」の見出しと欄 */
+            + 8  + (ext[0] ? 20 : 0)  /* チェック */
+            + 26 + BTN_H + PAD;       /* エラー行のぶんを空けておく */
+
+    x98_edit_set(&other, "");
 
     x98_im_setup_locale();
     dpy = XOpenDisplay(NULL);
@@ -258,31 +332,38 @@ int main(int argc, char **argv)
         case KeyPress: {
             KeySym ks = 0;
             char kb[32];
-            x98_lookup(ic, &ev.xkey, kb, sizeof(kb), &ks);
+            int kn = x98_lookup(ic, &ev.xkey, kb, sizeof(kb), &ks);
 
+            err[0] = 0;
             if (ks == XK_Escape) goto done;
             else if (ks == XK_Return || ks == XK_KP_Enter) {
-                if (focus == 3) goto done;
-                if (focus == 1) { remember = !remember; }
-                else            { launch(); goto done; }
-            } else if (ks == XK_space) {
-                if (focus == 1)      remember = !remember;
-                else if (focus == 2) { launch(); goto done; }
-                else if (focus == 3) goto done;
+                if (focus == 4) goto done;
+                else if (focus == 2) remember = !remember;
+                else if (launch() == 0) goto done;
             } else if (ks == XK_Tab) {
                 /* 拡張子が無いときはチェックを出していないので飛ばす。
                  * 見えないところにフォーカスが行くと、押しても何も
                  * 起きない場所で止まったように見える。 */
                 int back = (ev.xkey.state & ShiftMask) ? -1 : 1;
                 do {
-                    focus = (focus + back + 4) % 4;
-                } while (!ext[0] && focus == 1);
+                    focus = (focus + back + N_FOCUS) % N_FOCUS;
+                } while (!ext[0] && focus == 2);
+            } else if (ks == XK_space && focus != 1) {
+                if (focus == 2)      remember = !remember;
+                else if (focus == 3) { if (launch() == 0) goto done; }
+                else if (focus == 4) goto done;
             } else if (ks == XK_Up || ks == XK_Down) {
                 if (focus == 0) {
                     sel += (ks == XK_Down) ? 1 : -1;
                     if (sel < 0) sel = 0;
                     if (sel >= n_avail) sel = n_avail - 1;
                 }
+            } else if (ks == XK_BackSpace) {
+                if (focus == 1) x98_edit_backspace(&other);
+            } else if (focus == 1 && kn > 0 &&
+                       (unsigned char)kb[0] >= 0x20) {
+                kb[kn] = 0;
+                x98_edit_insert(&other, kb, kn);
             }
             redraw();
             break;
@@ -301,17 +382,25 @@ int main(int argc, char **argv)
                 }
             }
 
-            int cy = LIST_Y + lh + 14;
+            int oy = LIST_Y + lh + 12;
+            if (my >= oy + 18 && my < oy + 38 &&
+                mx >= PAD && mx < WIN_W - PAD)
+                focus = 1;
+
+            int cy = oy + 46;
             if (ext[0] && my >= cy - 2 && my < cy + 15 &&
                 mx >= PAD && mx < WIN_W - PAD) {
                 remember = !remember;
-                focus = 1;
+                focus = 2;
             }
 
             int by = win_h - BTN_H - PAD;
             int ox = WIN_W - 2 * BTN_W - PAD - 8;
             if (my >= by && my < by + BTN_H) {
-                if (mx >= ox && mx < ox + BTN_W) { launch(); goto done; }
+                if (mx >= ox && mx < ox + BTN_W) {
+                    err[0] = 0;
+                    if (launch() == 0) goto done;
+                }
                 if (mx >= WIN_W - BTN_W - PAD && mx < WIN_W - PAD) goto done;
             }
             redraw();
