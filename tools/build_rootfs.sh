@@ -692,20 +692,44 @@ done
 # 印が無いころは、電源を切るたびに下の cat が走って Xorg のログ全文が
 # 画面に流れていた。「シャットダウンでログが滝のように出る」の正体。
 if [ -e /run/myos-shutdown ]; then
-    # 何も出さない。画面を消して、電源が落ちるのを待つだけ。
-    # このあと myos-poweroff が終了の画面を描く。
+    # 画面を消して、myos-poweroff が終了の画面を描くのを待つ。
+    #
+    # ただし待ちっぱなしにはしない。ここを無条件の無限ループにしていた
+    # せいで、myos-poweroff が電源を切れなかったときに
+    # 「画面は真っ暗、文字は打てるが何も起きない」になった。誰も stdin を
+    # 読んでいないので、使う人には死んだようにしか見えない。逃げ道も無い。
+    #
+    # 落ちるはずの時間 (SIGTERM 2 秒 + 終了画面 + SIGKILL 2 秒 + sync) の
+    # 倍を見て、それでも生きていたら電源は落ちなかったのだと判断する。
     printf '\033[2J\033[H' >&3 2>/dev/null
     echo "[myos-init] X exited with $rc (shutting down)"
-    while :; do sleep 5; done
+    n=0
+    while [ "$n" -lt 30 ]; do
+        sleep 1
+        n=$((n + 1))
+    done
+    # ここに来た = 電源が落ちなかった。黙って座り込まない。
+    exec >&3 2>&4
+    echo
+    echo "[myos-init] shutdown was requested but the machine is still on."
+    echo "[myos-init] myos-poweroff did not finish. Turn it off by hand,"
+    echo "[myos-init] or use this shell."
+    echo
+    exec /bin/sh
 fi
 
 # ここから先は「X が落ちた」= 異常なので、画面に戻して理由を見せる。
 # rc は exec より前に取っておくこと。順番を逆にすると exec の結果になる。
 exec >&3 2>&4
 echo
-echo "[myos-init] X exited with $rc. Xorg log follows:"
-cat /var/log/Xorg.0.log 2>&1
-echo "[myos-init] boot log is in $BOOTLOG"
+echo "[myos-init] X exited with $rc."
+# 先に (EE) だけを出す。ログ全文を流すと肝心の行が画面の上へ消える
+# (1 画面 25 行に対してログは数百行ある)。原因はほぼ必ず (EE) にある。
+echo "[myos-init] --- errors ---"
+grep -E "\(EE\)" /var/log/Xorg.0.log 2>/dev/null | tail -12
+echo "[myos-init] --- last 20 lines ---"
+tail -20 /var/log/Xorg.0.log 2>/dev/null
+echo "[myos-init] full log: /var/log/Xorg.0.log   boot log: $BOOTLOG"
 
 # PID 1 は絶対に終了してはいけない (終了するとカーネルパニックになる)。
 # 失敗しても shell を出して調べられるようにしておく。
