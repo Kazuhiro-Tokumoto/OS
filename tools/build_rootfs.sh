@@ -2235,11 +2235,18 @@ echo "  出荷時の /etc: $(wc -l < "$WORK/etc/myos/etc.sums") 個"
 # 入っているパッケージの一覧。これと見比べれば「あとから入れたもの」が
 # 分かる。ルートを入れ替えると apt で入れたものは付いてこないので、
 # せめて**何を入れ直せばいいか**は分かるようにしておく。
-# 依存で入ったものまで並べると数百行になって読めない。「自分で入れた
-# もの」だけを数える。あとで入れ直すときも、これだけ入れれば依存は
-# apt が連れてくる。
+# 2 つ記録する。用途が違う。
+#
+#   packages.base      自分で入れたもの (apt-mark showmanual)。
+#                      人に見せる用。数百行だと読めない。
+#   packages.base.all  依存も含めた全部。
+#                      入れ替えるときに「どのファイルを写すか」を
+#                      決めるのはこちら。依存を落とすと動かない。
 chroot "$WORK" apt-mark showmanual 2>/dev/null |
     sort -u > "$WORK/etc/myos/packages.base"
+chroot "$WORK" dpkg-query -W -f '${binary:Package}\n' 2>/dev/null |
+    sort -u > "$WORK/etc/myos/packages.base.all"
+echo "  出荷時のパッケージ (全部): $(wc -l < "$WORK/etc/myos/packages.base.all") 個"
 echo "  出荷時のパッケージ: $(wc -l < "$WORK/etc/myos/packages.base") 個"
 
 echo "=== 完成 ==="

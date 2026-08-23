@@ -123,26 +123,121 @@ carry_etc() {
     return 0
 }
 
-# --- あとから入れたものを数える ---------------------------------------------
+# --- あとから入れたものを新しいルートへ写す ---------------------------------
 #
-# ルートを丸ごと入れ替えるので、apt で入れたものは付いてこない。これは
-# A/B の性質上どうにもならない。**せめて何を入れ直せばいいかは残す。**
-# 黙って消えて、次に使おうとしたときに気づくのが一番困る。
+# ルートを丸ごと入れ替えるので、apt で入れたものは新しい側に無い。
+# 「一覧を残すので入れ直してください」で済ませていたが、それは逃げ。
+# **入れ替えたらアプリが消える OS** は使い物にならない。
+#
+# 実際に写す。どのファイルがどのパッケージのものかは dpkg が知っている
+# ので、聞けばいい。
+#
+#   1. 出荷時に入っていなかったパッケージを数える (依存も含めて全部)
+#   2. dpkg -L でファイルを引いて、新しい側へ写す
+#   3. dpkg の帳簿 (info と status) も写す。写さないと apt から見て
+#      「入っていない」ことになり、次の更新や削除で食い違う
+#   4. ldconfig をかけ直す。写しただけでは共有ライブラリの索引が古い
+#
+# 新しい側に既にあるファイルは触らない。新しい版のものが正しい。
+#
+# 同じ Debian の版 (bookworm) の中での話なので、共有ライブラリの
+# soname は変わらない。だから写した実行ファイルはそのまま動く。
+# 版をまたぐときは、この前提が崩れるので考え直すこと。
 carry_apps() {
     cu="$1"; nw="$2"
-    base="$cu/etc/myos/packages.base"
-    [ -f "$base" ] || return 0
-
-    apt-mark showmanual 2>/dev/null | sort -u > "$WORK/pkg.now"
-    comm -13 "$base" "$WORK/pkg.now" > "$nw/etc/myos/packages.extra" 2>/dev/null
-
-    n=$(wc -l < "$nw/etc/myos/packages.extra" 2>/dev/null || echo 0)
-    if [ "$n" -gt 0 ]; then
-        echo "myos-update: あとから入れたもの $n 個は付いてきません。"
-        echo "myos-update: 新しいほうで最初に起動したときに入れ直せます。"
-    else
-        rm -f "$nw/etc/myos/packages.extra"
+    base="$cu/etc/myos/packages.base.all"
+    if [ ! -f "$base" ]; then
+        # 古い版から上げたとき。写す判断ができないので、せめて
+        # 何を入れ直せばいいかを残す。
+        b2="$cu/etc/myos/packages.base"
+        [ -f "$b2" ] || return 0
+        apt-mark showmanual 2>/dev/null | sort -u > "$WORK/pkg.now"
+        comm -13 "$b2" "$WORK/pkg.now" > "$nw/etc/myos/packages.extra"
+        if [ -s "$nw/etc/myos/packages.extra" ]; then
+            echo "myos-update: 出荷時の記録が足りないので、アプリは写せません。"
+            echo "myos-update: 新しいほうの初回起動で入れ直せます。"
+        else
+            rm -f "$nw/etc/myos/packages.extra"
+        fi
+        return 0
     fi
+
+    dpkg-query -W -f '${binary:Package}\n' 2>/dev/null |
+        sort -u > "$WORK/pkg.all.now"
+    comm -13 "$base" "$WORK/pkg.all.now" > "$WORK/pkg.extra.all"
+
+    cnt=$(wc -l < "$WORK/pkg.extra.all")
+    [ "$cnt" -gt 0 ] || { echo "myos-update: あとから入れたものはありません"; return 0; }
+
+    echo "myos-update: あとから入れたもの $cnt 個を写しています"
+
+    before=$(du -sk "$nw" 2>/dev/null | cut -f1)
+
+    while IFS= read -r pkg; do
+        [ -n "$pkg" ] || continue
+        dpkg -L "$pkg" 2>/dev/null | while IFS= read -r f; do
+            # /etc は carry_etc の担当。あちらは「手が入ったか」を見て
+            # いるので、二重に写すと判断を上書きしてしまう。
+            case "$f" in /etc|/etc/*) continue ;; esac
+
+            # 実体が無いもの (dpkg -L は消されたファイルも並べる) は飛ばす。
+            # 壊れたリンクは -e が偽になるので -L でも見る。
+            if [ ! -e "$cu$f" ] && [ ! -L "$cu$f" ]; then continue; fi
+
+            if [ -d "$cu$f" ] && [ ! -L "$cu$f" ]; then
+                mkdir -p "$nw$f" 2>/dev/null
+                continue
+            fi
+
+            # 新しい側にあるものは触らない。新しい版のものが正しい。
+            if [ -e "$nw$f" ] || [ -L "$nw$f" ]; then continue; fi
+
+            mkdir -p "$(dirname "$nw$f")" 2>/dev/null
+            cp -a "$cu$f" "$nw$f" 2>/dev/null
+        done
+
+        # dpkg の帳簿。list / md5sums / postinst など。
+        for m in "$cu/var/lib/dpkg/info/$pkg."* \
+                 "$cu/var/lib/dpkg/info/$pkg:"*; do
+            [ -e "$m" ] || continue
+            cp -a "$m" "$nw/var/lib/dpkg/info/" 2>/dev/null
+        done
+    done < "$WORK/pkg.extra.all"
+
+    # status の段落を足す。ここを写さないと apt から見て「入っていない」
+    # ことになり、次の更新で消されたり二重に入れられたりする。
+    # 段落の区切りを確かめてから足す。dpkg は**空行で**段落を切るので、
+    # 詰めて書くと前のパッケージと 1 つに読まれて帳簿が壊れる。
+    # 空行が余分にあるぶんには読み飛ばされるので、必ず 1 つ入れる。
+    printf '\n' >> "$nw/var/lib/dpkg/status"
+
+    # 一覧を読み終えてから段落モードにする。RS='' を先に立てると、
+    # getline も段落モードで読んでしまい、一覧が丸ごと 1 行として
+    # 入る (= 何にも一致しない)。手元で通して初めて気づいた。
+    awk -v list="$WORK/pkg.extra.all" '
+        BEGIN {
+            while ((getline p < list) > 0) if (p != "") want[p] = 1
+            RS = ""
+        }
+        {
+            name = ""
+            n = split($0, L, "\n")
+            for (i = 1; i <= n; i++)
+                if (L[i] ~ /^Package: /) { name = substr(L[i], 10); break }
+            if (name in want) printf "%s\n\n", $0
+        }' "$cu/var/lib/dpkg/status" >> "$nw/var/lib/dpkg/status" 2>/dev/null
+
+    # 共有ライブラリの索引を作り直す。写しただけでは古いまま。
+    chroot "$nw" ldconfig 2>/dev/null || true
+
+    # 何を写したかは残しておく。うまく動かないときの入れ直し用。
+    apt-mark showmanual 2>/dev/null | sort -u > "$WORK/pkg.now"
+    comm -13 "$cu/etc/myos/packages.base" "$WORK/pkg.now" \
+        > "$nw/etc/myos/packages.carried" 2>/dev/null
+
+    after=$(du -sk "$nw" 2>/dev/null | cut -f1)
+    mb=$(( (after - before) / 1024 ))
+    echo "myos-update: 約 ${mb} MB を写しました"
 }
 
 # --- 使う人を新しいルートへ連れて行く ---------------------------------------
