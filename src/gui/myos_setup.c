@@ -251,8 +251,16 @@ static int valid_user(const char *s)
 /* --- 適用 ---------------------------------------------------------------- */
 static int apply_all(void)
 {
+    /* render を入れてあるのは /dev/dri/renderD128 のため。
+     * Debian ではあれが root:render 0660 で、ここに入っていないと
+     * GL のクライアントが GPU を直接開けない。DRI3 が通っていれば
+     * X サーバーから fd を貰えるので要らないのだが、通らなかった
+     * ときに黙って llvmpipe (CPU 描画) に落ちる。落ち方が静かで
+     * 気づけないので、最初から入れておく。
+     * 存在しない group を並べると useradd が丸ごと失敗するが、
+     * render は Debian の base-passwd にあるので必ず居る。 */
     char *ua[] = { "useradd", "-m", "-s", "/bin/bash",
-                   "-G", "sudo,audio,video,plugdev,cdrom,dialout",
+                   "-G", "sudo,audio,video,render,plugdev,cdrom,dialout",
                    ed_user.buf, NULL };
     int rc = run(ua);
     if (rc != 0) {
