@@ -1888,6 +1888,41 @@ chmod 755 "$WORK/usr/local/bin/myos-prompt"
 
 ls -l "$WORK/usr/local/bin/"
 
+# --- OpenGL の様子を見る -----------------------------------------------------
+# 前はデスクトップから glxgears を直に起動していた。あれは fps を標準出力に
+# 書くので、アイコンから起動すると受け取る者が居ない。歯車が回るだけで、
+# 数字はどこにも出なかった。「動いた」以上のことが何も分からない。
+#
+# そもそも知りたいのは fps より「何が描いているか」のほう。
+#
+#   Accelerated: no  / llvmpipe   CPU が描いている。3D は実用速度にならない
+#   Accelerated: yes / それ以外   GPU が描いている
+#
+# 端末を出して、素性と fps の両方をそこへ流す。
+cat > "$WORK/usr/local/bin/myos-gltest" <<'EOF'
+#!/bin/sh
+exec /usr/local/bin/myos-term sh -c '
+echo "--- 何が描いているか ---"
+if ! LC_ALL=C glxinfo -B 2>/dev/null | sed "s/^ *//" |
+     grep -E "^(direct rendering|Vendor|Device|Accelerated|Video memory|OpenGL vendor|OpenGL renderer|OpenGL version|OpenGL core profile version)"
+then
+    LC_ALL=C glxinfo 2>/dev/null |
+        grep -E "^OpenGL (vendor|renderer|version) string" ||
+        echo "glxinfo が動きません (X に繋がっていない?)"
+fi
+echo
+echo "Accelerated: yes / llvmpipe 以外 = GPU が描いている"
+echo "Accelerated: no  / llvmpipe     = CPU が描いている (3D は実用速度にならない)"
+echo
+echo "--- 5 秒ごとに fps。窓を閉じると止まる ---"
+glxgears
+echo
+echo "終わり。Enter で閉じる"
+read x
+'
+EOF
+chmod 755 "$WORK/usr/local/bin/myos-gltest"
+
 echo "=== デスクトップのリンク ==="
 # ここに 1 行足すだけでデスクトップにアイコンが増える。
 # ファイルマネージャの右クリックからも追記される。
@@ -1899,7 +1934,7 @@ My Computer|computer|/usr/local/bin/myos-files /
 My Documents|folder|/usr/local/bin/myos-files ~
 Internet|globe|/usr/local/bin/myos-browser
 Java Demo|java|/usr/local/bin/myos-java -jar /usr/local/share/myos/hello.jar
-OpenGL Test|app|/usr/bin/glxgears
+OpenGL Test|app|/usr/local/bin/myos-gltest
 MS-DOS Prompt|app|/usr/local/bin/myos-prompt
 Notepad|file|/usr/local/bin/myos-notepad
 Settings|app|/usr/local/bin/myos-settings
