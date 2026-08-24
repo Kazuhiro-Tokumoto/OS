@@ -727,6 +727,25 @@ if [ -x /usr/bin/freshclam ] && ! ls /var/lib/clamav/*.c[vl]d >/dev/null 2>&1; t
     (sleep 20; /usr/bin/freshclam --quiet) &
 fi
 
+# --- CPU を全力で回す -----------------------------------------------------
+# カーネルの既定のガバナーが userspace になっている
+# (CONFIG_CPU_FREQ_DEFAULT_GOV_USERSPACE=y)。userspace は
+# 「誰かが周波数を指定するまで動かない」という代物で、
+# **誰も指定しない**。acpi-cpufreq が使われる機械では、最低の
+# 周波数に張り付いたまま動くことになる (i5-4460 なら 800MHz)。
+# 3.2GHz の CPU が 4 分の 1 で回っていたら、何をやってももたつく。
+#
+# intel_pstate が active で動く機械では powersave / performance しか
+# 選べず、この設定は無視されるので害は無い。どちらの機械でも
+# performance にしておく。据え置きの機械で電気を惜しむ理由が無いし、
+# 98 風の OS が「操作がもたつく」のは致命的。
+if [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
+    for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        echo performance > "$g" 2>/dev/null || true
+    done
+    echo "[myos-init] cpufreq: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null) / $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)"
+fi
+
 # --- 音 -----------------------------------------------------------------
 # ALSA は初期状態でミュートになっている機械が多い。外しておかないと
 # 「音が出ない = 壊れている」と思われる。原因が見えない類の不具合。
@@ -1186,6 +1205,28 @@ if [ -d "$MODSRC" ]; then
         echo "--- /lib/modules/$kv ($(du -sh "$WORK/lib/modules/$kv" | cut -f1)) ---"
     done
 fi
+
+echo "=== Mesa の設定 (Minecraft 向け) ==="
+# Mesa の既定 (00-mesa-defaults.conf) は minecraft-launcher に
+# mesa_glthread を効かせているが、**ゲーム本体は launcher が起こす
+# 別の java プロセス**なので、そこには効かない。
+#
+# glthread は GL の呼び出しを別スレッドへ流す仕組みで、描画が重い
+# 機械ほど効く。LWJGL のように「1 本のスレッドから GL を大量に呼ぶ」
+# 作りのアプリが一番得をする。Minecraft を動かすのがこの OS の
+# 目当ての 1 つなので、java にも効かせる。
+mkdir -p "$WORK/usr/share/drirc.d"
+cat > "$WORK/usr/share/drirc.d/99-myos.conf" <<'EOF'
+<?xml version="1.0" standalone="yes"?>
+<!-- myOS: Minecraft (java) を速くする -->
+<driconf>
+    <device>
+        <application name="Java (Minecraft など LWJGL のアプリ)" executable="java">
+            <option name="mesa_glthread" value="true" />
+        </application>
+    </device>
+</driconf>
+EOF
 
 echo "=== Xorg の設定 (modesetting + glamor) ==="
 # GPU を使う。カーネルの DRM (i915 / amdgpu / nouveau) の上で
