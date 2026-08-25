@@ -130,6 +130,12 @@ NET="iproute2 isc-dhcp-client $WIFI"
 # libasound2-plugins は ALSA を直接叩くアプリを pulseaudio へ
 # 流すのに要る (下の /etc/asound.conf)。無いと "default" が
 # カード 0 に落ち、そこが Dummy だと黙って無音になる。
+# gnome-keyring は「鍵束」の実体。libsecret はこれを呼ぶだけの
+# 側なので、これが無いとアプリはパスワードを保存できない。
+# Minecraft のランチャーはログインの控えをここに入れるので、
+# 無いと **起動のたびにログインし直し** になる。実機で踏んだ。
+KEYRING="gnome-keyring"
+
 SOUND="alsa-utils pulseaudio pulseaudio-utils libopenal1 \
        libasound2-plugins"
 
@@ -246,6 +252,7 @@ apt_install "ネットワーク" "--no-install-recommends" $NET
 
 echo "=== 音 ==="
 apt_install "音" "--no-install-recommends" $SOUND
+apt_install "鍵束" "--no-install-recommends" $KEYRING
 apt_install "時刻合わせ" "--no-install-recommends" $TIMESYNC
 
 echo "=== 日本語フォント ==="
@@ -349,10 +356,34 @@ pcm.!default { type pulse }
 ctl.!default { type pulse }
 EOF
 
+# --- セキュリティキー (FIDO / U2F) ----------------------------------------
+# 置き場を先に作る。debootstrap の直後には無いことがあり、
+# 無いところへ cat > を撃つと空振りしたまま先へ進んでしまう。
+mkdir -p "$WORK/etc/udev/rules.d"
+
+# 鍵は /dev/hidraw* として出てくる。既定は root だけが触れるので、
+# ブラウザ (一般ユーザー) からは使えない。**挿しても無反応**になる。
+#
+# 普通のデスクトップは udev の TAG+="uaccess" と systemd-logind で
+# 「いま画面に居る人」に ACL を張る。myOS は logind を使っていないので
+# あの仕掛けは働かない。group で開ける。
+#
+# どれが鍵かは libfido2 の 60-fido-id.rules が既に見分けていて、
+# ID_SECURITY_TOKEN=1 を立ててくれる (HID の usage page 0xF1D0 を見る
+# ので、U2F だけの古い鍵も FIDO2 の鍵も両方拾う)。こちらはその印を
+# 見て権限を開けるだけ。60 番のあとに走るよう 70 番にする。
+cat > "$WORK/etc/udev/rules.d/70-myos-security-token.rules" <<'EOF'
+# myOS: セキュリティキーを使う人から触れるようにする。
+# logind が居ないので uaccess は使えない。plugdev で開ける。
+ACTION=="remove", GOTO="myos_token_end"
+SUBSYSTEM=="hidraw", ENV{ID_SECURITY_TOKEN}=="1", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ENV{ID_SECURITY_TOKEN}=="1", MODE="0660", GROUP="plugdev"
+LABEL="myos_token_end"
+EOF
+
 # Dummy は pulseaudio にも見せない。出口の一覧に「Dummy Output」が
 # 並ぶと、選べてしまうし、既定に選ばれると無音になる。
 # PULSE_IGNORE は module-udev-detect が見る印。
-mkdir -p "$WORK/etc/udev/rules.d"
 cat > "$WORK/etc/udev/rules.d/90-myos-no-dummy-sound.rules" <<'EOF'
 # myOS: 試験用の Dummy サウンドカードを pulseaudio から隠す。
 # CONFIG_SND_DUMMY=y のせいで実機にも出てくる。
@@ -997,6 +1028,30 @@ kl=$(sed -n 's/^XKBLAYOUT="\(.*\)"$/\1/p' /etc/default/keyboard 2>/dev/null | he
 
 if command -v fcitx5 >/dev/null 2>&1; then
     fcitx5 -d >/dev/null 2>&1
+fi
+
+# --- 鍵束 (secret service) ------------------------------------------------
+# アプリがパスワードを保存する先。D-Bus の org.freedesktop.secrets を
+# 実装しているのが gnome-keyring-daemon で、libsecret はそれを呼ぶ
+# だけの側。**実体が居ないと保存が全部失敗する。**
+#
+# Minecraft のランチャーはログインの控え (リフレッシュトークン) を
+# ここに入れる。無いと起動のたびにログインし直しになる。実機で踏んだ。
+#
+# 空のパスワードで開ける。本来はログインのパスワードで開けるもの
+# (PAM が渡す) だが、myOS は表示マネージャも PAM のセッションも
+# 使っていないので、渡してくれる者が居ない。かといって開けないままだと
+# アプリが黙って保存に失敗する。1 人で使う 98 風の機械なので、
+# 「保存できないより、パスワード無しで保存できるほうがまし」を採る。
+# (家に鍵をかけるかどうかの話で、鍵束の中身は home の中にある。
+#  home が読める相手には、どのみち全部読まれる)
+if command -v gnome-keyring-daemon >/dev/null 2>&1; then
+    kr=$(printf '\n' | gnome-keyring-daemon --daemonize --unlock \
+                        --components=secrets 2>/dev/null)
+    if [ -n "$kr" ]; then
+        eval "$kr"
+        export GNOME_KEYRING_CONTROL
+    fi
 fi
 
 # 音。pulseaudio はユーザーごとに 1 つ動く作りなのでここで上げる。
