@@ -346,13 +346,80 @@ kernel_version() {
 #
 # いま動いているルートは A/B の選び方から必ず対象外になるので、
 # ここで外して困る相手は無い。
+# その場所を掴んでいる処理を並べる。lsof も fuser も入れていないので
+# /proc を自分で歩く。umount が「busy」と言ったときに、**何が悪いのか
+# 分からないまま詰む**のを避けるため。
+who_uses() {
+    for d in /proc/[0-9]*; do
+        pid=${d#/proc/}
+        hit=0
+        for l in "$d/cwd" "$d/root" "$d/exe"; do
+            t=$(readlink "$l" 2>/dev/null) || continue
+            case "$t" in "$1"|"$1"/*) hit=1; break ;; esac
+        done
+        if [ "$hit" = 0 ]; then
+            for l in "$d"/fd/*; do
+                t=$(readlink "$l" 2>/dev/null) || continue
+                case "$t" in "$1"|"$1"/*) hit=1; break ;; esac
+            done
+        fi
+        [ "$hit" = 1 ] &&
+            echo "    pid $pid  $(tr '\0' ' ' < "$d/cmdline" 2>/dev/null |
+                                  cut -c1-60)"
+    done
+}
+
+# その区画を mkfs できる状態か。
+#
+# /proc/mounts から消えていても、**まだ使えるとは限らない**。
+# umount -l は名前空間から外すだけで、最後の参照が閉じるまで中では
+# マウントされたままなので、O_EXCL で開けない。mkfs も同じやり方で
+# 確かめているので、ここで先に見ておけば「mkfs が謎に失敗する」
+# ではなく「まだ掴まれている」と言える。
+dev_free() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import os, sys
+try:
+    os.close(os.open(sys.argv[1], os.O_RDONLY | os.O_EXCL))
+except OSError:
+    sys.exit(1)
+PY
+}
+
+# 指定した区画が **どこかに** マウントされていたら外す。
+#
+# 入れ替え先を mkfs する前に要る。実機で
+#
+#   /dev/sda5 を空けています
+#   /dev/sda5 is mounted; will not make a filesystem here!
+#   myos-update: /dev/sda5 を空けられません
+#
+# と止まった。前の apply-system が途中で転んで、$WORK/mnt を
+# 外さないまま死んでいたのが原因。mkfs は「マウント中の区画は
+# 触らない」という正しい判断をしただけで、悪いのはこちら。
+#
+# いま動いているルートは A/B の選び方から必ず対象外になるので、
+# ここで外して困る相手は無い。
 free_dev() {
     n=0
     while [ "$n" -lt 8 ]; do
         mp=$(awk -v d="$1" '$1 == d { print $2; exit }' /proc/mounts)
-        [ -n "$mp" ] || return 0
+        [ -n "$mp" ] || break
         echo "$1 が $mp にあるので外します"
-        umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || return 1
+        if ! umount "$mp" 2>/dev/null; then
+            echo "  すぐには外せません。掴んでいるのは:"
+            who_uses "$mp"
+            umount -l "$mp" 2>/dev/null || return 1
+        fi
+        n=$((n + 1))
+    done
+
+    # 名前空間から消えても中でまだ開いていることがある (umount -l)。
+    # 少し待って様子を見る。
+    n=0
+    while [ "$n" -lt 10 ]; do
+        dev_free "$1" && return 0
+        sleep 1
         n=$((n + 1))
     done
     return 1
@@ -589,7 +656,8 @@ apply-system)
          EXIT INT TERM
 
     echo "$target を空けています"
-    free_dev "$target" || die "$target のマウントを外せません"
+    free_dev "$target" || die "$target をまだ誰かが掴んでいます。
+いったん再起動してから、もう一度お試しください。"
     mkfs.ext4 -F -q -m 0 -L myos "$target" || die "$target を空けられません"
 
     mkdir -p "$WORK/mnt" "$WORK/sq"
