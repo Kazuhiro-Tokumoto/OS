@@ -1456,6 +1456,9 @@ cp "$ROOTDIR/src/install/myos-install-init"    "$WORK/myos-install-init"
 cp "$ROOTDIR/src/install/myos-install-session" "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/install/myos-writeboot"       "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/install/myos-mkfwinit"        "$WORK/usr/local/bin/"
+# NVIDIA の公式ドライバを入れる口。95 の「ディスク使用...」と同じで、
+# ドライバ本体は使う人が NVIDIA から落としてくる。こちらは仕組みだけ。
+cp "$ROOTDIR/src/gui/myos-nvidia"             "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-wifi"                "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-pkg"                "$WORK/usr/local/bin/"
 cp "$ROOTDIR/src/gui/myos-browser"            "$WORK/usr/local/bin/"
@@ -1465,6 +1468,7 @@ chmod 755 "$WORK/myos-install-init" \
           "$WORK/usr/local/bin/myos-install-session" \
           "$WORK/usr/local/bin/myos-writeboot" \
           "$WORK/usr/local/bin/myos-mkfwinit" \
+          "$WORK/usr/local/bin/myos-nvidia" \
           "$WORK/usr/local/bin/myos-wifi" \
           "$WORK/usr/local/bin/myos-pkg" \
           "$WORK/usr/local/bin/myos-browser" \

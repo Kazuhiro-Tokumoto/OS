@@ -100,8 +100,12 @@ jobs:
         id: kcache
         uses: actions/cache@v4
         with:
-          path: build/bzImage
-          key: bzImage-${{ env.KVER }}-${{ hashFiles('tools/build_kernel.sh') }}
+          # ヘッダも一緒にしまう。木は下で消してしまうので、
+          # キャッシュが当たった回に作り直すことができない。
+          path: |
+            build/bzImage
+            build/kheaders.tar.zst
+          key: bzImage-${{ env.KVER }}-${{ hashFiles('tools/build_kernel.sh', 'tools/make_kheaders.sh') }}
 
       - name: カーネルをビルド
         if: steps.kcache.outputs.cache-hit != 'true'
@@ -109,9 +113,15 @@ jobs:
           sudo -E sh tools/build_kernel.sh "$KDIR" "$KVER"
           sudo cp "$KDIR/linux-$KVER/arch/x86/boot/bzImage" build/bzImage
           sudo chown "$USER" build/bzImage
+          # 外から持ってきたモジュール (NVIDIA の公式ドライバなど) を
+          # 作るのに要るヘッダを固める。Debian の linux-headers は
+          # 使えない。版が同じでも .config が違えば Module.symvers の
+          # チェックサムが合わず、作ったモジュールは弾かれる。
+          sudo sh tools/make_kheaders.sh "$KDIR/linux-$KVER" build/kheaders.tar.zst
+          sudo chown "$USER" build/kheaders.tar.zst
           # 木は 3GB ほどある。ISO には要らないので消して空きを戻す。
           sudo rm -rf "$KDIR"
-          ls -l build/bzImage
+          ls -l build/bzImage build/kheaders.tar.zst
 
       # 次の版で上げる桁を出しておく。
       # x.y.z の決めは docs/release-1.0.md の「版の付け方」。
@@ -223,6 +233,19 @@ jobs:
               > "myos-kernel-${{ steps.ver.outputs.version }}.bzImage.sha256"
           cat "myos-kernel-${{ steps.ver.outputs.version }}.bzImage.sha256"
 
+      # カーネルのヘッダも置く。NVIDIA の公式ドライバを入れたい人が
+      # 使う (myos-nvidia setup がこれを取ってくる)。12MB ほど。
+      # 配るのは自作カーネルのソースの一部 (GPL) だけで、
+      # NVIDIA のものは 1 バイトも含まない。
+      - name: カーネルのヘッダを置く
+        run: |
+          cp build/kheaders.tar.zst \
+             "build/myos-kheaders-${{ steps.ver.outputs.version }}.tar.zst"
+          cd build && sha256sum \
+             "myos-kheaders-${{ steps.ver.outputs.version }}.tar.zst" \
+             > "myos-kheaders-${{ steps.ver.outputs.version }}.tar.zst.sha256"
+          cat "myos-kheaders-${{ steps.ver.outputs.version }}.tar.zst.sha256"
+
       # ルート (squashfs) も単体で置く。これがあると、入れ直さずに
       # システムまるごと入れ替えられる。myos-update が使っていないほうの
       # ルート区画へ展開し、ペイロードテーブルの root= を書き換える。
@@ -275,8 +298,10 @@ jobs:
           fi
           K="myos-kernel-${{ steps.ver.outputs.version }}.bzImage"
           R="myos-root-${{ steps.ver.outputs.version }}.squashfs"
+          H="myos-kheaders-${{ steps.ver.outputs.version }}.tar.zst"
           gh release upload "$TAG" \
             "build/$ISO" "build/$ISO.sha256" \
             "build/$K" "build/$K.sha256" \
-            "build/$R" "build/$R.sha256" --clobber
+            "build/$R" "build/$R.sha256" \
+            "build/$H" "build/$H.sha256" --clobber
           gh release view "$TAG" --json url --jq .url

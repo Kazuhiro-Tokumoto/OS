@@ -187,6 +187,8 @@ def main():
     safe_gfx = None
     want_info = False
     dump_kernel = None
+    cmd_add = []
+    cmd_del = []
 
     # --kernel を渡すと、起動メディアではなくその bzImage を書く。
     # インストール後にカーネルだけ入れ替えるための口。
@@ -210,6 +212,10 @@ def main():
             switch_root = argv[i + 1]; i += 2
         elif a == "--safe-graphics" and i + 1 < len(argv):
             safe_gfx = argv[i + 1]; i += 2
+        elif a == "--cmdline-add" and i + 1 < len(argv):
+            cmd_add.append(argv[i + 1]); i += 2
+        elif a == "--cmdline-del" and i + 1 < len(argv):
+            cmd_del.append(argv[i + 1]); i += 2
         else:
             rest.append(a); i += 1
 
@@ -303,10 +309,12 @@ def main():
     # 控えは今までどおり LBA 21 へ写す。だから **起動中に R を押せば
     # 古いテーブルで立ち、古いルートに戻る**。カーネルのために作った
     # 戻り道が、そのままルートにも効く。新しい仕掛けは要らない。
-    if switch_root or safe_gfx:
+    if switch_root or safe_gfx or cmd_add or cmd_del:
         if not rest:
             die("usage: myos-writeboot --switch-root <rootdev> <disk>\n"
-                "       myos-writeboot --safe-graphics on|off <disk>")
+                "       myos-writeboot --safe-graphics on|off <disk>\n"
+                "       myos-writeboot --cmdline-add <word> "
+                "[--cmdline-del <word>] <disk>")
         disk = rest[0]
         cur = read_table(disk, PTBL_LBA)
         if cur is None:
@@ -321,7 +329,7 @@ def main():
             new_line = re.sub(r"root=\S+", f"root={switch_root}", line)
             what = (f"root {line.split('root=')[1].split()[0]} "
                     f"-> {switch_root}")
-        else:
+        elif safe_gfx:
             # セーフグラフィックスを覚えさせる。
             #
             # 起動中に S を押せば同じことができるが、**画面が出ない機械
@@ -334,6 +342,31 @@ def main():
                 words.append("nomodeset")
             new_line = " ".join(words)
             what = f"safe graphics -> {safe_gfx}"
+        else:
+            # コマンドラインの語を足し引きする汎用の口。
+            #
+            # NVIDIA の公式ドライバを入れたときに nouveau.modeset=0 を
+            # 足すのに要る。nouveau は =y なので modprobe.blacklist が
+            # 効かず、これしか止める手が無い。
+            #
+            # 名前が同じで値が違う語 (foo=1 と foo=0) は 1 つにまとめる。
+            # 足し引きを繰り返しても増えないようにするため。
+            def key_of(w):
+                return w.split("=", 1)[0]
+            drop = set()
+            for w in cmd_del:
+                drop.add(key_of(w))
+            for w in cmd_add:
+                drop.add(key_of(w))
+            words = [w for w in line.split() if key_of(w) not in drop]
+            words.extend(cmd_add)
+            new_line = " ".join(words)
+            bits = []
+            if cmd_add:
+                bits.append("+" + " +".join(cmd_add))
+            if cmd_del:
+                bits.append("-" + " -".join(cmd_del))
+            what = "cmdline " + " ".join(bits)
 
         cmd = new_line.encode("ascii", "replace")
         if len(cmd) >= CMDLINE_MAX:

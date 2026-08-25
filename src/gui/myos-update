@@ -465,6 +465,24 @@ apply)
 カーネルは入れ替えていません。"
     fi
 
+    # NVIDIA の公式ドライバを入れてある機械は、先に nouveau を戻す。
+    #
+    # あのドライバは動いているカーネルに合わせて作ったモジュールなので、
+    # カーネルを入れ替えると **必ず読み込めなくなる**。
+    # そのとき nouveau.modeset=0 が残っていると、代わりに画面を持つ者が
+    # 誰も居なくなり、次の起動が真っ暗になる。
+    # 「速いけれど起動しない」より「遅いけれど起動する」を選ぶ。
+    # 入れ直しは再起動のあとに案内する。
+    if [ -f /etc/myos/nvidia.conf ] &&
+       grep -q '^run[[:space:]]*=[[:space:]]*[^[:space:]]' \
+            /etc/myos/nvidia.conf 2>/dev/null; then
+        echo "NVIDIA のドライバが入っているので、いったん nouveau に戻します"
+        "$WRITEBOOT" --cmdline-del nouveau.modeset "$disk" || true
+        nvidia_was=1
+    else
+        nvidia_was=0
+    fi
+
     echo "書き込み中 (使っていないほうの置き場へ)"
     # shellcheck disable=SC2086
     "$WRITEBOOT" --kernel "$WORK/$k" $fw --keep-cmdline \
@@ -478,6 +496,16 @@ apply)
     conf_set kernel "$new"
     rm -rf "$WORK"
     echo "myos-update: カーネルを $new に入れ替えました。"
+    if [ "$nvidia_was" = "1" ]; then
+        echo
+        echo "myos-update: NVIDIA のドライバはカーネルに合わせて作った"
+        echo "myos-update: ものなので、いまのままでは読み込めません。"
+        echo "myos-update: nouveau に戻してあるので画面は出ます。"
+        echo "myos-update: 再起動したあと、こうすると入れ直せます:"
+        echo "myos-update:     sudo myos-nvidia setup"
+        echo "myos-update:     sudo myos-nvidia install <前と同じ .run>"
+        echo
+    fi
     echo "myos-update: 再起動すると新しいカーネルで立ちます。"
     echo "myos-update: 動かなかったら、起動中に R を押しっぱなしにすると"
     echo "myos-update: 1 つ前のカーネルで立ちます。"

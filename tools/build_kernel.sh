@@ -348,6 +348,16 @@ make olddefconfig
 echo "=== ビルド (make -j$JOBS bzImage) ==="
 make -j"$JOBS" bzImage
 
+# modules も走らせる。**作るモジュールは 1 つも無い** (.ko は全部 =y に
+# してある) が、これを通さないと Module.symvers が出来ない。
+#
+# Module.symvers はカーネルが公開している記号とそのチェックサムの一覧で、
+# 外から持ってきたモジュール (NVIDIA の公式ドライバなど) を作るときに
+# 要る。食い違ったまま作ると insmod で弾かれる。
+# 中身が空でも modpost は vmlinux を舐めて書き出すので、数秒で終わる。
+echo "=== Module.symvers を作る (make -j$JOBS modules) ==="
+make -j"$JOBS" modules
+
 echo
 echo "=== 完成 ==="
 ls -l "$SRC/arch/x86/boot/bzImage"

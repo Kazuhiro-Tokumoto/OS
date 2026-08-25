@@ -1,0 +1,261 @@
+#!/bin/sh
+# ============================================================================
+# myos-nvidia  -  NVIDIA の公式ドライバを入れる / 外す
+#
+#   myos-nvidia status
+#   myos-nvidia setup                 作るのに要るものを揃える
+#   myos-nvidia install <ドライバ.run> 入れる
+#   myos-nvidia remove                外して nouveau に戻す
+#
+# なぜ要るか
+# ----------
+# 画面のドライバは 3 社とも中身の事情が違う。
+#
+#   Intel   i915 が Intel 自身の公式。他に選択肢は無いし、要らない
+#   AMD     amdgpu が公式。ゲームなら amdgpu-pro より速い。要らない
+#   NVIDIA  nouveau は有志の実装で、**Pascal (GTX 10xx) 以降は
+#           クロックを上げられない**。実測で GTX 1060 が 13fps
+#           (定格の 1 割ほど)。/sys/kernel/debug/dri/0/pstate が
+#           ENXIO を返すのがその印で、再クロックの実装が無い
+#
+# つまり「速くしたければ公式ドライバを入れるしかない」のは NVIDIA だけ。
+# この道具も NVIDIA 専用でいい。
+#
+# 誰がドライバを持ってくるか
+# --------------------------
+# **使う人**。Windows 95 の「ディスク使用...」と同じ考え方にする。
+# こちらは NVIDIA のものを 1 バイトも配らない。再配布の条件を気にせず
+# 済むし、使う人が自分の板に合った版を選べる。
+#
+#   https://www.nvidia.com/Download/index.aspx
+#   NVIDIA-Linux-x86_64-<版>.run を落として、それをこれに渡す。
+#
+# こちらが配るのは **自作カーネルのヘッダだけ** (GPL)。
+# Debian の linux-headers は使えない。版が同じでも .config が違えば
+# Module.symvers のチェックサムが合わず、作ったモジュールは弾かれる。
+#
+# nouveau をどう止めるか
+# ----------------------
+# .ko を全て =y にしてあるので **modprobe.blacklist は効かない**。
+# 組み込みのドライバはモジュールではないので、あれは素通りする。
+# 代わりにコマンドラインへ nouveau.modeset=0 を書く。これは
+# module_param なので組み込みでも効く。書くのは myos-writeboot。
+#
+# 失敗したときの逃げ道
+# --------------------
+# myos-writeboot は書き換える前のテーブルを必ず LBA 21 へ写す。
+# **起動中に R を押しっぱなしにすれば、入れる前の状態で立つ**。
+# 画面が出なくなっても手はある。
+# ============================================================================
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+REPO="Kazuhiro-Tokumoto/OS"
+CONF=/etc/myos/version.conf
+STATE=/etc/myos/nvidia.conf
+WORK=/var/tmp/myos-nvidia
+KVER="$(uname -r)"
+KBUILD="/lib/modules/$KVER/build"
+
+die() { echo "myos-nvidia: $1" >&2; exit 1; }
+need_root() {
+    [ "$(id -u)" = "0" ] ||
+        die "管理者で実行してください (sudo myos-nvidia $1)"
+}
+
+conf_get() {
+    sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$CONF" 2>/dev/null | head -1
+}
+# カーネルの版は version.conf の kernel。記録が無ければ OS の版と同じ。
+rel_version() {
+    v=$(conf_get kernel)
+    [ -n "$v" ] || v=$(conf_get version)
+    echo "$v"
+}
+
+state_get() {
+    sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$STATE" 2>/dev/null | head -1
+}
+state_set() {
+    mkdir -p /etc/myos
+    [ -f "$STATE" ] || printf '# myOS: NVIDIA ドライバの状態。\n' > "$STATE"
+    if grep -q "^$1[[:space:]]*=" "$STATE" 2>/dev/null; then
+        sed -i "s|^$1[[:space:]]*=.*|$1 = $2|" "$STATE"
+    else
+        printf '%s = %s\n' "$1" "$2" >> "$STATE"
+    fi
+}
+
+# 生領域の場所。myos-update と同じ読み方をする。
+boot_info() {
+    [ -f /etc/myos/boot.conf ] || die "/etc/myos/boot.conf がありません"
+    . /etc/myos/boot.conf
+    [ -n "$disk" ] || die "/etc/myos/boot.conf に disk がありません"
+}
+
+# NVIDIA の板が挿さっているか。lspci が無い機械もあるので sysfs で見る。
+has_nvidia() {
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/vendor" ] || continue
+        [ "$(cat "$d/vendor")" = "0x10de" ] || continue
+        [ -r "$d/class" ] || continue
+        case "$(cat "$d/class")" in 0x0300*|0x0302*) return 0 ;; esac
+    done
+    return 1
+}
+
+case "$1" in
+status)
+    echo "kernel    = $KVER"
+    echo "headers   = $([ -d "$KBUILD" ] && echo "$KBUILD" || echo '(まだ)')"
+    if has_nvidia; then echo "nvidia gpu= yes"; else echo "nvidia gpu= no"; fi
+    if [ -x /usr/bin/nvidia-smi ] || [ -f /proc/driver/nvidia/version ]; then
+        echo "driver    = installed"
+        cat /proc/driver/nvidia/version 2>/dev/null | head -1
+    else
+        echo "driver    = nouveau (標準)"
+    fi
+    r=$(state_get run); [ -n "$r" ] && echo "run       = $r"
+    # boot_info は中で die (exit) するので、status では先に有無を見る。
+    # 状態を見るだけの口が、設定が足りないくらいで落ちてはいけない。
+    if [ -f /etc/myos/boot.conf ]; then
+        boot_info
+        if myos-writeboot --info "$disk" 2>/dev/null |
+           grep -q "nouveau.modeset=0"; then
+            echo "nouveau   = 止めてある"
+        else
+            echo "nouveau   = 動いている"
+        fi
+    fi
+    exit 0
+    ;;
+
+setup)
+    need_root setup
+    mkdir -p "$WORK"
+
+    # 1. 作るのに要る道具。ISO を CD に収めるために削ってあるので、
+    #    ここで網から取ってくる。入っていれば apt が何もしない。
+    echo "=== 道具を入れます (gcc make libc6-dev) ==="
+    apt-get update || die "apt-get update に失敗しました (網に繋がっていますか)"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        gcc make libc6-dev || die "道具を入れられませんでした"
+
+    # 2. 自作カーネルのヘッダ。Debian のものは使えない (先頭のコメント)。
+    v=$(rel_version)
+    [ -n "$v" ] || die "版が分かりません ($CONF)"
+
+    # 前に展開したヘッダが、いまのカーネルのものとは限らない。
+    #
+    # myOS のカーネルは版が上がっても uname -r は 6.12.9 のままのことが
+    # ある (同じ 6.12.9 を .config だけ変えて作り直すため)。
+    # 古いヘッダを使い回すと Module.symvers が食い違い、出来た
+    # モジュールは読み込めない。**しかも作るところまでは成功する**ので
+    # 気づきにくい。どの版のものかを控えておいて、違えば入れ直す。
+    if [ -f "$KBUILD/Module.symvers" ] && [ "$(state_get headers)" = "$v" ]; then
+        echo "=== ヘッダは既にあります ($KBUILD, $v) ==="
+    else
+        [ -d "$KBUILD" ] && [ "$(state_get headers)" != "$v" ] && {
+            echo "=== 古いヘッダ ($(state_get headers)) を捨てます ==="
+            rm -rf "$KBUILD"
+        }
+        f="myos-kheaders-$v.tar.zst"
+        url="https://github.com/$REPO/releases/download/v$v/$f"
+        echo "=== ヘッダを取ってきます ($f) ==="
+        curl -fL --max-time 600 -o "$WORK/$f" "$url" ||
+            die "ヘッダを取れません: $url"
+        curl -fsSL --max-time 60 -o "$WORK/$f.sha256" "$url.sha256" &&
+            ( cd "$WORK" && sha256sum -c "$f.sha256" ) ||
+            die "sha256 が合いません (壊れたものは使わない)"
+
+        mkdir -p "$KBUILD"
+        tar -I zstd -xf "$WORK/$f" -C "$KBUILD" ||
+            die "ヘッダを展開できません"
+        [ -f "$KBUILD/Module.symvers" ] ||
+            die "展開したものに Module.symvers がありません"
+        state_set headers "$v"
+    fi
+
+    # 3. 念のため、外から持ってきたモジュールが本当に作れるか試す。
+    #    ここで転ぶなら、NVIDIA のインストーラも必ず転ぶ。
+    #    先に分かったほうが直しやすい。
+    echo "=== 試しに小さなモジュールを作ります ==="
+    t="$WORK/probe"
+    rm -rf "$t"; mkdir -p "$t"
+    printf '#include <linux/module.h>\nMODULE_LICENSE("GPL");\n' > "$t/probe.c"
+    printf 'obj-m := probe.o\n' > "$t/Makefile"
+    if make -C "$KBUILD" M="$t" modules >"$WORK/probe.log" 2>&1 &&
+       [ -f "$t/probe.ko" ]; then
+        echo "myos-nvidia: 用意できました。"
+        echo "myos-nvidia: 次は"
+        echo "myos-nvidia:   sudo myos-nvidia install <NVIDIA-Linux-x86_64-*.run>"
+    else
+        tail -20 "$WORK/probe.log" >&2
+        die "モジュールを作れません ($WORK/probe.log)"
+    fi
+    ;;
+
+install)
+    need_root install
+    run="$2"
+    [ -n "$run" ] || die "使い方: myos-nvidia install <NVIDIA-Linux-x86_64-*.run>"
+    [ -f "$run" ] || die "$run がありません"
+    # 中身をざっと確かめる。違うものを渡されて途中まで進むと厄介。
+    head -c 4096 "$run" | grep -q "NVIDIA" ||
+        die "$run が NVIDIA のインストーラに見えません"
+
+    has_nvidia || echo "myos-nvidia: 注意 - NVIDIA の板が見つかりません。続けます。" >&2
+
+    [ -f "$KBUILD/Module.symvers" ] ||
+        die "先に sudo myos-nvidia setup を実行してください"
+
+    boot_info
+    chmod +x "$run" 2>/dev/null || true
+
+    echo "=== ドライバを入れます (数分かかります) ==="
+    # -s        黙って進める (X が上がっている画面でも困らない)
+    # --no-nouveau-check  nouveau は =y なので必ず載っている。
+    #           止めるのは下のコマンドラインの書き換えでやるので、
+    #           ここで止められると一生入らない
+    # --no-x-check  X を落とさせない。落とすとこの端末ごと消える
+    if ! "$run" -s --no-x-check --no-nouveau-check \
+                --kernel-source-path="$KBUILD" 2>&1 |
+         tee /var/log/myos-nvidia.log; then
+        echo "--- 詳しくは /var/log/nvidia-installer.log" >&2
+        die "インストーラが失敗しました"
+    fi
+
+    # nouveau を止める。=y なので blacklist は効かない (先頭のコメント)。
+    echo "=== nouveau を止めます ==="
+    myos-writeboot --cmdline-add nouveau.modeset=0 "$disk" ||
+        die "コマンドラインを書き換えられません"
+
+    state_set run "$(readlink -f "$run")"
+    state_set kernel "$KVER"
+
+    echo
+    echo "myos-nvidia: 入りました。再起動すると NVIDIA のドライバで立ちます。"
+    echo "myos-nvidia: 画面が出なかったら、起動中に R を押しっぱなしにすると"
+    echo "myos-nvidia: 入れる前の状態に戻ります。"
+    ;;
+
+remove)
+    need_root remove
+    boot_info
+    if [ -x /usr/bin/nvidia-uninstall ]; then
+        echo "=== ドライバを外します ==="
+        /usr/bin/nvidia-uninstall -s || true
+    else
+        echo "myos-nvidia: nvidia-uninstall がありません。印だけ戻します。" >&2
+    fi
+    echo "=== nouveau を戻します ==="
+    myos-writeboot --cmdline-del nouveau.modeset "$disk" ||
+        die "コマンドラインを戻せません"
+    state_set run ""
+    echo "myos-nvidia: 戻しました。再起動すると nouveau で立ちます。"
+    ;;
+
+*)
+    die "使い方: myos-nvidia status|setup|install <.run>|remove"
+    ;;
+esac
