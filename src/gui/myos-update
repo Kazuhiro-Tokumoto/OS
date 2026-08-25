@@ -332,6 +332,32 @@ kernel_version() {
     os_version
 }
 
+# 指定した区画が **どこかに** マウントされていたら外す。
+#
+# 入れ替え先を mkfs する前に要る。実機で
+#
+#   /dev/sda5 を空けています
+#   /dev/sda5 is mounted; will not make a filesystem here!
+#   myos-update: /dev/sda5 を空けられません
+#
+# と止まった。前の apply-system が途中で転んで、$WORK/mnt を
+# 外さないまま死んでいたのが原因。mkfs は「マウント中の区画は
+# 触らない」という正しい判断をしただけで、悪いのはこちら。
+#
+# いま動いているルートは A/B の選び方から必ず対象外になるので、
+# ここで外して困る相手は無い。
+free_dev() {
+    n=0
+    while [ "$n" -lt 8 ]; do
+        mp=$(awk -v d="$1" '$1 == d { print $2; exit }' /proc/mounts)
+        [ -n "$mp" ] || return 0
+        echo "$1 が $mp にあるので外します"
+        umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || return 1
+        n=$((n + 1))
+    done
+    return 1
+}
+
 # 起動に使っているディスクと、生領域の場所を割り出す。
 # 入れたときの値は /etc/myos/boot.conf に置いてある。
 boot_info() {
@@ -556,7 +582,14 @@ apply-system)
     ( cd "$WORK" && sha256sum -c "$r.sha256" ) ||
         die "sha256 が合いません (壊れたものを展開するわけにいかない)"
 
+    # 途中で転んでも、マウントを残したまま死なないようにする。
+    # 残すと **次の apply-system が mkfs できなくなる** (実機で踏んだ)。
+    # die は exit するので、これで拾える。
+    trap 'umount "$WORK/sq" 2>/dev/null; umount "$WORK/mnt" 2>/dev/null' \
+         EXIT INT TERM
+
     echo "$target を空けています"
+    free_dev "$target" || die "$target のマウントを外せません"
     mkfs.ext4 -F -q -m 0 -L myos "$target" || die "$target を空けられません"
 
     mkdir -p "$WORK/mnt" "$WORK/sq"
