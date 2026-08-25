@@ -60,6 +60,20 @@ OUT="$2"
 
 command -v zstd >/dev/null 2>&1 || { echo "zstd がありません" >&2; exit 1; }
 
+# 出力先は **cd する前に** 絶対パスへ直す。
+#
+# この下で木へ移動するので、相対パスのままだと木の中に書いてしまう。
+# 実際 CI で
+#   make_kheaders: ok  build/kheaders.tar.zst  14426 個  12 MB
+#   chown: cannot access 'build/kheaders.tar.zst': No such file or directory
+# となった。「作れた」と言っているのに呼んだ側から見えない、という
+# 一番たちの悪い壊れ方。手元では絶対パスで試していたので気づけなかった。
+case "$OUT" in
+    /*) ;;
+    *)  OUT="$PWD/$OUT" ;;
+esac
+mkdir -p "$(dirname "$OUT")"
+
 LIST="$(mktemp)"
 trap 'rm -f "$LIST"' EXIT
 
@@ -96,7 +110,6 @@ echo Module.symvers >> "$LIST"
 sort -u "$LIST" -o "$LIST"
 n="$(wc -l < "$LIST")"
 
-mkdir -p "$(dirname "$OUT")"
 tar -c -f - -T "$LIST" | zstd -q -19 -T0 -f -o "$OUT"
 
 sz="$(wc -c < "$OUT")"

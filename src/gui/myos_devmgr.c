@@ -784,6 +784,17 @@ static const char *dev_status(const Dev *v)
     return "This device is working properly.";
 }
 
+/* 画面の板で、しかも NVIDIA か。
+ *
+ * ここだけ「ドライバの更新」を出す。Intel の i915 と AMD の amdgpu は
+ * メーカー自身の公式実装なので、入れ替える相手が無い。
+ * 出しても押せる先が無いボタンを並べるほうが不親切。 */
+static int is_nvidia_gpu(const Dev *v)
+{
+    return v->cat == CAT_DISPLAY &&
+           strncmp(v->id, "10de:", 5) == 0;
+}
+
 static void draw_props(void)
 {
     const Dev *v = &devs[rows[sel].dev];
@@ -810,6 +821,9 @@ static void draw_props(void)
 
     x98_button(&x98, win, px + w - BTN_W - 14, py + h - BTN_H - 12,
                BTN_W, BTN_H, "OK", 0);
+    if (is_nvidia_gpu(v))
+        x98_button(&x98, win, px + 14, py + h - BTN_H - 12,
+                   BTN_W + 48, BTN_H, "Update Driver...", 0);
 }
 
 static void redraw(void)
@@ -949,6 +963,26 @@ int main(void)
             int mx = ev.xbutton.x, my = ev.xbutton.y;
 
             if (showing_props) {
+                /* 「ドライバの更新」だけは、閉じる前に拾う。
+                 * 座標は draw_props と同じ積み方をすること。 */
+                const Dev *v = &devs[rows[sel].dev];
+                int w = 400, h = 240;
+                int px = (WIN_W - w) / 2, py = (WIN_H - h) / 2;
+                int uy = py + h - BTN_H - 12;
+                if (is_nvidia_gpu(v) &&
+                    my >= uy && my < uy + BTN_H &&
+                    mx >= px + 14 && mx < px + 14 + BTN_W + 48) {
+                    /* 端末の中で聞きながら進める。ドライバ本体は
+                     * 使う人が用意するので、窓を作るより文字のほうが
+                     * 案内しやすい (95 の「ディスク使用...」と同じ)。 */
+                    pid_t p = fork();
+                    if (p == 0) {
+                        execlp("myos-term", "myos-term",
+                               "/usr/local/bin/myos-nvidia", "wizard",
+                               (char *)NULL);
+                        _exit(127);
+                    }
+                }
                 /* OK 以外を押しても閉じてよい。困る操作が無いので。 */
                 showing_props = 0;
                 redraw();

@@ -255,7 +255,82 @@ remove)
     echo "myos-nvidia: 戻しました。再起動すると nouveau で立ちます。"
     ;;
 
+wizard)
+    # デバイスマネージャーの「ドライバの更新」から呼ばれる口。
+    #
+    # 95 の「ディスク使用...」と同じ考え方で、**ドライバは使う人が
+    # 用意する**。こちらは置き場を探して、見つけたら入れるかどうか
+    # 聞くだけ。ファイル選択の窓は作らない (98 のドライバ更新も
+    # 結局は場所を指定するだけだった)。
+    echo "myOS - グラフィックドライバの更新"
+    echo "=================================="
+    echo
+    if ! has_nvidia; then
+        echo "  この機械に NVIDIA の板は見つかりませんでした。"
+        echo
+        echo "  Intel と AMD は、標準で入っているドライバ (i915 / amdgpu) が"
+        echo "  メーカー自身の公式実装です。入れ替える相手がありません。"
+        echo "  何もしなくて大丈夫です。"
+        echo
+        printf "  Enter で閉じます"
+        read _x
+        exit 0
+    fi
+
+    echo "  NVIDIA の板が見つかりました。"
+    echo
+    echo "  標準の nouveau は GTX 10xx 以降のクロックを上げられません。"
+    echo "  (実測: GTX 1060 で 13fps。定格の 1 割ほど)"
+    echo "  公式ドライバを入れると本来の速度になります。"
+    echo
+    echo "  ドライバは NVIDIA から自分で落としてください:"
+    echo "      https://www.nvidia.com/Download/index.aspx"
+    echo "      NVIDIA-Linux-x86_64-<版>.run"
+    echo
+
+    # 置いてありそうな所を見る。
+    found=""
+    for d in "$HOME/Downloads" "$HOME/ダウンロード" "$HOME" /tmp /media/*/*; do
+        [ -d "$d" ] || continue
+        for f in "$d"/NVIDIA-Linux-x86_64-*.run; do
+            [ -f "$f" ] && { found="$f"; break 2; }
+        done
+    done
+
+    if [ -z "$found" ]; then
+        echo "  まだ見つかりません。落としたら、次のどれかに置いてから"
+        echo "  もう一度この画面を開いてください:"
+        echo "      $HOME/Downloads"
+        echo "      $HOME"
+        echo "      USB メモリの中"
+        echo
+        printf "  Enter で閉じます"
+        read _x
+        exit 0
+    fi
+
+    echo "  見つかりました:"
+    echo "      $found"
+    echo
+    echo "  入れると、次の起動から公式ドライバになります。"
+    echo "  もし画面が出なくなっても、**起動中に R を押しっぱなし**に"
+    echo "  すれば入れる前の状態に戻せます。"
+    echo
+    printf "  入れますか? [y/N] "
+    read ans
+    case "$ans" in
+        y|Y|yes|YES) ;;
+        *) echo "  やめました。"; exit 0 ;;
+    esac
+
+    sudo "$0" setup   || { printf "\n  失敗しました。Enter で閉じます"; read _x; exit 1; }
+    sudo "$0" install "$found" || { printf "\n  失敗しました。Enter で閉じます"; read _x; exit 1; }
+    echo
+    printf "  終わりました。Enter で閉じます"
+    read _x
+    ;;
+
 *)
-    die "使い方: myos-nvidia status|setup|install <.run>|remove"
+    die "使い方: myos-nvidia status|setup|install <.run>|remove|wizard"
     ;;
 esac
