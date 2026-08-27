@@ -1096,6 +1096,17 @@ static void frame_client(Window w, int adopt)
 
     c->frame = XCreateSimpleWindow(dpy, root, c->x, c->y, c->w, c->h,
                                    0, 0, x98.face);
+    /* X に地の色で塗らせない。
+     *
+     * 背景色を持たせておくと、Expose のたびに **サーバーが先に一面を
+     * 塗り、そのあと draw_frame がもう一度全部塗る**。同じ場所が
+     * 2 度塗られるので、窓を動かすたびにちらつく。実機で
+     * 「ドライバが当たっていないみたいにちかちかする」と言われたのが
+     * これ。draw_frame は先頭で枠の全面を塗っているので、
+     * サーバーの下塗りは 1 回ぶん丸ごと無駄。
+     *
+     * None にすると「何もしない」になり、下塗りが消える。 */
+    XSetWindowBackgroundPixmap(dpy, c->frame, None);
     XSelectInput(dpy, c->frame,
                  ExposureMask | ButtonPressMask | ButtonReleaseMask |
                  PointerMotionMask | SubstructureRedirectMask |
@@ -1403,6 +1414,12 @@ int main(void)
     volwin = XCreateWindow(dpy, root, 0, 0, VOL_W, VOL_H, 0, CopyFromParent,
                            InputOutput, CopyFromParent,
                            CWOverrideRedirect | CWBackPixel, &swa);
+
+    /* 下塗りを止める。理由は frame と同じ (2 度塗り = ちらつき)。
+     * この 3 つはどれも draw_* が先頭で全面を塗り直している。 */
+    XSetWindowBackgroundPixmap(dpy, taskbar,   None);
+    XSetWindowBackgroundPixmap(dpy, startmenu, None);
+    XSetWindowBackgroundPixmap(dpy, volwin,    None);
     XSelectInput(dpy, volwin, ExposureMask | ButtonPressMask);
 
     load_icons();
