@@ -25,6 +25,8 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
+#include <X11/Xatom.h>
+#include <X11/cursorfont.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -588,6 +590,334 @@ static void ctx_action(int i)
 }
 
 /* --- 本体 ---------------------------------------------------------------- */
+
+/* ==========================================================================
+ * ドラッグ & ドロップ (XDND)
+ *
+ * 窓と窓の間でファイルを渡すのに、X には決まった手順がある。
+ * 「XDND」と呼ばれているもので、Firefox もファイルマネージャも
+ * これで話す。自前の窓どうしだけなら適当な取り決めでも動くが、
+ * それだと **ブラウザに写真を放り込む** といったことができない。
+ * 標準のほうに合わせる。
+ *
+ * 渡す側 (source) の段取り:
+ *   1. XdndSelection の持ち主になる
+ *   2. ポインタの下にある「XdndAware を持つ窓」を探す
+ *   3. その窓へ XdndEnter -> XdndPosition を送る
+ *   4. 相手が XdndStatus で「受け取る」と言えば、離した時に XdndDrop
+ *   5. 相手から中身を求められたら (SelectionRequest)、
+ *      text/uri-list を渡す
+ *
+ * 受け取る側 (target) の段取り:
+ *   1. 窓に XdndAware を立てておく
+ *   2. XdndEnter で相手が何を出せるか覚える
+ *   3. XdndPosition のたびに XdndStatus で返事をする
+ *   4. XdndDrop が来たら XConvertSelection で中身を求める
+ *   5. SelectionNotify で受け取って、コピーなり移動なりする
+ *   6. XdndFinished で「終わった」と返す
+ *
+ * 中身の形は text/uri-list。1 行 1 個で
+ *   file:///home/manh/%E5%86%99%E7%9C%9F.png\r\n
+ * のように、パスを URI にして並べる。空白や日本語は % で書く決まり。
+ * ========================================================================== */
+static Atom xa_aware, xa_enter, xa_position, xa_status, xa_leave;
+static Atom xa_drop, xa_finished, xa_selection, xa_uri, xa_plain;
+static Atom xa_act_copy, xa_act_move, xa_act_priv, xa_typelist, xa_prop;
+
+static void dnd_init_atoms(void)
+{
+    xa_aware     = XInternAtom(dpy, "XdndAware",        False);
+    xa_enter     = XInternAtom(dpy, "XdndEnter",        False);
+    xa_position  = XInternAtom(dpy, "XdndPosition",     False);
+    xa_status    = XInternAtom(dpy, "XdndStatus",       False);
+    xa_leave     = XInternAtom(dpy, "XdndLeave",        False);
+    xa_drop      = XInternAtom(dpy, "XdndDrop",         False);
+    xa_finished  = XInternAtom(dpy, "XdndFinished",     False);
+    xa_selection = XInternAtom(dpy, "XdndSelection",    False);
+    xa_typelist  = XInternAtom(dpy, "XdndTypeList",     False);
+    xa_act_copy  = XInternAtom(dpy, "XdndActionCopy",   False);
+    xa_act_move  = XInternAtom(dpy, "XdndActionMove",   False);
+    xa_act_priv  = XInternAtom(dpy, "XdndActionPrivate",False);
+    xa_uri       = XInternAtom(dpy, "text/uri-list",    False);
+    xa_plain     = XInternAtom(dpy, "text/plain",       False);
+    xa_prop      = XInternAtom(dpy, "MYOS_DND",         False);
+
+    /* 受け取る側になるための看板。5 は今の版。 */
+    long ver = 5;
+    XChangeProperty(dpy, win, xa_aware, XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)&ver, 1);
+}
+
+/* --- URI の書き方 ------------------------------------------------------- */
+/* 通してよい字は RFC 3986 の「予約されていない字」と / だけ。
+ * 日本語のファイル名は必ず % で書くことになる。 */
+static void path_to_uri(const char *path, char *out, size_t n)
+{
+    static const char *hex = "0123456789ABCDEF";
+    size_t o = 0;
+    const char *pre = "file://";
+    for (const char *q = pre; *q && o + 1 < n; q++) out[o++] = *q;
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+            (*p >= '0' && *p <= '9') ||
+            *p == '-' || *p == '_' || *p == '.' || *p == '~' || *p == '/') {
+            if (o + 1 >= n) break;
+            out[o++] = (char)*p;
+        } else {
+            if (o + 3 >= n) break;
+            out[o++] = '%';
+            out[o++] = hex[*p >> 4];
+            out[o++] = hex[*p & 15];
+        }
+    }
+    out[o] = 0;
+}
+
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* file:// の URI を 1 本、普通のパスに戻す。file: 以外は捨てる。 */
+static int uri_to_path(const char *uri, char *out, size_t n)
+{
+    if (strncmp(uri, "file://", 7) != 0) return 0;
+    const char *p = uri + 7;
+    /* file://host/path の host は無視して、最初の / から使う。 */
+    const char *slash = strchr(p, '/');
+    if (!slash) return 0;
+    p = slash;
+    size_t o = 0;
+    while (*p && o + 1 < n) {
+        if (*p == '%' && hexval(p[1]) >= 0 && hexval(p[2]) >= 0) {
+            out[o++] = (char)(hexval(p[1]) * 16 + hexval(p[2]));
+            p += 3;
+        } else {
+            out[o++] = *p++;
+        }
+    }
+    out[o] = 0;
+    return o > 0;
+}
+
+/* --- 渡す側 ------------------------------------------------------------- */
+static int    drag_armed = 0;      /* 押したがまだ動いていない */
+static int    dragging   = 0;
+static int    drag_x0, drag_y0;
+static char   drag_path[PATH_MAX];
+static Window drag_target = None;  /* いま指している相手 */
+static int    drag_target_ver = 0;
+static int    drag_accepted = 0;
+static Cursor drag_cursor = None;
+
+/* その窓が XdndAware を持っているか。持っていれば版を返す。 */
+static int dnd_version_of(Window w)
+{
+    Atom type; int fmt; unsigned long n, after; unsigned char *data = NULL;
+    if (w == None) return 0;
+    if (XGetWindowProperty(dpy, w, xa_aware, 0, 1, False, XA_ATOM,
+                           &type, &fmt, &n, &after, &data) != Success)
+        return 0;
+    int ver = 0;
+    if (data) {
+        if (type == XA_ATOM && n >= 1) ver = (int)(*(Atom *)data);
+        XFree(data);
+    }
+    return ver;
+}
+
+/* ポインタの下にある「受け取れる窓」を探す。
+ *
+ * 子から親へ辿るのではなく、根から下へ潜る。XdndAware は普通、
+ * アプリの一番外側の窓に立っているが、窓マネージャが被せた枠の
+ * ほうが手前に来るので、素直に一番下の子を取ると見つからない。
+ * 潜りながら、見つけた時点で返す。 */
+static Window dnd_find_target(int rx, int ry, int *ver)
+{
+    Window cur = RootWindow(dpy, screen);
+    Window found = None;
+    int fver = 0;
+    for (int depth = 0; depth < 16; depth++) {
+        Window child = None;
+        int cx, cy;
+        if (!XTranslateCoordinates(dpy, RootWindow(dpy, screen), cur,
+                                   rx, ry, &cx, &cy, &child))
+            break;
+        int v = dnd_version_of(cur);
+        if (v > 0) { found = cur; fver = v; }
+        if (child == None) break;
+        cur = child;
+    }
+    *ver = fver;
+    return found;
+}
+
+static void dnd_send(Window to, Atom msg, long d0, long d1, long d2,
+                     long d3, long d4)
+{
+    XClientMessageEvent e;
+    memset(&e, 0, sizeof(e));
+    e.type = ClientMessage;
+    e.display = dpy;
+    e.window = to;
+    e.message_type = msg;
+    e.format = 32;
+    e.data.l[0] = (long)win;
+    e.data.l[1] = d1;
+    e.data.l[2] = d2;
+    e.data.l[3] = d3;
+    e.data.l[4] = d4;
+    if (msg == xa_enter) e.data.l[1] = d1;     /* enter は l[1] が版と印 */
+    (void)d0;
+    XSendEvent(dpy, to, False, NoEventMask, (XEvent *)&e);
+}
+
+static void dnd_start(void)
+{
+    if (sel < 0 || sel >= n_entries) return;
+    full_path(drag_path, sizeof(drag_path), entries[sel].name);
+
+    XSetSelectionOwner(dpy, xa_selection, win, CurrentTime);
+    if (XGetSelectionOwner(dpy, xa_selection) != win) return;
+
+    if (drag_cursor == None)
+        drag_cursor = XCreateFontCursor(dpy, XC_hand2);
+    XGrabPointer(dpy, win, False,
+                 ButtonMotionMask | ButtonReleaseMask,
+                 GrabModeAsync, GrabModeAsync, None, drag_cursor, CurrentTime);
+    dragging = 1;
+    drag_target = None;
+    drag_target_ver = 0;
+    drag_accepted = 0;
+}
+
+static void dnd_motion(int rx, int ry)
+{
+    int ver = 0;
+    Window t = dnd_find_target(rx, ry, &ver);
+
+    if (t != drag_target) {
+        if (drag_target != None)
+            dnd_send(drag_target, xa_leave, 0, 0, 0, 0, 0);
+        drag_target = t;
+        drag_target_ver = ver;
+        drag_accepted = 0;
+        if (t != None) {
+            /* 出せる形は 1 つだけなので l[2] に直接書く
+             * (3 つまでは XdndTypeList を使わなくてよい決まり)。 */
+            XClientMessageEvent e;
+            memset(&e, 0, sizeof(e));
+            e.type = ClientMessage; e.display = dpy; e.window = t;
+            e.message_type = xa_enter; e.format = 32;
+            e.data.l[0] = (long)win;
+            e.data.l[1] = (long)(ver < 5 ? ver : 5) << 24;   /* 版、型は 3 個以下 */
+            e.data.l[2] = (long)xa_uri;
+            e.data.l[3] = 0;
+            e.data.l[4] = 0;
+            XSendEvent(dpy, t, False, NoEventMask, (XEvent *)&e);
+        }
+    }
+    if (drag_target != None) {
+        XClientMessageEvent e;
+        memset(&e, 0, sizeof(e));
+        e.type = ClientMessage; e.display = dpy; e.window = drag_target;
+        e.message_type = xa_position; e.format = 32;
+        e.data.l[0] = (long)win;
+        e.data.l[2] = (rx << 16) | (ry & 0xFFFF);
+        e.data.l[3] = CurrentTime;
+        e.data.l[4] = (long)xa_act_copy;
+        XSendEvent(dpy, drag_target, False, NoEventMask, (XEvent *)&e);
+    }
+}
+
+static void dnd_finish_drag(void)
+{
+    if (drag_target != None) {
+        if (drag_accepted) {
+            XClientMessageEvent e;
+            memset(&e, 0, sizeof(e));
+            e.type = ClientMessage; e.display = dpy; e.window = drag_target;
+            e.message_type = xa_drop; e.format = 32;
+            e.data.l[0] = (long)win;
+            e.data.l[2] = CurrentTime;
+            XSendEvent(dpy, drag_target, False, NoEventMask, (XEvent *)&e);
+        } else {
+            dnd_send(drag_target, xa_leave, 0, 0, 0, 0, 0);
+        }
+    }
+    XUngrabPointer(dpy, CurrentTime);
+    dragging = 0;
+    drag_armed = 0;
+    drag_target = None;
+}
+
+/* --- 受け取る側 --------------------------------------------------------- */
+static Window drop_src = None;
+static int    drop_ok = 0;         /* 相手が text/uri-list を出せる */
+static int    drop_x = 0, drop_y = 0;
+
+/* 落とされた場所から、入れ先のディレクトリを決める。
+ * フォルダの行の上なら、そのフォルダの中。それ以外はいまの場所。
+ * (98 と同じ) */
+static void drop_dir(char *out, size_t n)
+{
+    int row = (drop_y - list_y()) / ROW_H;
+    int i = top + row;
+    if (row >= 0 && i >= 0 && i < n_entries && entries[i].is_dir) {
+        full_path(out, n, entries[i].name);
+        return;
+    }
+    snprintf(out, n, "%s", cwd);
+}
+
+/* 同じ入れ物の中ならコピーではなく移動にする。
+ * 98 は「同じドライブなら移動、別のドライブならコピー」だった。
+ * ここでは st_dev が同じかどうかで見る。 */
+static int same_fs(const char *a, const char *b)
+{
+    struct stat sa, sb;
+    if (stat(a, &sa) != 0 || stat(b, &sb) != 0) return 0;
+    return sa.st_dev == sb.st_dev;
+}
+
+static void drop_accept(const char *text)
+{
+    char dir[PATH_MAX];
+    drop_dir(dir, sizeof(dir));
+
+    const char *p = text;
+    int done = 0;
+    while (*p) {
+        const char *e = strpbrk(p, "\r\n");
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        char uri[PATH_MAX * 3], src[PATH_MAX];
+        if (len > 0 && len < sizeof(uri)) {
+            memcpy(uri, p, len);
+            uri[len] = 0;
+            if (uri[0] != '#' && uri_to_path(uri, src, sizeof(src))) {
+                const char *base = strrchr(src, '/');
+                base = base ? base + 1 : src;
+                char dst[PATH_MAX];
+                snprintf(dst, sizeof(dst), "%s/%s", dir, base);
+                /* 自分自身の上には落とせない */
+                if (strcmp(src, dst) != 0) {
+                    if (same_fs(src, dir))
+                        run_wait("mv", "-f", src, dst);
+                    else
+                        run_wait("cp", "-a", src, dst);
+                    done = 1;
+                }
+            }
+        }
+        if (!e) break;
+        p = e + ((e[0] == '\r' && e[1] == '\n') ? 2 : 1);
+    }
+    if (done) read_dir();
+}
+
 int main(int argc, char **argv)
 {
     signal(SIGCHLD, SIG_IGN);
@@ -608,11 +938,13 @@ int main(int argc, char **argv)
 
     win = XCreateSimpleWindow(dpy, RootWindow(dpy, screen), 0, 0,
                               WIN_W, WIN_H, 0, 0, x98.face);
-    XSelectInput(dpy, win, ExposureMask | ButtonPressMask | KeyPressMask |
-                           StructureNotifyMask);
+    XSelectInput(dpy, win, ExposureMask | ButtonPressMask |
+                           ButtonReleaseMask | ButtonMotionMask |
+                           KeyPressMask | StructureNotifyMask);
     a_wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(dpy, win, &a_wm_delete, 1);
     XStoreName(dpy, win, "myOS Files");
+    dnd_init_atoms();
     XMapWindow(dpy, win);
 
     /* 窓が出てから入力文脈を作る。窓より先に作ると
@@ -642,13 +974,6 @@ int main(int argc, char **argv)
             if (ev.xconfigure.width != win_w || ev.xconfigure.height != win_h) {
                 win_w = ev.xconfigure.width;
                 win_h = ev.xconfigure.height;
-            }
-            break;
-
-        case ClientMessage:
-            if ((Atom)ev.xclient.data.l[0] == a_wm_delete) {
-                XCloseDisplay(dpy);
-                return 0;
             }
             break;
 
@@ -779,6 +1104,15 @@ int main(int argc, char **argv)
 
             if (row < 0 || i >= n_entries) { sel = -1; redraw(); break; }
 
+            /* 掴んだかもしれない。まだ動いていないので引きずりは
+             * 始めない。ここで始めると、ただの 1 回押しでも
+             * 引きずりになってしまう。 */
+            if (ev.xbutton.button == 1) {
+                drag_armed = 1;
+                drag_x0 = mx;
+                drag_y0 = my;
+            }
+
             long t = now_ms();
             if (i == last_click_row && t - last_click_ms < x98.theme.dblclick_ms) {
                 last_click_row = -1;
@@ -793,9 +1127,162 @@ int main(int argc, char **argv)
             break;
         }
 
+        /* --- 引きずり (渡す側) --------------------------------------- */
+        case MotionNotify:
+            if (dragging) {
+                dnd_motion(ev.xmotion.x_root, ev.xmotion.y_root);
+            } else if (drag_armed && (ev.xmotion.state & Button1Mask)) {
+                /* 4 画素動いたら本気とみなす。手が震えただけで
+                 * 引きずりが始まると、選ぶ操作ができなくなる。 */
+                int dx = ev.xmotion.x - drag_x0;
+                int dy = ev.xmotion.y - drag_y0;
+                if (dx * dx + dy * dy > 16) {
+                    dnd_start();
+                    if (dragging)
+                        dnd_motion(ev.xmotion.x_root, ev.xmotion.y_root);
+                }
+            }
+            break;
+
+        case ButtonRelease:
+            if (dragging) dnd_finish_drag();
+            drag_armed = 0;
+            break;
+
+        /* 中身を求められた (渡す側の最後の仕事) */
+        case SelectionRequest: {
+            XSelectionRequestEvent *rq = &ev.xselectionrequest;
+            XSelectionEvent no;
+            memset(&no, 0, sizeof(no));
+            no.type = SelectionNotify;
+            no.display = dpy;
+            no.requestor = rq->requestor;
+            no.selection = rq->selection;
+            no.target = rq->target;
+            no.time = rq->time;
+            no.property = None;
+            if (rq->selection == xa_selection && drag_path[0] &&
+                (rq->target == xa_uri || rq->target == xa_plain)) {
+                char uri[PATH_MAX * 3 + 8];
+                path_to_uri(drag_path, uri, sizeof(uri) - 2);
+                strcat(uri, "\r\n");
+                XChangeProperty(dpy, rq->requestor, rq->property,
+                                rq->target, 8, PropModeReplace,
+                                (unsigned char *)uri, (int)strlen(uri));
+                no.property = rq->property;
+            }
+            XSendEvent(dpy, rq->requestor, False, NoEventMask, (XEvent *)&no);
+            break;
+        }
+
+        /* --- 受け取る側 ---------------------------------------------- */
+        case ClientMessage: {
+            Atom mt = ev.xclient.message_type;
+            if (mt == xa_enter) {
+                drop_src = (Window)ev.xclient.data.l[0];
+                drop_ok = 0;
+                /* 型が 3 個までなら l[2..4] に直接入っている。
+                 * それより多いときは XdndTypeList を読む。 */
+                if (ev.xclient.data.l[1] & 1) {
+                    Atom type; int fmt; unsigned long n, after;
+                    unsigned char *d = NULL;
+                    if (XGetWindowProperty(dpy, drop_src, xa_typelist, 0, 64,
+                                           False, XA_ATOM, &type, &fmt,
+                                           &n, &after, &d) == Success && d) {
+                        Atom *a = (Atom *)d;
+                        for (unsigned long k = 0; k < n; k++)
+                            if (a[k] == xa_uri) drop_ok = 1;
+                        XFree(d);
+                    }
+                } else {
+                    for (int k = 2; k <= 4; k++)
+                        if ((Atom)ev.xclient.data.l[k] == xa_uri) drop_ok = 1;
+                }
+            } else if (mt == xa_position) {
+                int rx = (int)(ev.xclient.data.l[2] >> 16);
+                int ry = (int)(ev.xclient.data.l[2] & 0xFFFF);
+                Window child;
+                XTranslateCoordinates(dpy, RootWindow(dpy, screen), win,
+                                      rx, ry, &drop_x, &drop_y, &child);
+                XClientMessageEvent st;
+                memset(&st, 0, sizeof(st));
+                st.type = ClientMessage; st.display = dpy;
+                st.window = (Window)ev.xclient.data.l[0];
+                st.message_type = xa_status; st.format = 32;
+                st.data.l[0] = (long)win;
+                st.data.l[1] = drop_ok ? 1 : 0;
+                st.data.l[2] = 0;          /* 窓の中どこでも同じ返事 */
+                st.data.l[3] = 0;
+                st.data.l[4] = drop_ok ? (long)xa_act_copy : 0;
+                XSendEvent(dpy, st.window, False, NoEventMask, (XEvent *)&st);
+            } else if (mt == xa_status) {
+                /* 渡す側への返事。l[1] の一番下の桁が「受け取る」。
+                 *
+                 * ここを書き忘れていて、相手が受け取ると言っているのに
+                 * こちらが聞いていなかった。drag_accepted が 0 のままなので、
+                 * 離したときに XdndDrop ではなく XdndLeave を送っていて、
+                 * **引きずれるのに何も起きない**という状態だった。 */
+                drag_accepted = (ev.xclient.data.l[1] & 1) ? 1 : 0;
+            } else if (mt == xa_leave) {
+                drop_src = None; drop_ok = 0;
+            } else if (mt == xa_drop) {
+                if (drop_ok) {
+                    XConvertSelection(dpy, xa_selection, xa_uri, xa_prop,
+                                      win, (Time)ev.xclient.data.l[2]);
+                } else {
+                    XClientMessageEvent fi;
+                    memset(&fi, 0, sizeof(fi));
+                    fi.type = ClientMessage; fi.display = dpy;
+                    fi.window = (Window)ev.xclient.data.l[0];
+                    fi.message_type = xa_finished; fi.format = 32;
+                    fi.data.l[0] = (long)win;
+                    XSendEvent(dpy, fi.window, False, NoEventMask,
+                               (XEvent *)&fi);
+                }
+            } else if ((Atom)ev.xclient.data.l[0] == a_wm_delete) {
+                goto quit;
+            }
+            break;
+        }
+
+        /* 求めた中身が届いた (受け取る側の最後の仕事) */
+        case SelectionNotify: {
+            if (ev.xselection.property == None) break;
+            Atom type; int fmt; unsigned long n, after;
+            unsigned char *d = NULL;
+            if (XGetWindowProperty(dpy, win, xa_prop, 0, 65536, True,
+                                   AnyPropertyType, &type, &fmt, &n, &after,
+                                   &d) == Success && d) {
+                char *txt = malloc(n + 1);
+                if (txt) {
+                    memcpy(txt, d, n);
+                    txt[n] = 0;
+                    drop_accept(txt);
+                    free(txt);
+                }
+                XFree(d);
+            }
+            if (drop_src != None) {
+                XClientMessageEvent fi;
+                memset(&fi, 0, sizeof(fi));
+                fi.type = ClientMessage; fi.display = dpy;
+                fi.window = drop_src;
+                fi.message_type = xa_finished; fi.format = 32;
+                fi.data.l[0] = (long)win;
+                fi.data.l[1] = 1;
+                fi.data.l[2] = (long)xa_act_copy;
+                XSendEvent(dpy, drop_src, False, NoEventMask, (XEvent *)&fi);
+                drop_src = None;
+            }
+            redraw();
+            break;
+        }
+
         default:
             break;
         }
     }
+quit:
+    XCloseDisplay(dpy);
     return 0;
 }
