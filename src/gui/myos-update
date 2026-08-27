@@ -649,6 +649,21 @@ apply-system)
     ( cd "$WORK" && sha256sum -c "$r.sha256" ) ||
         die "sha256 が合いません (壊れたものを展開するわけにいかない)"
 
+    # カーネルも一緒に取ってくる。
+    #
+    # 前はルートだけ入れ替えていて、カーネルは別の操作 (apply) だった。
+    # そのせいで「新しいルートと古いカーネル」という組み合わせが
+    # できてしまい、しかも入れ替えが 2 回に分かれるぶん、途中の
+    # 中途半端な状態が生まれる余地があった。まとめて 1 回でやる。
+    k="myos-kernel-$new.bzImage"
+    echo "取得中: $k"
+    curl -fL --max-time 900 -o "$WORK/$k"        "$base/$k" ||
+        die "カーネルを取れません"
+    curl -fsSL --max-time 60 -o "$WORK/$k.sha256" "$base/$k.sha256" ||
+        die "カーネルの sha256 を取れません"
+    ( cd "$WORK" && sha256sum -c "$k.sha256" ) ||
+        die "カーネルの sha256 が合いません"
+
     # 途中で転んでも、マウントを残したまま死なないようにする。
     # 残すと **次の apply-system が mkfs できなくなる** (実機で踏んだ)。
     # die は exit するので、これで拾える。
@@ -715,15 +730,56 @@ apply-system)
     # 「更新したら apt install が全部 候補:(なし) になった」になる。
     : > "$WORK/mnt/etc/myos/apt-refresh" 2>/dev/null || true
 
+    # GPU のファームウェアは **新しいルートのもの** で作る。
+    # 外す前にやること。外したあとでは中を見られない。
+    fw=""
+    if [ -x /usr/local/bin/myos-mkfwinit ]; then
+        echo "ファームウェアをまとめ中"
+        if /usr/local/bin/myos-mkfwinit "$WORK/mnt" "$WORK/fw.cpio.gz" \
+                > /var/log/myos-fwinit.log 2>&1; then
+            fw="--initrd $WORK/fw.cpio.gz"
+        fi
+        cat /var/log/myos-fwinit.log
+        [ -n "$fw" ] && [ -s "$WORK/fw.cpio.gz" ] || die \
+"ファームウェアの initramfs を作れませんでした (/var/log/myos-fwinit.log)。
+このまま書くと、次の起動で画面が真っ暗になります。
+起動先は今までのままにしてあります。"
+    fi
+
     sync
     umount "$WORK/sq"; umount "$WORK/mnt"
 
-    echo "起動先を切り替え中"
-    /usr/local/bin/myos-writeboot --switch-root "$target" "$disk" ||
+    # NVIDIA の公式ドライバを入れてある機械は、先に nouveau を戻す。
+    # カーネルが変わるとモジュールが読み込めなくなるので、
+    # nouveau.modeset=0 が残っていると次の起動で画面を持つ者が
+    # 居なくなる。
+    if [ -f /etc/myos/nvidia.conf ] &&
+       grep -q '^run[[:space:]]*=[[:space:]]*[^[:space:]]' \
+            /etc/myos/nvidia.conf 2>/dev/null; then
+        echo "NVIDIA のドライバが入っているので、いったん nouveau に戻します"
+        "$WRITEBOOT" --cmdline-del nouveau.modeset "$disk" || true
+        nvidia_was=1
+    else
+        nvidia_was=0
+    fi
+
+    # カーネル・ファームウェア・起動先を **1 回で** 書く。
+    #
+    # --keep-cmdline は手で足した設定 (解像度など) を引き継ぎ、
+    # root= だけ $target に差し替える。1 回で済むので、控え (LBA 21) に
+    # 残るのは「入れ替える前の状態そのもの」になる。**R を押せば
+    # 古いカーネルと古いルートの組み合わせに丸ごと戻る。**
+    echo "書き込み中 (使っていないほうの置き場へ)"
+    # shellcheck disable=SC2086
+    "$WRITEBOOT" --kernel "$WORK/$k" $fw --keep-cmdline \
+        "$disk" "$target" "$bootlba" ||
         die "切り替えに失敗しました (展開したものは残っていますが、起動先は今までのままです)"
 
+    conf_set kernel "$new"
+
     rm -rf "$WORK"
-    echo "myos-update: $cur -> $new。再起動すると新しいほうで立ちます。"
+    echo "myos-update: $cur -> $new (カーネルも一緒に入れ替えました)。"
+    echo "myos-update: 再起動すると新しいほうで立ちます。"
     echo "myos-update: 動かなかったら、起動中に R を押しっぱなしにすると"
     echo "myos-update: 前のほうで立ちます。自分のファイル (/home) は"
     echo "myos-update: どちらでも同じものが見えます。"
@@ -732,6 +788,15 @@ apply-system)
     # 1.5.x で入れたものは全部この状態になっている (原因は
     # myos-mkfwinit の頭のコメント)。ルートを入れ替えても、生領域は
     # 触っていないので直らない。直す口は用意してあるので案内する。
+    if [ "$nvidia_was" = "1" ]; then
+        echo
+        echo "myos-update: NVIDIA のドライバはカーネルに合わせて作った"
+        echo "myos-update: ものなので、いまのままでは読み込めません。"
+        echo "myos-update: nouveau に戻してあるので画面は出ます。"
+        echo "myos-update: 再起動したあと、こうすると入れ直せます:"
+        echo "myos-update:     sudo myos-nvidia setup"
+        echo "myos-update:     sudo myos-nvidia install <前と同じ .run>"
+    fi
     if ! /usr/local/bin/myos-writeboot --info "$disk" 2>/dev/null |
          grep -q "initramfs    : LBA"; then
         echo

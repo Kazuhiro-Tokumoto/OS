@@ -508,11 +508,29 @@ def main():
     # カーネルだけ入れ替えるとき、いま動いているコマンドラインを
     # 引き継ぎたいことがある (解像度の希望や、手で足した設定が
     # 消えると困る)。--keep-cmdline でそうする。
+    #
+    # ただし root= だけは引数のほうを使う。
+    #
+    # 前は前のコマンドラインを丸ごと持ってきていて、**引数の rootdev を
+    # 無視していた**。おかげでカーネルとルートを一度に入れ替えられず、
+    #   1. --kernel --keep-cmdline でカーネルを書く
+    #   2. --switch-root でルートを差し替える
+    # と 2 回に分ける必要があった。2 回書くと、控え (LBA 21) に残るのは
+    # 1 回目の途中の状態になり、R で戻ったときの行き先が中途半端になる。
+    #
+    # 「引き継ぐのは手で足した設定、root= は言われたとおり」にすれば、
+    # カーネル・initramfs・ルートを **1 回の書き込み** で入れ替えられる。
+    # カーネルだけ更新する場合は、呼ぶ側が今のルートを渡すので何も変わらない。
     old_tbl = read_table(disk, PTBL_LBA)
     if keep_cmdline and old_tbl:
         prev = bytes(old_tbl[CMDLINE_OFF:0x1F0]).split(b"\0")[0]
         if prev:
-            cmdline = prev.decode("ascii", "replace")
+            kept = prev.decode("ascii", "replace")
+            if "root=" in kept:
+                kept = re.sub(r"root=\S+", f"root={rootdev}", kept)
+            else:
+                kept = f"{kept} root={rootdev}"
+            cmdline = kept
 
     cmd = cmdline.encode("ascii", "replace")
     if len(cmd) >= CMDLINE_MAX:
